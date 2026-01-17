@@ -1,7 +1,7 @@
 module Model
 
 using ..Sampler
-using ..VMC 
+using ..VMC
 
 # import ..VMC: local_energy
 
@@ -12,25 +12,31 @@ export HeisenbergModel, HubbardModel, local_energy
 # 1. Heisenberg Model
 # ==============================================================================
 struct HeisenbergModel
-    lx::Int; ly::Int; Nlat::Int
-    J1::Float64; J2::Float64
+    lx::Int
+    ly::Int
+    Nlat::Int
+    J1::Float64
+    J2::Float64
     J1_bonds::Vector{Tuple{Int,Int}}
     J2_bonds::Vector{Tuple{Int,Int}}
 end
 
 function HeisenbergModel(Nlat::Int; model_params=Dict{Symbol,Any}())
     lx = get(model_params, :lx, floor(Int, sqrt(Nlat)))
-    ly = get(model_params, :ly, floor(Int, Nlat/lx))
+    ly = get(model_params, :ly, floor(Int, Nlat / lx))
     J1 = get(model_params, :J1, 1.0)
     J2 = get(model_params, :J2, 0.0)
-    
-    bonds1 = Tuple{Int,Int}[]; bonds2 = Tuple{Int,Int}[]
-    idx(x, y) = mod(x-1, lx)*ly + mod(y-1, ly) + 1
+
+    bonds1 = Tuple{Int,Int}[]
+    bonds2 = Tuple{Int,Int}[]
+    idx(x, y) = mod(x - 1, lx) * ly + mod(y - 1, ly) + 1
     for y in 1:ly, x in 1:lx
         u = idx(x, y)
-        push!(bonds1, (u, idx(x+1, y))); push!(bonds1, (u, idx(x, y+1)))
+        push!(bonds1, (u, idx(x + 1, y)))
+        push!(bonds1, (u, idx(x, y + 1)))
         if J2 != 0
-            push!(bonds2, (u, idx(x+1, y+1))); push!(bonds2, (u, idx(x-1, y+1)))
+            push!(bonds2, (u, idx(x + 1, y + 1)))
+            push!(bonds2, (u, idx(x - 1, y + 1)))
         end
     end
     return HeisenbergModel(lx, ly, Nlat, J1, J2, bonds1, bonds2)
@@ -73,15 +79,16 @@ end
 
 function HubbardModel(Nlat::Int; t=1.0, U=4.0, lx=nothing)
     lx = isnothing(lx) ? floor(Int, sqrt(Nlat)) : lx
-    ly = floor(Int, Nlat/lx)
-    
+    ly = floor(Int, Nlat / lx)
+
     bonds = Tuple{Int,Int}[]
     # idx(x, y) = mod(y-1, ly)*lx + mod(x-1, lx) + 1
     # idx(x, y) = mod(y-1, ly)*lx + mod(x-1, lx) + 1
-    idx(x, y) = mod(x-1, lx)*ly + mod(y-1, ly) + 1
+    idx(x, y) = mod(x - 1, lx) * ly + mod(y - 1, ly) + 1
     for y in 1:ly, x in 1:lx
         u = idx(x, y)
-        push!(bonds, (u, idx(x+1, y))); push!(bonds, (u, idx(x, y+1)))
+        push!(bonds, (u, idx(x + 1, y)))
+        push!(bonds, (u, idx(x, y + 1)))
     end
     return HubbardModel(Nlat, t, U, bonds)
 end
@@ -91,26 +98,68 @@ end
 # 重载接口
 function local_energy(ham::HubbardModel, vwf)
     ss = vwf.sampler
-    
+
     # 1. Potential Energy: U * sum n_up * n_dn
     # 直接读取 Sampler 维护的双占计数，O(1) 复杂度
     E_pot = ham.U * ss.count_dbs
-    
+
     # 2. Kinetic Energy: -t * sum c^dag_i c_j + h.c.
     E_kin = 0.0
     for (i, j) in ham.hoppings
         # Spin UP hoppings
         # measure_green(i, j) = <c^dag_i c_j>
-        t_ij_up = measure_green(vwf, i, j, UP) 
+        t_ij_up = measure_green(vwf, i, j, UP)
         t_ji_up = measure_green(vwf, j, i, UP) # h.c.
-        
+
         # Spin DN hoppings
         t_ij_dn = measure_green(vwf, i, j, DN)
         t_ji_dn = measure_green(vwf, j, i, DN) # h.c.
-        
+
         E_kin += -ham.t * real(t_ij_up + t_ji_up + t_ij_dn + t_ji_dn)
     end
-    
+
+    return E_kin + E_pot
+end
+
+# ==============================================================================
+# 3. General Model
+# ==============================================================================
+struct GeneralModel
+    Nsite::Int
+    #static代表哈密顿量，其定义参考quspin,其中Symbol代表某一项的类型。
+    #Tuple{Int,Int,Int}第一个Float代表耦合强度，后面两个Int代表site index（从1开始）
+    static::Vector{Tuple{Symbol,Vector{Tuple{Float,Int,Int}}}}
+end
+
+function GeneralModel(Nsite::Int, static::Vector{Tuple{Symbol,Vector{Tuple{Float,Int,Int}}}})
+    return GeneralModel(Nsite, static)
+end
+
+# --- General Implementation ---
+
+# 重载接口
+function local_energy(ham::GeneralModel, vwf)
+    ss = vwf.sampler
+
+    # 1. Potential Energy: U * sum n_up * n_dn
+    # 直接读取 Sampler 维护的双占计数，O(1) 复杂度
+    E_pot = ham.U * ss.count_dbs
+
+    # 2. Kinetic Energy: -t * sum c^dag_i c_j + h.c.
+    E_kin = 0.0
+    for (i, j) in ham.hoppings
+        # Spin UP hoppings
+        # measure_green(i, j) = <c^dag_i c_j>
+        t_ij_up = measure_green(vwf, i, j, UP)
+        t_ji_up = measure_green(vwf, j, i, UP) # h.c.
+
+        # Spin DN hoppings
+        t_ij_dn = measure_green(vwf, i, j, DN)
+        t_ji_dn = measure_green(vwf, j, i, DN) # h.c.
+
+        E_kin += -ham.t * real(t_ij_up + t_ji_up + t_ij_dn + t_ji_dn)
+    end
+
     return E_kin + E_pot
 end
 
