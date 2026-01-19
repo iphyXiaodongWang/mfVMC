@@ -22,7 +22,7 @@ export count_choices, count_choices_reserve
 include("Utils.jl")
 using .Utils
 using .Utils
-export compute_eig_and_dU_reg1, expand_spatial_to_spinful
+export compute_eig_and_dU_reg1, expand_spatial_to_spinful, add_term_ij_PH
 
 # 导出 VMC 模块的内容0
 include("vmc_det.jl") # 确保这个文件包含更新后的代码
@@ -40,13 +40,13 @@ using .Model
 export HeisenbergModel, HubbardModel, local_energy
 
 include("MPI_VMC_Utils.jl")
-using .MPI_VMC_Utils  
+using .MPI_VMC_Utils
 
 export MPISession, init_mpi_session
 export ObservableBuffer, register_scalar!, register_vector!, register_matrix!
 export reset_buffers!, increment_counter!, accumulate_sample!, accumulate_sr_matrix!
-export record_scalar! 
-export mpi_reduce_all, mpi_gather_scalar 
+export record_scalar!
+export mpi_reduce_all, mpi_gather_scalar
 
 include("Driver.jl")
 using .Driver

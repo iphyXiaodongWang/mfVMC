@@ -128,10 +128,10 @@ struct GeneralModel
     Nsite::Int
     #static代表哈密顿量，其定义参考quspin,其中Symbol代表某一项的类型。
     #Tuple{Int,Int,Int}第一个Float代表耦合强度，后面两个Int代表site index（从1开始）
-    static::Vector{Tuple{Symbol,Vector{Tuple{Float,Int,Int}}}}
+    static::Vector{Tuple{Symbol,Vector{Tuple{Float64,Int,Int}}}}
 end
 
-function GeneralModel(Nsite::Int, static::Vector{Tuple{Symbol,Vector{Tuple{Float,Int,Int}}}})
+function GeneralModel(Nsite::Int, static::Vector{Tuple{Symbol,Vector{Tuple{Float64,Int,Int}}}})
     return GeneralModel(Nsite, static)
 end
 
