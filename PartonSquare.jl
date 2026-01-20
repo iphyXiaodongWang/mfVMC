@@ -124,12 +124,11 @@ function build_ham_PH(p::HeisenbergParams)
     etad1 = p.etad1
     etas1 = p.etas1
     mz = p.mz
-
     H = zeros(Float64, 2 * Nlat, 2 * Nlat)
     for x in 1:Lx
         for y in 1:Ly
             id0 = xy_to_idx(x, y, Ly)
-
+            Q = (-1)^(x + y)
             # --- Y 方向 ---
             idy = (y == Ly) ? xy_to_idx(x, 1, Ly) : xy_to_idx(x, y + 1, Ly)
             bc_y = (y == Ly) ? p.bcy : 1.0
@@ -138,8 +137,8 @@ function build_ham_PH(p::HeisenbergParams)
             bc_x = (x == Lx) ? p.bcx : 1.0
             add_term_ij_PH(H, id0, idx, chi1 * bc_x, (+etas1 - etad1) * bc_x)
             add_term_ij_PH(H, id0, idy, chi1 * bc_y, (etas1 + etad1) * bc_y)
-            H[2*(id0-1)+1, 2*(id0-1)+1] += mz / 2
-            H[2*(id0-1)+2, 2*(id0-1)+2] += mz / 2
+            H[2*(id0-1)+1, 2*(id0-1)+1] += Q * mz / 2
+            H[2*(id0-1)+2, 2*(id0-1)+2] += Q * mz / 2
         end
     end
 
@@ -164,8 +163,8 @@ function make_ansatz_and_derivs(p::HeisenbergParams; para_names::Vector{Symbol}=
     n_occ = Nlat + target_sz
     println("ε is", ε[n_occ-4:n_occ+4])
     U_occ = U_full[:, 1:n_occ]
-    dU_occ = OrderedDict(alpha => real.(dU_dict[alpha][:, 1:n_occ]) for alpha in para_names)
-    return ε, U_occ, dU_occ
+    dUt_occ = OrderedDict(alpha => permutedims(real.(dU_dict[alpha][:, 1:n_occ])) for alpha in para_names)
+    return ε, U_occ, dUt_occ
 end
 end
 

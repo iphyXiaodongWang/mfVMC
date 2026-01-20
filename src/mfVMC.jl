@@ -8,6 +8,7 @@ using .Sampler
 
 # ... existing exports ...
 export config_Hubbard, config_Heisenberg, MoveProposal, copy_config
+export total_elec, ifPH
 export init_config_Heisenberg!, initialize_lists!, init_config_Hubbard!, init_config_by_state_char, init_config_rand!
 export propose_move, commit_move!, update_site_config!
 export build_exchange, build_single_hop, build_spin_flip, build_spin_flip_hop, build_double_spin_flip

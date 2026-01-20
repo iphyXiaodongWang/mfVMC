@@ -131,9 +131,9 @@ struct GeneralModel
     static::Vector{Tuple{Symbol,Vector{Tuple{Float64,Int,Int}}}}
 end
 
-function GeneralModel(Nsite::Int, static::Vector{Tuple{Symbol,Vector{Tuple{Float64,Int,Int}}}})
+#= function GeneralModel(Nsite::Int, static::Vector{Tuple{Symbol,Vector{Tuple{Float64,Int,Int}}}})
     return GeneralModel(Nsite, static)
-end
+end =#
 
 # --- General Implementation ---
 
