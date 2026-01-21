@@ -146,8 +146,11 @@ function main()
         push!(bonds1, (u, idx(x + 1, y)))
         push!(bonds1, (u, idx(x, y + 1)))
     end
-    static = [(:SS, [(1.0, i, j) for (i, j) in bonds1])]
-    ham = GeneralModel(N_sites, static)
+    terms = OperatorTerm[]
+    for (i, j) in bonds1
+        push!(terms, OperatorTerm([:SS], [i, j], 1.0))
+    end
+    ham = GeneralModel(N_sites, terms)
     #检查target_sz的parity
     @assert (target_sz + N_sites) % 2 == 0 "Wrong parity!"
     sampler = config_Heisenberg(N_sites, (N_sites + target_sz) ÷ 2; ifPH=true)

@@ -39,7 +39,7 @@ export get_Sz, get_Hole, get_Doublon
 # 导出 Model 模块的内容
 include("Model.jl")
 using .Model
-export HeisenbergModel, HubbardModel, GeneralModel, local_energy
+export HeisenbergModel, HubbardModel, GeneralModel, OperatorTerm, local_energy
 
 include("MPI_VMC_Utils.jl")
 using .MPI_VMC_Utils
