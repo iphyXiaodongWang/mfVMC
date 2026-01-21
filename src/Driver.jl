@@ -266,6 +266,7 @@ function run_sr_optimization(model, vwf, kernel,
 
     # --- Optimization Loop ---
     for step in 1:sr_params.n_steps
+        step_start_time = time()
 
         # 1. Sync Parameters
         current_params = MPI.bcast(current_params, session.root, session.comm)
@@ -344,6 +345,11 @@ function run_sr_optimization(model, vwf, kernel,
                 writedlm(io, permutedims(row))
             end
             flush(stdout)
+        end
+
+        if is_root
+            step_elapsed = time() - step_start_time
+            @printf("Step %3d | SR loop time: %.2f s\n", step, step_elapsed)
         end
     end
 

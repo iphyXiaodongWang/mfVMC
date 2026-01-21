@@ -4,6 +4,7 @@ push!(LOAD_PATH, "./src/")
 using LinearAlgebra
 using OrderedCollections
 using Utils
+using MPI
 
 export U1SFlux, make_ansatz_and_derivs
 
@@ -28,6 +29,18 @@ end
 
 function U1SFluxParams(; Lx=4, Ly=4, t=-1.0, phi=0.1, bcx=1.0, bcy=1.0)
     return U1SFluxParams(Lx, Ly, t, phi, bcx, bcy)
+end
+
+"""
+    is_root_rank()
+
+判断当前 MPI rank 是否为 0. 如果 MPI 未初始化, 视为单进程返回 true.
+"""
+function is_root_rank()
+    if !MPI.Initialized()
+        return true
+    end
+    return MPI.Comm_rank(MPI.COMM_WORLD) == 0
 end
 
 
@@ -82,11 +95,15 @@ function make_ansatz_and_derivs(p::U1SFluxParams)
     ε, U_full, dE, dU_dict = Utils.compute_eig_and_dU_reg1(Matrix(H), H_alphas)
 
     eig_eq_error = norm(Matrix(H) * U_full - U_full * Diagonal(ε))
-    println("Eigen equation error (HU - Uε): ", eig_eq_error)
+    if is_root_rank()
+        println("Eigen equation error (HU - Uε): ", eig_eq_error)
+    end
 
     # 3. 截取占据态 (Half-filling)
     n_occ = Nlat ÷ 2
-    println("ε is", ε[n_occ-4:n_occ+4])
+    if is_root_rank()
+        println("ε is", ε[n_occ-4:n_occ+4])
+    end
     U_occ = U_full[:, 1:n_occ]
     dU_occ = dU_dict[:phi][:, 1:n_occ]
 
@@ -156,12 +173,16 @@ function make_ansatz_and_derivs(p::HeisenbergParams; para_names::Vector{Symbol}=
     # 2. 对角化并计算导数 (Utils)
     ε, U_full, dE, dU_dict = Utils.compute_eig_and_dU_reg1(H, H_alphas)
     eig_eq_error = norm(Matrix(H) * U_full - U_full * Diagonal(ε))
-    println("Eigen equation error (HU - Uε): ", eig_eq_error)
+    if is_root_rank()
+        println("Eigen equation error (HU - Uε): ", eig_eq_error)
+    end
     #做了PH变换后粒子数不再守恒，守恒的只有total Sz，根据输入的target_sz截取
     # 3. 截取占据态并封装
     Nlat = p.Lx * p.Ly
     n_occ = Nlat + target_sz
-    println("ε is", ε[n_occ-4:n_occ+4])
+    if is_root_rank()
+        println("ε is", ε[n_occ-4:n_occ+4])
+    end
     U_occ = U_full[:, 1:n_occ]
     dUt_occ = OrderedDict(alpha => permutedims(real.(dU_dict[alpha][:, 1:n_occ])) for alpha in para_names)
     return ε, U_occ, dUt_occ
