@@ -18,6 +18,7 @@ export check_consistency, print_config_debug, print_config, print_state
 export HOLE, UP, DN, DB
 export AbstractMCMCKernel, HubbardKernel, HeisenbergKernel
 export count_choices, count_choices_reserve
+export has_up, has_dn
 
 # ------------------
 include("Utils.jl")
@@ -38,7 +39,7 @@ export get_Sz, get_Hole, get_Doublon
 # 导出 Model 模块的内容
 include("Model.jl")
 using .Model
-export HeisenbergModel, HubbardModel, local_energy
+export HeisenbergModel, HubbardModel, GeneralModel, local_energy
 
 include("MPI_VMC_Utils.jl")
 using .MPI_VMC_Utils

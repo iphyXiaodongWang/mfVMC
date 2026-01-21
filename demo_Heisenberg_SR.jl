@@ -136,8 +136,18 @@ function main()
     # ---------------------------------------------------------
 
     # B. 模型与波函数初始化
-    model_params = Dict(:lx => LX, :ly => LY, :J1 => 1.0, :J2 => 0.0)
-    ham = HeisenbergModel(N_sites; model_params=model_params)
+    #= model_params = Dict(:lx => LX, :ly => LY, :J1 => 1.0, :J2 => 0.0)
+    ham = HeisenbergModel(N_sites; model_params=model_params) =#
+    #GeneralModel定义
+    bonds1 = Tuple{Int,Int}[]
+    idx(x, y) = mod(x - 1, LX) * LY + mod(y - 1, LY) + 1
+    for y in 1:LY, x in 1:LX
+        u = idx(x, y)
+        push!(bonds1, (u, idx(x + 1, y)))
+        push!(bonds1, (u, idx(x, y + 1)))
+    end
+    static = [(:SS, [(1.0, i, j) for (i, j) in bonds1])]
+    ham = GeneralModel(N_sites, static)
     #检查target_sz的parity
     @assert (target_sz + N_sites) % 2 == 0 "Wrong parity!"
     sampler = config_Heisenberg(N_sites, (N_sites + target_sz) ÷ 2; ifPH=true)

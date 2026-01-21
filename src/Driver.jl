@@ -260,7 +260,7 @@ function run_sr_optimization(model, vwf, kernel,
 
         open(log_file, "w") do io
             # 使用 join 确保表头格式工整
-            println(io, "# " * join(headers, "\t"))
+            println(io, "# " * join(headers, "\t\t"))
         end
     end
 

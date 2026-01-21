@@ -5,7 +5,7 @@ using ..VMC
 
 # import ..VMC: local_energy
 
-export HeisenbergModel, HubbardModel, local_energy
+export HeisenbergModel, HubbardModel, GeneralModel, local_energy
 
 
 # ==============================================================================
@@ -130,37 +130,46 @@ struct GeneralModel
     #Tuple{Int,Int,Int}第一个Float代表耦合强度，后面两个Int代表site index（从1开始）
     static::Vector{Tuple{Symbol,Vector{Tuple{Float64,Int,Int}}}}
 end
-
-#= function GeneralModel(Nsite::Int, static::Vector{Tuple{Symbol,Vector{Tuple{Float64,Int,Int}}}})
-    return GeneralModel(Nsite, static)
-end =#
-
+"""支持的Symbol以及其对应term的形式
+:SS S⋅S  Heisenberg term
+:cdc c†c  hopping & on site term
+:nund n_↑ n_↓ Hubbard term
+"""
 # --- General Implementation ---
-
+function term_energy(term::Symbol, strength::Vector{Tuple{Float64,Int,Int}}, vwf)
+    return term_energy(Val(term), strength, vwf)
+end
+function term_energy(::Val{:SS}, strength::Vector{Tuple{Float64,Int,Int}}, vwf)
+    E = 0.0
+    for (J, i, j) in strength
+        E += J * measure_SiSj(vwf, i, j)
+    end
+    return E
+end
+#= function term_energy(::Val{:cdc}, strength::Vector{Tuple{Float64,Int,Int}}, vwf)
+    E = 0.0
+    for (t, i, j) in strength
+        E += t * measure_SiSj(vwf, i, j)
+    end
+    return E
+end =#
+function term_energy(::Val{:nund}, strength::Vector{Tuple{Float64,Int,Int}}, vwf)
+    E = 0.0
+    for (U, i, j) in strength
+        niu = has_up(vwf.sampler.state[i]) ? 1.0 : 0.0
+        njd = has_dn(vwf.sampler.state[j]) ? 1.0 : 0.0
+        E += U * niu * njd
+    end
+    return E
+end
 # 重载接口
 function local_energy(ham::GeneralModel, vwf)
     ss = vwf.sampler
-
-    # 1. Potential Energy: U * sum n_up * n_dn
-    # 直接读取 Sampler 维护的双占计数，O(1) 复杂度
-    E_pot = ham.U * ss.count_dbs
-
-    # 2. Kinetic Energy: -t * sum c^dag_i c_j + h.c.
-    E_kin = 0.0
-    for (i, j) in ham.hoppings
-        # Spin UP hoppings
-        # measure_green(i, j) = <c^dag_i c_j>
-        t_ij_up = measure_green(vwf, i, j, UP)
-        t_ji_up = measure_green(vwf, j, i, UP) # h.c.
-
-        # Spin DN hoppings
-        t_ij_dn = measure_green(vwf, i, j, DN)
-        t_ji_dn = measure_green(vwf, j, i, DN) # h.c.
-
-        E_kin += -ham.t * real(t_ij_up + t_ji_up + t_ij_dn + t_ji_dn)
+    E = 0.0
+    for (term, strength) in ham.static
+        E += term_energy(term, strength, vwf)
     end
-
-    return E_kin + E_pot
+    return E
 end
 
 end # module

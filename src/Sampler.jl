@@ -13,6 +13,7 @@ export get_state_char
 export check_consistency, print_config_debug, test_spin_flip_hop, test_config_calculation, print_config
 export HOLE, UP, DN, DB
 export AbstractMCMCKernel, HubbardKernel, HeisenbergKernel
+export has_up, has_dn
 
 const HOLE = Int8(0) # 00
 const UP = Int8(1) # 01
