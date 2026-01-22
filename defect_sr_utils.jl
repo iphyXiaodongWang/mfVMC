@@ -102,6 +102,14 @@ function parse_commandline()
         help = "random seed"
         arg_type = Int
         default = 5423
+        "--nSR"
+        help = "total steps for SR"
+        arg_type = Int
+        default = 50
+        "--lr"
+        help = "SR learn rate"
+        arg_type = Float64
+        default = 0.04
     end
 
     return parse_args(s)

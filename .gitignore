@@ -1,2 +1,4 @@
 logs/
 *.md
+.juliaup
+test/

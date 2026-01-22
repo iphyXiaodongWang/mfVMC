@@ -45,6 +45,8 @@ function main()
     r_mc = args["rMC"]
     d_mc = 1
     seed = args["seed"]
+    n_steps = args["nSR"]
+    lr = args["lr"]
 
     n_sites_full = lx * ly
     defect_positions = if defect_ansatz == "FPS"
@@ -88,7 +90,7 @@ function main()
         decorr_steps=d_mc,
         seed=seed + rank
     )
-    sr_params = SRParams(vmc_params=meas_params)
+    sr_params = SRParams(vmc_params=meas_params, n_steps=n_steps, lr=lr)
 
     if rank == 0
         println("Initial parameters: $init_params")
