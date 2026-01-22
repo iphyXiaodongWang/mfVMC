@@ -47,6 +47,7 @@ function main()
     seed = args["seed"]
     n_steps = args["nSR"]
     lr = args["lr"]
+    init_params_json = args["init_params_json"]
 
     n_sites_full = lx * ly
     defect_positions = if defect_ansatz == "FPS"
@@ -82,6 +83,12 @@ function main()
     kernel = HeisenbergKernel(conserve_sz=true)
 
     param_names, init_params = build_defect_param_names_and_init_params(lx, ly, defect_positions, args)
+    if !isempty(init_params_json)
+        init_params = build_init_params_from_json(init_params_json, param_names)
+        if rank == 0
+            println("Loaded initial parameters from json: $(init_params_json)")
+        end
+    end
 
     meas_params = VMCParams(
         total_samples=n_mc,

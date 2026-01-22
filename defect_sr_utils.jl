@@ -1,3 +1,5 @@
+using JSON
+
 function parse_commandline()
     s = ArgParseSettings()
 
@@ -110,9 +112,81 @@ function parse_commandline()
         help = "SR learn rate"
         arg_type = Float64
         default = 0.04
+        "--init_params_json"
+        help = "Path to json file that provides initial parameters"
+        arg_type = String
+        default = ""
     end
 
     return parse_args(s)
+end
+
+"""
+    read_params_from_json(file_path::AbstractString) -> Dict{String, Float64}
+
+用途: 读取包含参数键值对的 json 文件, 返回参数字典.
+参数:
+- file_path::AbstractString, json 文件路径, 格式形如 {"param": 0.1, ...}.
+返回:
+- Dict{String, Float64}, 参数名到数值的映射.
+"""
+function read_params_from_json(file_path::AbstractString)::Dict{String, Float64}
+    if !isfile(file_path)
+        error("JSON file not found: $(file_path)")
+    end
+
+    raw_dict = JSON.parsefile(file_path)
+    param_dict = Dict{String, Float64}()
+
+    for (key, value) in raw_dict
+        if !(value isa Number)
+            error("Invalid value for key $(key) in json: $(value)")
+        end
+        param_dict[String(key)] = Float64(value)
+    end
+
+    if isempty(param_dict)
+        error("No valid key-value pairs found in json: $(file_path)")
+    end
+
+    return param_dict
+end
+
+"""
+    build_init_params_from_json(
+        json_path::AbstractString,
+        param_names::Vector{Symbol}
+    ) -> Vector{Float64}
+
+用途: 根据参数名顺序从 json 文件构造初始参数列表.
+参数:
+- json_path::AbstractString, json 文件路径.
+- param_names::Vector{Symbol}, 参数名列表.
+返回:
+- Vector{Float64}, 按 param_names 顺序排列的参数数值.
+"""
+function build_init_params_from_json(
+    json_path::AbstractString,
+    param_names::Vector{Symbol}
+)::Vector{Float64}
+    param_dict = read_params_from_json(json_path)
+    init_params = Float64[]
+    missing_keys = String[]
+
+    for name in param_names
+        key = String(name)
+        if haskey(param_dict, key)
+            push!(init_params, param_dict[key])
+        else
+            push!(missing_keys, key)
+        end
+    end
+
+    if !isempty(missing_keys)
+        error("Missing parameters in json: $(join(missing_keys, ", "))")
+    end
+
+    return init_params
 end
 
 """
