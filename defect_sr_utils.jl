@@ -116,6 +116,10 @@ function parse_commandline()
         help = "Path to json file that provides initial parameters"
         arg_type = String
         default = ""
+        "--job"
+        help = "Job to be done. Can be SR and measure"
+        arg_type = String
+        default = "SR"
     end
 
     return parse_args(s)
@@ -130,13 +134,13 @@ end
 返回:
 - Dict{String, Float64}, 参数名到数值的映射.
 """
-function read_params_from_json(file_path::AbstractString)::Dict{String, Float64}
+function read_params_from_json(file_path::AbstractString)::Dict{String,Float64}
     if !isfile(file_path)
         error("JSON file not found: $(file_path)")
     end
 
     raw_dict = JSON.parsefile(file_path)
-    param_dict = Dict{String, Float64}()
+    param_dict = Dict{String,Float64}()
 
     for (key, value) in raw_dict
         if !(value isa Number)

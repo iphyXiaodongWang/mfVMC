@@ -48,6 +48,7 @@ function main()
     n_steps = args["nSR"]
     lr = args["lr"]
     init_params_json = args["init_params_json"]
+    job = args["job"]
 
     n_sites_full = lx * ly
     defect_positions = if defect_ansatz == "FPS"
@@ -90,6 +91,10 @@ function main()
         end
     end
 
+    if rank == 0
+        println("Initial parameters: $init_params")
+    end
+
     meas_params = VMCParams(
         total_samples=n_mc,
         warmup_steps=w_mc,
@@ -97,12 +102,6 @@ function main()
         decorr_steps=d_mc,
         seed=seed + rank
     )
-    sr_params = SRParams(vmc_params=meas_params, n_steps=n_steps, lr=lr)
-
-    if rank == 0
-        println("Initial parameters: $init_params")
-    end
-
     update_defect_ansatz!(
         vwf,
         param_names,
@@ -116,30 +115,37 @@ function main()
         defect_index,
         target_sz
     )
-    update_vwf_func! = (vwf, params) -> update_defect_ansatz!(
-        vwf,
-        param_names,
-        params,
-        lx,
-        ly,
-        bcx,
-        bcy,
-        args["chi1"],
-        defect_positions,
-        defect_index,
-        target_sz
-    )
+    if job == "SR"
+        sr_params = SRParams(vmc_params=meas_params, n_steps=n_steps, lr=lr)
 
-    run_sr_optimization(
-        ham,
-        vwf,
-        kernel,
-        init_params,
-        update_vwf_func!,
-        sr_params;
-        log_file="logs/sr_defect_history.txt",
-        param_names=param_names
-    )
+        update_vwf_func! = (vwf, params) -> update_defect_ansatz!(
+            vwf,
+            param_names,
+            params,
+            lx,
+            ly,
+            bcx,
+            bcy,
+            args["chi1"],
+            defect_positions,
+            defect_index,
+            target_sz
+        )
+
+        run_sr_optimization(
+            ham,
+            vwf,
+            kernel,
+            init_params,
+            update_vwf_func!,
+            sr_params;
+            log_file="logs/sr_defect_history.txt",
+            param_names=param_names
+        )
+    elseif job == "measure"
+        observables = defination_observabels()
+        run_simulation(ham, vwf, kernel, observables, meas_params)
+    end
 end
 
 main()
