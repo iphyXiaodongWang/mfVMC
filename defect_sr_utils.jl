@@ -539,6 +539,40 @@ function total_Sz_est(model, vwf)
     return measure_total_Sz(vwf)
 end
 
+"""
+    defination_observabels(n_sites::Int) -> Dict{Symbol,Function}
+
+用途: 构造用于 run_simulation 的观测量字典.
+参数:
+- n_sites::Int, 总格点数.
+返回:
+- Dict{Symbol,Function}, Key 为观测量名称, Value 为匿名函数 (model, vwf) -> Number.
+说明:
+- 能量: :E, 使用 local_energy(model, vwf).
+- 每点 Sz: :Sz_i, 使用 get_Sz(vwf.sampler.state[i]).
+- 关联函数: :SS_i_j (i < j), 使用 measure_SiSj(vwf, i, j).
+- 公式: S_i·S_j = Sz_i*Sz_j + 1/2*(S+_i S-_j + S-_i S+_j).
+"""
+function defination_observabels(n_sites::Int)::Dict{Symbol,Function}
+    observables = Dict{Symbol,Function}()
+
+    observables[:E] = (model, vwf) -> local_energy(model, vwf)
+
+    for i in 1:n_sites
+        key = Symbol("Sz_$(i)")
+        observables[key] = (model, vwf) -> get_Sz(vwf.sampler.state[i])
+    end
+
+    for i in 1:n_sites
+        for j in (i + 1):n_sites
+            key = Symbol("SS_$(i)_$(j)")
+            observables[key] = (model, vwf) -> measure_SiSj(vwf, i, j)
+        end
+    end
+
+    return observables
+end
+
 # ==============================================================================
 # 3. 辅助函数
 # ==============================================================================

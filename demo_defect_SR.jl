@@ -5,6 +5,7 @@ using DelimitedFiles
 using LinearAlgebra
 using Statistics
 using ArgParse
+using JSON
 # using FFWT
 
 # === 1. 环境设置 ===
@@ -26,6 +27,7 @@ function main()
 
     session = init_mpi_session()
     rank = session.rank
+    is_root = (rank == session.root)
 
     # ---------------------------------------------------------
     # A. 参数设定 (全部集中在这里)
@@ -86,12 +88,12 @@ function main()
     param_names, init_params = build_defect_param_names_and_init_params(lx, ly, defect_positions, args)
     if !isempty(init_params_json)
         init_params = build_init_params_from_json(init_params_json, param_names)
-        if rank == 0
+        if is_root
             println("Loaded initial parameters from json: $(init_params_json)")
         end
     end
 
-    if rank == 0
+    if is_root
         println("Initial parameters: $init_params")
     end
 
@@ -142,9 +144,43 @@ function main()
             log_file="logs/sr_defect_history.txt",
             param_names=param_names
         )
+        if is_root
+            min_energy = extract_min_energy("logs/sr_defect_history.txt")
+        end
     elseif job == "measure"
-        observables = defination_observabels()
-        run_simulation(ham, vwf, kernel, observables, meas_params)
+        observables = defination_observabels(n_sites)
+        results = run_simulation(ham, vwf, kernel, observables, meas_params)
+        if is_root && results !== nothing
+            histories = results[:histories]
+            mean_dict, se_dict, n_eff_dict, tau_int_dict, _ = blocking_binning(histories)
+
+            txt_file = "logs/defect_block_binning.txt"
+            open(txt_file, "w") do io
+                println(io, "# Observable\tMean\tSE\tN_eff\tTau_int")
+                for name in sort(collect(keys(mean_dict)))
+                    mean_val = mean_dict[name]
+                    se_val = se_dict[name]
+                    n_eff_val = n_eff_dict[name]
+                    tau_val = tau_int_dict[name]
+
+                    if mean_val isa Number && se_val isa Number && n_eff_val isa Number && tau_val isa Number
+                        @printf(io, "%s\t%.10f\t%.10f\t%.6f\t%.6f\n",
+                            String(name), mean_val, se_val, n_eff_val, tau_val)
+                    else
+                        println(io, "$(String(name))\t$(mean_val)\t$(se_val)\t$(n_eff_val)\t$(tau_val)")
+                    end
+                end
+            end
+
+            json_file = "logs/defect_block_binning_mean.json"
+            mean_dict_str = Dict{String,Any}()
+            for (key, value) in mean_dict
+                mean_dict_str[String(key)] = value
+            end
+            open(json_file, "w") do io
+                JSON.print(io, mean_dict_str)
+            end
+        end
     end
 end
 

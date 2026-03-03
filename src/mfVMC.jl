@@ -24,7 +24,7 @@ export has_up, has_dn
 include("Utils.jl")
 using .Utils
 using .Utils
-export compute_eig_and_dU_reg1, expand_spatial_to_spinful, add_term_ij_PH
+export compute_eig_and_dU_reg1, expand_spatial_to_spinful, add_term_ij_PH, blocking_binning, extract_min_energy
 
 # 导出 VMC 模块的内容0
 include("vmc_det.jl") # 确保这个文件包含更新后的代码

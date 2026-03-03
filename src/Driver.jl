@@ -317,6 +317,8 @@ function run_sr_optimization(model, vwf, kernel,
                 diag_shift=sr_params.diag_shift,
                 is_real_param=true)
 
+            params_before_update = copy(current_params)
+
             # Apply update
             step_vector = sr_params.lr .* delta
             step_vector = clamp.(step_vector, -sr_params.max_step_size, sr_params.max_step_size)
@@ -330,9 +332,9 @@ function run_sr_optimization(model, vwf, kernel,
             # 如果参数少于等于4个，全部显示；否则显示前3个加省略号
             param_str = ""
             if n_params <= 4
-                param_str = join([@sprintf("%.4f", p) for p in current_params], ", ")
+                param_str = join([@sprintf("%.4f", p) for p in params_before_update], ", ")
             else
-                param_preview = join([@sprintf("%.4f", p) for p in current_params[1:3]], ", ")
+                param_preview = join([@sprintf("%.4f", p) for p in params_before_update[1:3]], ", ")
                 param_str = "$param_preview, ..."
             end
 
@@ -341,7 +343,7 @@ function run_sr_optimization(model, vwf, kernel,
 
             # [改进 3] 文件写入保持完整数据，使用制表符分割
             open(log_file, "a") do io
-                row = [step, E_mean, E_err, grad_norm, current_params...]
+                row = [step, E_mean, E_err, grad_norm, params_before_update...]
                 writedlm(io, permutedims(row))
             end
             flush(stdout)
