@@ -77,8 +77,11 @@ function main()
         push!(terms, OperatorTerm([:SS], [i, j], j3))
     end
     ham = GeneralModel(n_sites, terms)
-
-    @assert (target_sz + n_sites) % 2 == 0 "Wrong parity!"
+    if target_sz != 0 && (target_sz + n_sites) % 2 != 0
+        error("Wrong parity!")
+    elseif target_sz == 0
+        target_sz = n_sites % 2
+    end
     sampler = config_Heisenberg(n_sites, (n_sites + target_sz) ÷ 2; ifPH=true)
     init_config_Heisenberg!(sampler)
 
@@ -117,6 +120,8 @@ function main()
         defect_index,
         target_sz
     )
+    folder = "logs/target_sz_$(target_sz)"
+    mkpath(folder)
     if job == "SR"
         sr_params = SRParams(vmc_params=meas_params, n_steps=n_steps, lr=lr)
 
@@ -141,11 +146,11 @@ function main()
             init_params,
             update_vwf_func!,
             sr_params;
-            log_file="logs/sr_defect_history.txt",
+            log_file=joinpath(folder, "sr_defect_history.txt"),
             param_names=param_names
         )
         if is_root
-            min_energy = extract_min_energy("logs/sr_defect_history.txt")
+            min_energy = extract_min_energy(joinpath(folder, "sr_defect_history.txt"))
         end
     elseif job == "measure"
         observables = defination_observabels(n_sites)
@@ -154,7 +159,7 @@ function main()
             histories = results[:histories]
             mean_dict, se_dict, n_eff_dict, tau_int_dict, _ = blocking_binning(histories)
 
-            txt_file = "logs/defect_block_binning.txt"
+            txt_file = joinpath(folder, "defect_block_binning.txt")
             open(txt_file, "w") do io
                 println(io, "# Observable\tMean\tSE\tN_eff\tTau_int")
                 for name in sort(collect(keys(mean_dict)))
@@ -172,7 +177,7 @@ function main()
                 end
             end
 
-            json_file = "logs/defect_block_binning_mean.json"
+            json_file = joinpath(folder, "defect_block_binning_mean.json")
             mean_dict_str = Dict{String,Any}()
             for (key, value) in mean_dict
                 mean_dict_str[String(key)] = value
@@ -180,6 +185,7 @@ function main()
             open(json_file, "w") do io
                 JSON.print(io, mean_dict_str)
             end
+            save_measurement_outputs(mean_dict, lx, ly, n_sites, defect_index, folder)
         end
     end
 end

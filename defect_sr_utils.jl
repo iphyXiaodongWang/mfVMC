@@ -573,6 +573,80 @@ function defination_observabels(n_sites::Int)::Dict{Symbol,Function}
     return observables
 end
 
+"""
+    save_measurement_outputs(
+        mean_dict::Dict{Symbol,Any},
+        lx::Int,
+        ly::Int,
+        n_sites::Int,
+        defect_index::Vector{Int},
+        folder::AbstractString
+    ) -> Nothing
+
+用途: 根据测量结果保存绘图所需的 Sz/SS JSON.
+参数:
+- mean_dict::Dict{Symbol,Any}, 观测量均值字典, 需包含 :Sz_i 与 :SS_i_j.
+- lx::Int, x 方向长度.
+- ly::Int, y 方向长度.
+- n_sites::Int, 去 defect 后的格点数.
+- defect_index::Vector{Int}, defect 的 1-based index 列表(对应 full lattice).
+- folder::AbstractString, 输出文件夹路径.
+返回:
+- Nothing.
+公式: 无.
+"""
+function save_measurement_outputs(
+    mean_dict::Dict{Symbol,Any},
+    lx::Int,
+    ly::Int,
+    n_sites::Int,
+    defect_index::Vector{Int},
+    folder::AbstractString
+)::Nothing
+    defect_set = Set(defect_index)
+    reduced_to_xy = Vector{Tuple{Int,Int}}(undef, n_sites)
+    reduced_idx = 0
+    for x in 1:lx, y in 1:ly
+        full_id = xy_to_id_1based(x, y, lx, ly)
+        if full_id in defect_set
+            continue
+        end
+        reduced_idx += 1
+        reduced_to_xy[reduced_idx] = (x, y)
+    end
+
+    sz_json = Dict{String,Float64}()
+    for x in 1:lx, y in 1:ly
+        key = "mz_$(x - 1)_$(y - 1)"
+        sz_json[key] = 0.0
+    end
+    for i in 1:n_sites
+        x, y = reduced_to_xy[i]
+        key = "mz_$(x - 1)_$(y - 1)"
+        sz_key = Symbol("Sz_$(i)")
+        sz_json[key] = Float64(real(mean_dict[sz_key]))
+    end
+    open(joinpath(folder, "Sz.json"), "w") do io
+        JSON.print(io, sz_json)
+    end
+
+    ss_json = Dict{String,Float64}()
+    for i in 1:(n_sites - 1)
+        x0, y0 = reduced_to_xy[i]
+        for j in (i + 1):n_sites
+            x1, y1 = reduced_to_xy[j]
+            key = "SS_$(x0 - 1)_$(y0 - 1)_$(x1 - 1)_$(y1 - 1)"
+            ss_key = Symbol("SS_$(i)_$(j)")
+            ss_json[key] = Float64(real(mean_dict[ss_key]))
+        end
+    end
+    open(joinpath(folder, "SS_all.json"), "w") do io
+        JSON.print(io, ss_json)
+    end
+
+    return nothing
+end
+
 # ==============================================================================
 # 3. 辅助函数
 # ==============================================================================
