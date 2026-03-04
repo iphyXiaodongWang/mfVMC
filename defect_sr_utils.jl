@@ -593,6 +593,8 @@ end
 - folder::AbstractString, 输出文件夹路径.
 返回:
 - Nothing.
+说明:
+- Sz.json 仅写入非 defect 格点的 key, defect 位置不输出 key.
 公式: 无.
 """
 function save_measurement_outputs(
@@ -616,10 +618,7 @@ function save_measurement_outputs(
     end
 
     sz_json = Dict{String,Float64}()
-    for x in 1:lx, y in 1:ly
-        key = "mz_$(x - 1)_$(y - 1)"
-        sz_json[key] = 0.0
-    end
+    # 仅写入非 defect 的格点, defect 位置不输出 key, 便于下游用缺失值识别 defect.
     for i in 1:n_sites
         x, y = reduced_to_xy[i]
         key = "mz_$(x - 1)_$(y - 1)"

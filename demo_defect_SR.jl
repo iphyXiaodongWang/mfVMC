@@ -154,25 +154,46 @@ function main()
         end
     elseif job == "measure"
         observables = defination_observabels(n_sites)
-        results = run_simulation(ham, vwf, kernel, observables, meas_params)
+        # 默认不保留历史, 如需阻塞法(Binning)请在此列出观测量名称
+        history_observables = [:E, Symbol("Sz_1"), Symbol("SS_1_2")]
+        results = run_simulation(
+            ham,
+            vwf,
+            kernel,
+            observables,
+            meas_params;
+            history_observables=history_observables
+        )
         if is_root && results !== nothing
+            means = results[:means]
+            mean_dict = Dict{Symbol,Any}()
+            for (key, value) in means
+                if value isa Number
+                    mean_dict[key] = real(value)
+                else
+                    mean_dict[key] = value
+                end
+            end
+
             histories = results[:histories]
-            mean_dict, se_dict, n_eff_dict, tau_int_dict, _ = blocking_binning(histories)
+            if !isempty(histories)
+                mean_hist, se_dict, n_eff_dict, tau_int_dict, _ = blocking_binning(histories)
 
-            txt_file = joinpath(folder, "defect_block_binning.txt")
-            open(txt_file, "w") do io
-                println(io, "# Observable\tMean\tSE\tN_eff\tTau_int")
-                for name in sort(collect(keys(mean_dict)))
-                    mean_val = mean_dict[name]
-                    se_val = se_dict[name]
-                    n_eff_val = n_eff_dict[name]
-                    tau_val = tau_int_dict[name]
+                txt_file = joinpath(folder, "defect_block_binning.txt")
+                open(txt_file, "w") do io
+                    println(io, "# Observable\tMean\tSE\tN_eff\tTau_int")
+                    for name in sort(collect(keys(mean_hist)))
+                        mean_val = mean_hist[name]
+                        se_val = se_dict[name]
+                        n_eff_val = n_eff_dict[name]
+                        tau_val = tau_int_dict[name]
 
-                    if mean_val isa Number && se_val isa Number && n_eff_val isa Number && tau_val isa Number
-                        @printf(io, "%s\t%.10f\t%.10f\t%.6f\t%.6f\n",
-                            String(name), mean_val, se_val, n_eff_val, tau_val)
-                    else
-                        println(io, "$(String(name))\t$(mean_val)\t$(se_val)\t$(n_eff_val)\t$(tau_val)")
+                        if mean_val isa Number && se_val isa Number && n_eff_val isa Number && tau_val isa Number
+                            @printf(io, "%s\t%.10f\t%.10f\t%.6f\t%.6f\n",
+                                String(name), mean_val, se_val, n_eff_val, tau_val)
+                        else
+                            println(io, "$(String(name))\t$(mean_val)\t$(se_val)\t$(n_eff_val)\t$(tau_val)")
+                        end
                     end
                 end
             end

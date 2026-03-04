@@ -63,15 +63,23 @@ end
 # 2. 通用驱动函数
 # ==============================================================================
 """
-    run_simulation(model, vwf, kernel, observables, params)
+    run_simulation(model, vwf, kernel, observables, params; history_observables=Symbol[])
 
 通用 VMC 采样驱动器。
 
 # 参数
 - `observables`: Dict{Symbol, Function}。Key是名字, Value是函数 `f(model, vwf) -> Number`。
-                 注意：代码默认只对 :E (能量) 进行全历史记录(Binning)，其他量只记录均值。
+- `history_observables`: Vector{Symbol}。需要保留历史序列用于阻塞法(Binning)的观测量名称列表.
+  默认空列表表示不保留历史, 只计算均值.
 """
-function run_simulation(model, vwf, kernel, observables::Dict{Symbol,Function}, params::VMCParams)
+function run_simulation(
+    model,
+    vwf,
+    kernel,
+    observables::Dict{Symbol,Function},
+    params::VMCParams;
+    history_observables::Vector{Symbol}=Symbol[]
+)
 
     # --- 1. MPI 初始化 ---
     session = init_mpi_session()
@@ -84,13 +92,21 @@ function run_simulation(model, vwf, kernel, observables::Dict{Symbol,Function}, 
 
     # [关键] 获取排序后的键名列表，确保所有 MPI 进程按相同顺序处理
     obs_names = sort(collect(keys(observables)))
+    history_set = Set(history_observables)
+    invalid_history = setdiff(history_observables, obs_names)
+    if !isempty(invalid_history)
+        error("history_observables contains unknown keys: $(invalid_history)")
+    end
 
     if is_root
         println("="^60)
         println(" VMC Simulation Driver")
         println(" MPI Size: $(session.size)")
         println(" Total Samples: $(params.total_samples) (Local: $n_samples_local)")
-        println(" Observables: $obs_names")
+        obs_preview = length(obs_names) > 10 ? obs_names[1:10] : obs_names
+        hist_preview = length(history_observables) > 10 ? history_observables[1:10] : history_observables
+        println(" Observables: $(obs_preview) (total: $(length(obs_names)))")
+        println(" History Observables: $(hist_preview) (total: $(length(history_observables)))")
         println("="^60)
     end
 
@@ -155,9 +171,10 @@ function run_simulation(model, vwf, kernel, observables::Dict{Symbol,Function}, 
             # 1. 累加到 Buffer (用于计算均值)
             accumulate_sample!(obs_buf, name, val)
 
-            # 2. [修改] 记录全历史 (用于 Binning)
-            # 现在对所有注册的标量都进行记录，不仅仅是能量
-            record_scalar!(obs_buf, name, real(val))
+            # 2. 仅对指定观测量记录历史 (用于 Binning)
+            if name in history_set
+                record_scalar!(obs_buf, name, real(val))
+            end
         end
 
         increment_counter!(obs_buf)
@@ -175,17 +192,20 @@ function run_simulation(model, vwf, kernel, observables::Dict{Symbol,Function}, 
     # A. 收集所有量的均值
     means = mpi_reduce_all(obs_buf, session)
 
-    # B. [修改] 收集所有量的完整历史
-    # 我们将结果存在一个新的字典 histories 中
+    # B. 收集指定观测量的完整历史
     histories = Dict{Symbol,Vector{Float64}}()
+    if !isempty(history_observables)
+        # 必须所有 Rank 都参与这个循环，顺序必须一致 (由 obs_names 保证)
+        for name in obs_names
+            if !(name in history_set)
+                continue
+            end
+            full_list = mpi_gather_scalar(obs_buf, session, name)
 
-    # 必须所有 Rank 都参与这个循环，顺序必须一致 (由 obs_names 保证)
-    for name in obs_names
-        full_list = mpi_gather_scalar(obs_buf, session, name)
-
-        # 只有 Root 会收到数据，其他 Rank 收到 nothing
-        if is_root && full_list !== nothing
-            histories[name] = full_list
+            # 只有 Root 会收到数据，其他 Rank 收到 nothing
+            if is_root && full_list !== nothing
+                histories[name] = full_list
+            end
         end
     end
 
