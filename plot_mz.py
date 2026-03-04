@@ -12,11 +12,18 @@ import sys
 
 
 def plot_spin_lattice(mz_matrix, path, scale=1.0, show_value=False):
-    """绘制自旋格点图, 可选标注sz数值并绘制箭头. 参数: mz_matrix为二维numpy数组, path为保存路径字符串, scale为箭头缩放系数float, show_value为bool表示是否显示数值. 返回: None."""
+    """绘制自旋格点图, 仅把缺失点视为 defect. 参数: mz_matrix为二维numpy数组, path为保存路径字符串, scale为箭头缩放系数float, show_value为bool表示是否显示数值. 返回: None."""
     lx, ly = mz_matrix.shape
     plt.figure(figsize=(6, 6))
     for x in range(lx):
         for y in range(ly):
+            if np.isnan(mz_matrix[x, y]):
+                circle = plt.Circle(
+                    (x, y), radius=0.5, fill=False, edgecolor="black", linewidth=1
+                )
+                plt.gca().add_artist(circle)
+                continue
+
             plt.scatter(x, y, s=10, c="black")
             if show_value:
                 plt.text(
@@ -40,11 +47,6 @@ def plot_spin_lattice(mz_matrix, path, scale=1.0, show_value=False):
                     length_includes_head=False,
                     color="red" if mz_matrix[x, y] >= 0 else "blue",
                 )
-            else:
-                circle = plt.Circle(
-                    (x, y), radius=0.5, fill=False, edgecolor="black", linewidth=1
-                )
-                plt.gca().add_artist(circle)
     plt.gca().set_aspect("equal", adjustable="box")
     plt.xticks(range(lx))
     plt.yticks(range(ly))
@@ -54,7 +56,7 @@ def plot_spin_lattice(mz_matrix, path, scale=1.0, show_value=False):
 
 path = sys.argv[1]
 lx = ly = 12
-mz_matrix = np.zeros((lx, ly))
+mz_matrix = np.full((lx, ly), np.nan)
 folder = "./data/"
 """ for name in os.listdir(folder):
     path = folder + name + "/"
@@ -96,6 +98,7 @@ with open(os.path.join(path, "Sz.json"), "r") as f:
     Sz = json.load(f)
 for x in range(lx):
     for y in range(ly):
-        if (f"mz_{x}_{y}") in Sz:
-            mz_matrix[x, y] = Sz[f"mz_{x}_{y}"]
+        key = f"mz_{x}_{y}"
+        if key in Sz:
+            mz_matrix[x, y] = Sz[key]
 plot_spin_lattice(mz_matrix, path, show_value=True)
