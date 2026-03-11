@@ -5,10 +5,27 @@ import re
 import os
 import json
 import sys
+import argparse
 
-path = sys.argv[1]
+def parse_arguments():
+    """用途: 解析命令行参数. 参数: 无. 返回: argparse.Namespace, 包含path和L."""
+    parser = argparse.ArgumentParser()
+    parser.add_argument("path", type=str, help="数据目录路径, 例如 logs/target_sz_0")
+    parser.add_argument(
+        "--L",
+        type=int,
+        default=12,
+        help="系统线性尺寸L, 默认12, 程序按Lx=Ly=L处理",
+    )
+    args = parser.parse_args()
+    if args.L <= 0:
+        raise ValueError("--L must be a positive integer.")
+    return args
 
-lx = ly = 12
+args = parse_arguments()
+path = args.path
+
+lx = ly = args.L
 mz_matrix = np.zeros((lx, ly))
 # folder = "./data"
 # name = os.listdir(folder)[0]
