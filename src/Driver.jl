@@ -92,6 +92,10 @@ function run_simulation(
 
     # [关键] 获取排序后的键名列表，确保所有 MPI 进程按相同顺序处理
     obs_names = sort(collect(keys(observables)))
+    # 约定把 :E 放在首位，便于依赖 sample 内重置逻辑的派生观测量稳定运行。
+    if :E in obs_names
+        obs_names = vcat([:E], [name for name in obs_names if name != :E])
+    end
     history_set = Set(history_observables)
     invalid_history = setdiff(history_observables, obs_names)
     if !isempty(invalid_history)

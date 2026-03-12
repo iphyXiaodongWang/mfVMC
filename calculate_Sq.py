@@ -75,7 +75,7 @@ for ix in range(lx):
                             if site_count[x1, y1] == 0:
                                 site_count[x1, y1] = 1
         Nsite = np.sum(site_count)
-        Sq = (Sq + Nsite * 0.75 * 2) / ((lx * ly) ** 2)
+        Sq = (Sq + Nsite * 0.75) / ((lx * ly) ** 2)
         Z[ix, iy] = Sq
 
 """ Sq = Sq + Nsite * 0.75 * 2

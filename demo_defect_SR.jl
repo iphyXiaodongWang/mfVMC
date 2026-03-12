@@ -45,7 +45,7 @@ function main()
     n_mc = args["nMC"]
     w_mc = args["wMC"]
     r_mc = args["rMC"]
-    d_mc = 1
+    d_mc = args["dMC"]
     seed = args["seed"]
     n_steps = args["nSR"]
     lr = args["lr"]
@@ -153,9 +153,9 @@ function main()
             min_energy = extract_min_energy(joinpath(folder, "sr_defect_history.txt"))
         end
     elseif job == "measure"
-        observables = defination_observabels(n_sites)
+        observables = defination_observabels(lx, ly, n_sites, defect_index)
         # 默认不保留历史, 如需阻塞法(Binning)请在此列出观测量名称
-        history_observables = [:E, Symbol("Sz_1"), Symbol("SS_1_2")]
+        history_observables = [:E, :staggered_mz, :S_pi_pi]
         results = run_simulation(
             ham,
             vwf,

@@ -100,6 +100,10 @@ function parse_commandline()
         help = "Number of rebuild inserve"
         arg_type = Int
         default = 100
+        "--dMC"
+        help = "Number of Monte Carlo decorrelation sweeps"
+        arg_type = Int
+        default = 1
         "--seed"
         help = "random seed"
         arg_type = Int
@@ -540,35 +544,121 @@ function total_Sz_est(model, vwf)
 end
 
 """
-    defination_observabels(n_sites::Int) -> Dict{Symbol,Function}
+    build_reduced_to_xy_map(
+        lx::Int,
+        ly::Int,
+        n_sites::Int,
+        defect_index::Vector{Int}
+    ) -> Vector{Tuple{Int,Int}}
+
+用途: 构造 reduced index 到 full lattice 坐标的映射.
+参数:
+- lx::Int, x 方向长度.
+- ly::Int, y 方向长度.
+- n_sites::Int, 去 defect 后格点数.
+- defect_index::Vector{Int}, defect 的 1-based full index 列表.
+返回:
+- Vector{Tuple{Int,Int}}, 长度为 n_sites, 第 i 项对应 reduced site i 的 (x, y), 均为 1-based.
+"""
+function build_reduced_to_xy_map(
+    lx::Int,
+    ly::Int,
+    n_sites::Int,
+    defect_index::Vector{Int}
+)::Vector{Tuple{Int,Int}}
+    defect_set = Set(defect_index)
+    reduced_to_xy = Vector{Tuple{Int,Int}}(undef, n_sites)
+    reduced_idx = 0
+    for x in 1:lx, y in 1:ly
+        full_id = xy_to_id_1based(x, y, lx, ly)
+        if full_id in defect_set
+            continue
+        end
+        reduced_idx += 1
+        reduced_to_xy[reduced_idx] = (x, y)
+    end
+    if reduced_idx != n_sites
+        error("n_sites mismatch: expected $(n_sites), got $(reduced_idx).")
+    end
+    return reduced_to_xy
+end
+
+"""
+    defination_observabels(
+        lx::Int,
+        ly::Int,
+        n_sites::Int,
+        defect_index::Vector{Int}
+    ) -> Dict{Symbol,Function}
 
 用途: 构造用于 run_simulation 的观测量字典.
 参数:
-- n_sites::Int, 总格点数.
+- lx::Int, x 方向长度.
+- ly::Int, y 方向长度.
+- n_sites::Int, 去 defect 后格点数.
+- defect_index::Vector{Int}, defect 的 1-based full index 列表.
 返回:
 - Dict{Symbol,Function}, Key 为观测量名称, Value 为匿名函数 (model, vwf) -> Number.
 说明:
 - 能量: :E, 使用 local_energy(model, vwf).
 - 每点 Sz: :Sz_i, 使用 get_Sz(vwf.sampler.state[i]).
 - 关联函数: :SS_i_j (i < j), 使用 measure_SiSj(vwf, i, j).
+- 派生量: :staggered_mz 与 :S_pi_pi, 在测量 :Sz_i 和 :SS_i_j 时同步累加, 避免重复计算.
 - 公式: S_i·S_j = Sz_i*Sz_j + 1/2*(S+_i S-_j + S-_i S+_j).
+- 公式: staggered_mz = sum_i [(-1)^(x_i+y_i) * Sz_i] / (Lx*Ly).
+- 公式: S_pi_pi = [2*sum_{i<j}((-1)^((x_i-x_j)+(y_i-y_j))*<Si·Sj>) + (3/4)*Nsite] / (Lx*Ly)^2.
 """
-function defination_observabels(n_sites::Int)::Dict{Symbol,Function}
+function defination_observabels(
+    lx::Int,
+    ly::Int,
+    n_sites::Int,
+    defect_index::Vector{Int}
+)::Dict{Symbol,Function}
     observables = Dict{Symbol,Function}()
+    reduced_to_xy = build_reduced_to_xy_map(lx, ly, n_sites, defect_index)
+    norm_lattice = Float64(lx * ly)
+    norm_sq = norm_lattice^2
 
-    observables[:E] = (model, vwf) -> local_energy(model, vwf)
+    # 每个 sample 内在线累加, 由 :E 观测量触发重置.
+    staggered_mz_acc = Ref(0.0)
+    s_pi_pi_pair_acc = Ref(0.0)
+    s_pi_pi_diag_const = 0.75 * n_sites / norm_sq
+
+    observables[:E] = (model, vwf) -> begin
+        staggered_mz_acc[] = 0.0
+        s_pi_pi_pair_acc[] = 0.0
+        return local_energy(model, vwf)
+    end
 
     for i in 1:n_sites
         key = Symbol("Sz_$(i)")
-        observables[key] = (model, vwf) -> get_Sz(vwf.sampler.state[i])
+        x, y = reduced_to_xy[i]
+        stagger_phase = (-1)^(x + y)
+        stagger_coeff = stagger_phase / norm_lattice
+        observables[key] = (model, vwf) -> begin
+            val = get_Sz(vwf.sampler.state[i])
+            staggered_mz_acc[] += stagger_coeff * real(val)
+            return val
+        end
     end
 
     for i in 1:n_sites
+        x0, y0 = reduced_to_xy[i]
         for j in (i + 1):n_sites
             key = Symbol("SS_$(i)_$(j)")
-            observables[key] = (model, vwf) -> measure_SiSj(vwf, i, j)
+            x1, y1 = reduced_to_xy[j]
+            phase_pi_pi = (-1)^((x0 - x1) + (y0 - y1))
+            ss_coeff = 2.0 * phase_pi_pi / norm_sq
+            observables[key] = (model, vwf) -> begin
+                val = measure_SiSj(vwf, i, j)
+                s_pi_pi_pair_acc[] += ss_coeff * real(val)
+                return val
+            end
         end
     end
+
+    observables[:S_pi_pi] = (model, vwf) -> s_pi_pi_pair_acc[] + s_pi_pi_diag_const
+    observables[:staggered_mz] = (model, vwf) -> staggered_mz_acc[]
 
     return observables
 end
@@ -605,17 +695,7 @@ function save_measurement_outputs(
     defect_index::Vector{Int},
     folder::AbstractString
 )::Nothing
-    defect_set = Set(defect_index)
-    reduced_to_xy = Vector{Tuple{Int,Int}}(undef, n_sites)
-    reduced_idx = 0
-    for x in 1:lx, y in 1:ly
-        full_id = xy_to_id_1based(x, y, lx, ly)
-        if full_id in defect_set
-            continue
-        end
-        reduced_idx += 1
-        reduced_to_xy[reduced_idx] = (x, y)
-    end
+    reduced_to_xy = build_reduced_to_xy_map(lx, ly, n_sites, defect_index)
 
     sz_json = Dict{String,Float64}()
     # 仅写入非 defect 的格点, defect 位置不输出 key, 便于下游用缺失值识别 defect.
