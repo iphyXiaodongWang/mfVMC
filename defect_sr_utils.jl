@@ -116,6 +116,10 @@ function parse_commandline()
         help = "SR learn rate"
         arg_type = Float64
         default = 0.04
+        "--lr_end"
+        help = "Target learning rate at the last SR step. Default follows --lr"
+        arg_type = Float64
+        default = NaN
         "--init_params_json"
         help = "Path to json file that provides initial parameters"
         arg_type = String
@@ -127,6 +131,40 @@ function parse_commandline()
     end
 
     return parse_args(s)
+end
+
+"""
+    build_exponential_lr_func(lr_start::Float64, lr_end::Float64, n_steps::Int) -> Function
+
+用途: 构造 SR 学习率指数衰减函数, 并保证最后一个 step 的学习率为 lr_end.
+参数:
+- lr_start::Float64, 初始学习率.
+- lr_end::Float64, 最后一个 step 的目标学习率.
+- n_steps::Int, SR 总步数.
+返回:
+- Function, 形如 f(lr0, step) -> lr_step, 供 run_sr_optimization 的 lr_func 调用.
+公式:
+- 当 n_steps >= 2 且 lr_start > 0 时, lr_step = lr_start * gamma^(step-1),
+  其中 gamma = (lr_end / lr_start)^(1 / (n_steps - 1)).
+- 当 lr_end = 0 时, gamma = 0, 因此 step=1 时 lr=lr_start, step>=2 时 lr=0.
+"""
+function build_exponential_lr_func(
+    lr_start::Float64,
+    lr_end::Float64,
+    n_steps::Int
+)::Function
+    if n_steps <= 1
+        return (lr0, step) -> lr_end
+    end
+    if lr_start == 0.0
+        return (lr0, step) -> 0.0
+    end
+    if lr_start < 0.0 || lr_end < 0.0
+        error("lr and lr_end must be non-negative.")
+    end
+
+    lr_decay_gamma = (lr_end / lr_start)^(1.0 / (n_steps - 1))
+    return (lr0, step) -> lr0 * (lr_decay_gamma^(step - 1))
 end
 
 """
@@ -644,7 +682,7 @@ function defination_observabels(
 
     for i in 1:n_sites
         x0, y0 = reduced_to_xy[i]
-        for j in (i + 1):n_sites
+        for j in (i+1):n_sites
             key = Symbol("SS_$(i)_$(j)")
             x1, y1 = reduced_to_xy[j]
             phase_pi_pi = (-1)^((x0 - x1) + (y0 - y1))
@@ -710,9 +748,9 @@ function save_measurement_outputs(
     end
 
     ss_json = Dict{String,Float64}()
-    for i in 1:(n_sites - 1)
+    for i in 1:(n_sites-1)
         x0, y0 = reduced_to_xy[i]
-        for j in (i + 1):n_sites
+        for j in (i+1):n_sites
             x1, y1 = reduced_to_xy[j]
             key = "SS_$(x0 - 1)_$(y0 - 1)_$(x1 - 1)_$(y1 - 1)"
             ss_key = Symbol("SS_$(i)_$(j)")

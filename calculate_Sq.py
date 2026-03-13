@@ -105,10 +105,10 @@ plt.title(r"$S(k_x,k_y)$")
 # plt.show()
 plt.savefig(os.path.join(path, "Sq.png"))
 
-kx = KX[:, 0]
+""" kx = KX[:, 0]
 ky = KY[0, :]
 ix_pi = int(np.argmin(np.abs(kx - np.pi)))
 iy_pi = int(np.argmin(np.abs(ky - np.pi)))
 Sq_pipi = Z[ix_pi, iy_pi]
 with open(os.path.join(path, "Sq.txt"), "w") as f:
-    f.write("S(pi,pi)=" + str(Sq_pipi))
+    f.write("S(pi,pi)=" + str(Sq_pipi)) """

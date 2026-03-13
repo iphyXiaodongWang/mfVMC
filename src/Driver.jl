@@ -232,12 +232,15 @@ end
 
 SR 优化主循环。
 - `sr_params`: 包含优化策略 (lr, steps) 和采样策略 (vmc_params)。
+- `lr_func`: 学习率调度函数, 形如 `f(lr0, step) -> lr_step`.
 """
 function run_sr_optimization(model, vwf, kernel,
     initial_params::Vector{Float64},
     update_vwf_func!::Function,
     sr_params::SRParams; # <--- 接口变简洁了
-    log_file="sr_history.txt", param_names::Union{Nothing,Vector{Symbol}}=nothing)
+    log_file="sr_history.txt",
+    param_names::Union{Nothing,Vector{Symbol}}=nothing,
+    lr_func::Function=(lr0, step) -> lr0)
 
     session = init_mpi_session()
     rank = session.rank
@@ -342,9 +345,10 @@ function run_sr_optimization(model, vwf, kernel,
                 is_real_param=true)
 
             params_before_update = copy(current_params)
+            current_lr = lr_func(sr_params.lr, step)
 
             # Apply update
-            step_vector = sr_params.lr .* delta
+            step_vector = current_lr .* delta
             step_vector = clamp.(step_vector, -sr_params.max_step_size, sr_params.max_step_size)
             current_params += step_vector
 
@@ -362,8 +366,8 @@ function run_sr_optimization(model, vwf, kernel,
                 param_str = "$param_preview, ..."
             end
 
-            @printf("Step %3d | E: %.6f +/- %.6f | |g|: %.4e | Params: [%s]\n",
-                step, E_mean, E_err, grad_norm, param_str)
+            @printf("Step %3d | E: %.6f +/- %.6f | |g|: %.4e | LR: %.4e | Params: [%s]\n",
+                step, E_mean, E_err, grad_norm, current_lr, param_str)
 
             # [改进 3] 文件写入保持完整数据，使用制表符分割
             open(log_file, "a") do io

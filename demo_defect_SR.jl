@@ -49,6 +49,10 @@ function main()
     seed = args["seed"]
     n_steps = args["nSR"]
     lr = args["lr"]
+    lr_end = args["lr_end"]
+    if isnan(lr_end)
+        lr_end = lr
+    end
     init_params_json = args["init_params_json"]
     job = args["job"]
 
@@ -124,6 +128,7 @@ function main()
     mkpath(folder)
     if job == "SR"
         sr_params = SRParams(vmc_params=meas_params, n_steps=n_steps, lr=lr)
+        exp_lr_func = build_exponential_lr_func(lr, lr_end, n_steps)
 
         update_vwf_func! = (vwf, params) -> update_defect_ansatz!(
             vwf,
@@ -147,7 +152,8 @@ function main()
             update_vwf_func!,
             sr_params;
             log_file=joinpath(folder, "sr_defect_history.txt"),
-            param_names=param_names
+            param_names=param_names,
+            lr_func=exp_lr_func
         )
         if is_root
             min_energy = extract_min_energy(joinpath(folder, "sr_defect_history.txt"))
