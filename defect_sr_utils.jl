@@ -252,6 +252,43 @@ function xy_to_id_1based(x::Int, y::Int, lx::Int, ly::Int)::Int
 end
 
 """
+    xy_to_reduced_id_1based(
+        x::Int,
+        y::Int,
+        lx::Int,
+        ly::Int,
+        defect_index::Vector{Int}
+    ) -> Union{Nothing,Int}
+
+用途: 将 full lattice 中的 1-based 坐标 `(x, y)` 转换为去除 defect 后的 reduced site index.
+参数:
+- x::Int, x 坐标 (1-based).
+- y::Int, y 坐标 (1-based).
+- lx::Int, x 方向长度.
+- ly::Int, y 方向长度.
+- defect_index::Vector{Int}, defect 的 1-based full index 列表.
+返回:
+- Union{Nothing,Int}, 若 `(x, y)` 对应位置是 defect 则返回 `nothing`, 否则返回去除 defect 后的 1-based index.
+公式:
+- full_id = xy_to_id_1based(x, y, lx, ly)
+- reduced_id = full_id - count(id_defect < full_id)
+"""
+function xy_to_reduced_id_1based(
+    x::Int,
+    y::Int,
+    lx::Int,
+    ly::Int,
+    defect_index::Vector{Int}
+)::Union{Nothing,Int}
+    full_id = xy_to_id_1based(x, y, lx, ly)
+    if full_id in Set(defect_index)
+        return nothing
+    end
+    reduced_id = full_id - count(<(full_id), defect_index)
+    return reduced_id
+end
+
+"""
     defect_correction_bond(bonds::Vector{Tuple{Int,Int}}, defect_index::Vector{Int})
 
 对 bonds 进行 defect 修正:
