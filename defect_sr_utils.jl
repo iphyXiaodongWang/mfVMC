@@ -317,6 +317,80 @@ function build_defect_bonds(lx::Int, ly::Int, defect_positions::Vector{Tuple{Int
 end
 
 """
+    build_defect_bonds_obc(lx::Int, ly::Int, defect_positions::Vector{Tuple{Int,Int}})
+
+构造开边界条件下含 defect 的 J1/J2/J3 bonds (1-based).
+参数:
+- lx, ly: 晶格尺寸.
+- defect_positions: defect 坐标 (1-based).
+返回:
+- Tuple{Vector{Tuple{Int,Int}},Vector{Tuple{Int,Int}},Vector{Tuple{Int,Int}}}, 分别对应 J1/J2/J3 bonds.
+说明:
+- OBC 下不允许通过 mod1 跨越边界回卷.
+- J1 仅保留晶格内部最近邻.
+- J2/J3 仅在两端点均位于晶格内部时保留.
+"""
+function build_defect_bonds_obc(lx::Int, ly::Int, defect_positions::Vector{Tuple{Int,Int}})
+    bonds_j1 = Tuple{Int,Int}[]
+    bonds_j2 = Tuple{Int,Int}[]
+    bonds_j3 = Tuple{Int,Int}[]
+
+    for x in 1:lx, y in 1:ly
+        id0 = xy_to_id_1based(x, y, lx, ly)
+
+        if x < lx
+            idx = xy_to_id_1based(x + 1, y, lx, ly)
+            push!(bonds_j1, (id0, idx))
+        end
+
+        if y < ly
+            idy = xy_to_id_1based(x, y + 1, lx, ly)
+            push!(bonds_j1, (id0, idy))
+        end
+    end
+
+    for (x, y) in defect_positions
+        if x < lx && y < ly
+            idpx = xy_to_id_1based(x + 1, y, lx, ly)
+            idpy = xy_to_id_1based(x, y + 1, lx, ly)
+            push!(bonds_j2, (idpx, idpy))
+        end
+
+        if x < lx && y > 1
+            idpx = xy_to_id_1based(x + 1, y, lx, ly)
+            idmy = xy_to_id_1based(x, y - 1, lx, ly)
+            push!(bonds_j2, (idpx, idmy))
+        end
+
+        if x > 1 && y < ly
+            idmx = xy_to_id_1based(x - 1, y, lx, ly)
+            idpy = xy_to_id_1based(x, y + 1, lx, ly)
+            push!(bonds_j2, (idmx, idpy))
+        end
+
+        if x > 1 && y > 1
+            idmx = xy_to_id_1based(x - 1, y, lx, ly)
+            idmy = xy_to_id_1based(x, y - 1, lx, ly)
+            push!(bonds_j2, (idmx, idmy))
+        end
+
+        if x > 1 && x < lx
+            idpx = xy_to_id_1based(x + 1, y, lx, ly)
+            idmx = xy_to_id_1based(x - 1, y, lx, ly)
+            push!(bonds_j3, (idpx, idmx))
+        end
+
+        if y > 1 && y < ly
+            idpy = xy_to_id_1based(x, y + 1, lx, ly)
+            idmy = xy_to_id_1based(x, y - 1, lx, ly)
+            push!(bonds_j3, (idpy, idmy))
+        end
+    end
+
+    return bonds_j1, bonds_j2, bonds_j3
+end
+
+"""
     build_defect_param_names_and_init_params(lx::Int, ly::Int, defect_positions::Vector{Tuple{Int,Int}}, args)
 
 生成 defect ansatz 的参数列表与初始值.

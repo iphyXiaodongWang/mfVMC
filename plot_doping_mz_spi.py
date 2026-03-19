@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 def parse_arguments():
     """用途: 解析命令行参数. 参数: 无. 返回: argparse.Namespace."""
     parser = argparse.ArgumentParser(
-        description="在同一张图中绘制不同(J2, J3)下 staggered_mz 与 S(pi,pi) 随 doping 的变化."
+        description="在同一张图中绘制不同(J2, J3)下 mz 与 S(pi,pi) 随 doping 的变化, 并使用 block binning 标准误绘制 error bar."
     )
     parser.add_argument(
         "result_root",
@@ -80,7 +80,7 @@ def build_curve_from_rows(rows, l_value, use_abs_mz):
     """用途: 从CSV行构建一条曲线.
 
     参数:
-    - rows: Dict列表, 每行需包含 Ndefect, staggered_mz, S_pi_pi 及可选标准误列.
+    - rows: Dict列表, 每行需包含 Ndefect, staggered_mz, S_pi_pi 以及 block binning 输出的标准误列.
     - l_value: 整数L.
     - use_abs_mz: 布尔值, 是否使用|staggered_mz|.
 
@@ -157,6 +157,10 @@ def collect_all_curves(result_root, l_value, use_abs_mz):
             continue
 
         rows = load_summary_rows(csv_path)
+        if rows:
+            first_row = rows[0]
+            if "staggered_mz_se" not in first_row or "S_pi_pi_se" not in first_row:
+                print(f"[WARN] 缺少 block binning 标准误列, 将不绘制对应 error bar: {csv_path}")
         curve = build_curve_from_rows(rows, l_value, use_abs_mz)
         if curve is None:
             print(f"[WARN] 文件无有效数据, 已跳过: {csv_path}")
