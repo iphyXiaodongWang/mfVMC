@@ -7,8 +7,11 @@ include("FPS.jl")
 export generate_defect_positions
 export generate_defect_positions_fps
 export generate_defect_positions_random_sublattice_balanced
+export generate_defect_positions_soft_fps
 export is_sublattice_a
 export list_sublattice_points
+
+const SOFT_FPS_WEIGHT_EPSILON = 1e-12
 
 """
     is_sublattice_a(x::Int, y::Int) -> Bool
@@ -43,6 +46,34 @@ function list_sublattice_points(
     want_a::Bool
 )::Vector{Tuple{Int,Int}}
     return FPS.list_sublattice_points(lx, ly, want_a)
+end
+
+"""
+    list_all_lattice_points(lx::Int, ly::Int) -> Vector{Tuple{Int,Int}}
+
+用途: 列出二维方格中的全部格点坐标.
+参数:
+- lx::Int, x 方向长度.
+- ly::Int, y 方向长度.
+返回:
+- Vector{Tuple{Int,Int}}, 全部 `(x, y)` 坐标, 按字典序排列.
+"""
+function list_all_lattice_points(
+    lx::Int,
+    ly::Int
+)::Vector{Tuple{Int,Int}}
+    if lx <= 0 || ly <= 0
+        throw(ArgumentError("lx and ly must be positive."))
+    end
+
+    lattice_points = Tuple{Int,Int}[]
+    sizehint!(lattice_points, lx * ly)
+    for x in 1:lx
+        for y in 1:ly
+            push!(lattice_points, (x, y))
+        end
+    end
+    return lattice_points
 end
 
 """
@@ -168,6 +199,79 @@ function sample_points_without_replacement(
 end
 
 """
+    sample_weighted_point_by_min_distance(
+        candidates::Vector{Tuple{Int,Int}},
+        chosen::Vector{Tuple{Int,Int}},
+        used::Set{Tuple{Int,Int}},
+        lx::Int,
+        ly::Int,
+        rng::AbstractRNG,
+        alpha::Float64
+    ) -> Tuple{Int,Int}
+
+用途: 在 Soft FPS 中按最小 torus 距离平方的幂次权重随机抽样下一个 defect.
+参数:
+- candidates::Vector{Tuple{Int,Int}}, 全部候选格点列表.
+- chosen::Vector{Tuple{Int,Int}}, 已选 defect 列表.
+- used::Set{Tuple{Int,Int}}, 已选 defect 集合, 用于快速跳过已使用格点.
+- lx::Int, x 方向长度.
+- ly::Int, y 方向长度.
+- rng::AbstractRNG, 随机数生成器.
+- alpha::Float64, Soft FPS 的幂次参数, 要求 `alpha >= 0`.
+返回:
+- Tuple{Int,Int}, 本轮选中的 defect 坐标.
+公式:
+- 对每个候选点 `p`, 先计算
+  `s(p) = min_{q in chosen} d_torus(p, q)^2`.
+- 再按权重
+  `w(p) = (s(p) + epsilon)^alpha`
+  做加权随机抽样.
+说明:
+- 当 `alpha = 0` 时, 所有未选点的权重相同, 退化为普通均匀随机抽样.
+- 当 `alpha` 增大时, 更偏向选择远离已选 defect 的格点.
+"""
+function sample_weighted_point_by_min_distance(
+    candidates::Vector{Tuple{Int,Int}},
+    chosen::Vector{Tuple{Int,Int}},
+    used::Set{Tuple{Int,Int}},
+    lx::Int,
+    ly::Int,
+    rng::AbstractRNG,
+    alpha::Float64
+)::Tuple{Int,Int}
+    if alpha < 0
+        throw(ArgumentError("alpha must be non-negative."))
+    end
+
+    available_points = Tuple{Int,Int}[]
+    cumulative_weights = Float64[]
+    total_weight = 0.0
+
+    for point in candidates
+        if point in used
+            continue
+        end
+
+        min_distance_squared = FPS.min_distance_to_chosen(point, chosen, lx, ly)
+        point_weight = alpha == 0.0 ? 1.0 : (float(min_distance_squared) + SOFT_FPS_WEIGHT_EPSILON)^alpha
+        total_weight += point_weight
+        push!(available_points, point)
+        push!(cumulative_weights, total_weight)
+    end
+
+    if isempty(available_points)
+        throw(ArgumentError("No available lattice point remains for Soft FPS sampling."))
+    end
+
+    target_weight = rand(rng) * total_weight
+    selected_idx = searchsortedfirst(cumulative_weights, target_weight)
+    if selected_idx > length(available_points)
+        selected_idx = length(available_points)
+    end
+    return available_points[selected_idx]
+end
+
+"""
     generate_defect_positions_random_sublattice_balanced(
         lx::Int,
         ly::Int,
@@ -220,22 +324,95 @@ function generate_defect_positions_random_sublattice_balanced(
 end
 
 """
+    generate_defect_positions_soft_fps(
+        lx::Int,
+        ly::Int,
+        ndefect::Int;
+        seed::Int=1234,
+        alpha::Float64=4.0
+    ) -> Vector{Tuple{Int,Int}}
+
+用途: 生成二维 SOFT_FPS defect 分布.
+参数:
+- lx::Int, x 方向长度.
+- ly::Int, y 方向长度.
+- ndefect::Int, defect 总数量.
+- seed::Int, 随机数种子. 相同 seed 与相同 alpha 应生成完全相同的 defect 配置.
+- alpha::Float64, Soft FPS 的幂次参数, 默认值为 `4.0`.
+返回:
+- Vector{Tuple{Int,Int}}, defect 坐标列表, 每项均为 1-based `(x, y)`.
+规则:
+- 第一个 defect 在全部 lattice site 上均匀随机选取.
+- 之后每一步根据最小 torus 距离平方 `s(p)` 的幂次权重 `w(p)=s(p)^alpha` 做加权随机抽样.
+- 不要求 A/B 子格平衡.
+- 返回前按 `(x, y)` 字典序排序, 便于复现与比对.
+"""
+function generate_defect_positions_soft_fps(
+    lx::Int,
+    ly::Int,
+    ndefect::Int;
+    seed::Int=1234,
+    alpha::Float64=4.0
+)::Vector{Tuple{Int,Int}}
+    if lx <= 0 || ly <= 0
+        throw(ArgumentError("lx and ly must be positive."))
+    end
+    if ndefect < 0 || ndefect > lx * ly
+        throw(ArgumentError("ndefect must satisfy 0 <= ndefect <= lx * ly."))
+    end
+    if alpha < 0
+        throw(ArgumentError("alpha must be non-negative."))
+    end
+    if ndefect == 0
+        return Tuple{Int,Int}[]
+    end
+
+    rng = MersenneTwister(seed)
+    lattice_points = list_all_lattice_points(lx, ly)
+    defect_positions = Tuple{Int,Int}[]
+
+    first_index = rand(rng, 1:length(lattice_points))
+    first_point = lattice_points[first_index]
+    push!(defect_positions, first_point)
+    used_points = Set{Tuple{Int,Int}}(defect_positions)
+
+    for _ in 2:ndefect
+        next_point = sample_weighted_point_by_min_distance(
+            lattice_points,
+            defect_positions,
+            used_points,
+            lx,
+            ly,
+            rng,
+            alpha
+        )
+        push!(defect_positions, next_point)
+        push!(used_points, next_point)
+    end
+
+    sort!(defect_positions)
+    return defect_positions
+end
+
+"""
     generate_defect_positions(
         defect_ansatz::String,
         lx::Int,
         ly::Int,
         ndefect::Int;
         seed::Int=1234,
+        alpha::Float64=4.0,
         first_defect::Union{Nothing,Tuple{Int,Int}}=nothing
     ) -> Vector{Tuple{Int,Int}}
 
 用途: 统一调度 defect 位置生成器.
 参数:
-- defect_ansatz::String, 生成器名称. 当前推荐支持 `"FPS"` 与 `"RANDOM"`, 其中 `"RANDOM_SUBLATTICE_BALANCED"` 保留为兼容别名.
+- defect_ansatz::String, 生成器名称. 当前推荐支持 `"FPS"`, `"RANDOM"` 与 `"SOFT_FPS"`, 其中 `"RANDOM_SUBLATTICE_BALANCED"` 保留为兼容别名.
 - lx::Int, x 方向长度.
 - ly::Int, y 方向长度.
 - ndefect::Int, defect 总数量.
-- seed::Int, 随机生成器使用的种子, 目前仅对 RANDOM 生效.
+- seed::Int, 随机生成器使用的种子, 目前对 RANDOM 与 SOFT_FPS 生效.
+- alpha::Float64, SOFT_FPS 的幂次参数, 默认值为 `4.0`.
 - first_defect::Union{Nothing,Tuple{Int,Int}}, FPS 的起始 defect 坐标. 若为 `nothing`, 使用 FPS 默认值.
 返回:
 - Vector{Tuple{Int,Int}}, defect 坐标列表, 每项均为 1-based `(x, y)`.
@@ -246,6 +423,7 @@ function generate_defect_positions(
     ly::Int,
     ndefect::Int;
     seed::Int=1234,
+    alpha::Float64=4.0,
     first_defect::Union{Nothing,Tuple{Int,Int}}=nothing
 )::Vector{Tuple{Int,Int}}
     normalized_ansatz = uppercase(defect_ansatz)
@@ -260,6 +438,14 @@ function generate_defect_positions(
             ly,
             ndefect;
             seed=seed
+        )
+    elseif normalized_ansatz == "SOFT_FPS"
+        return generate_defect_positions_soft_fps(
+            lx,
+            ly,
+            ndefect;
+            seed=seed,
+            alpha=alpha
         )
     end
 

@@ -37,7 +37,7 @@ function parse_commandline()
         arg_type = Int
         default = 0
         "--defectansatz"
-        help = "Defect position ansatz (supports FPS and RANDOM)"
+        help = "Defect position ansatz (supports FPS, RANDOM and SOFT_FPS)"
         arg_type = String
         default = "FPS"
         "--target_sz"
