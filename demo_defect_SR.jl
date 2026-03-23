@@ -14,8 +14,8 @@ push!(LOAD_PATH, ".")
 
 using mfVMC
 include("PartonSquare.jl")
-include("FPS.jl")
-using .FPS
+include("DefectGenerators.jl")
+using .DefectGenerators
 using .PartonSquare
 
 
@@ -47,6 +47,10 @@ function main()
     r_mc = args["rMC"]
     d_mc = args["dMC"]
     seed = args["seed"]
+    defect_seed = args["defect_seed"]
+    if defect_seed == typemin(Int)
+        defect_seed = seed
+    end
     n_steps = args["nSR"]
     lr = args["lr"]
     lr_end = args["lr_end"]
@@ -57,11 +61,13 @@ function main()
     job = args["job"]
 
     n_sites_full = lx * ly
-    defect_positions = if defect_ansatz == "FPS"
-        FPS.generate_defect_positions_fps(lx, ly, n_defect)
-    else
-        error("Unsupported defectansatz: $defect_ansatz")
-    end
+    defect_positions = DefectGenerators.generate_defect_positions(
+        defect_ansatz,
+        lx,
+        ly,
+        n_defect;
+        seed=defect_seed
+    )
     defect_index = [xy_to_id_1based(x, y, lx, ly) for (x, y) in defect_positions]
     n_sites = n_sites_full - n_defect
 
@@ -124,7 +130,7 @@ function main()
         defect_index,
         target_sz
     )
-    folder = "logs/target_sz_$(target_sz)"
+    folder = joinpath("logs", "defect_seed_$(defect_seed)", "target_sz_$(target_sz)")
     mkpath(folder)
     if job == "SR"
         sr_params = SRParams(vmc_params=meas_params, n_steps=n_steps, lr=lr)

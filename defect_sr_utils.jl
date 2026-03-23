@@ -37,7 +37,7 @@ function parse_commandline()
         arg_type = Int
         default = 0
         "--defectansatz"
-        help = "Defect position ansatz (FPS only)"
+        help = "Defect position ansatz (supports FPS and RANDOM)"
         arg_type = String
         default = "FPS"
         "--target_sz"
@@ -108,6 +108,10 @@ function parse_commandline()
         help = "random seed"
         arg_type = Int
         default = 5423
+        "--defect_seed"
+        help = "random seed for defect position generation. Default follows --seed when not explicitly set"
+        arg_type = Int
+        default = typemin(Int)
         "--nSR"
         help = "total steps for SR"
         arg_type = Int
