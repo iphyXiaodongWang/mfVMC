@@ -84,9 +84,9 @@ function main()
     index_1_ly = xy_to_reduced_id_1based(1, ly, lx, ly, defect_index)
     index_lx_1 = xy_to_reduced_id_1based(lx, 1, lx, ly, defect_index)
     index_lx_ly = xy_to_reduced_id_1based(lx, ly, lx, ly, defect_index)
-    push!(terms, OperatorTerm([:Sz], [index_1_ly], -0.1))
-    push!(terms, OperatorTerm([:Sz], [index_lx_1], -0.1))
-    push!(terms, OperatorTerm([:Sz], [index_lx_ly], 0.1))
+    push!(terms, OperatorTerm([:Sz], [index_1_ly], -0.3))
+    push!(terms, OperatorTerm([:Sz], [index_lx_1], -0.3))
+    push!(terms, OperatorTerm([:Sz], [index_lx_ly], 0.3))
 
     ham = GeneralModel(n_sites, terms)
     if target_sz != 0 && (target_sz + n_sites) % 2 != 0
