@@ -2,8 +2,6 @@ module DefectGenerators
 
 using Random
 
-include("FPS.jl")
-
 export generate_defect_positions
 export generate_defect_positions_fps
 export generate_defect_positions_random_sublattice_balanced
@@ -26,7 +24,41 @@ const SOFT_FPS_WEIGHT_EPSILON = 1e-12
 - A 子格判据为 `(x + y) % 2 == 0`.
 """
 function is_sublattice_a(x::Int, y::Int)::Bool
-    return FPS.is_sublattice_a(x, y)
+    return (x + y) % 2 == 0
+end
+
+"""
+    torus_distance_squared(
+        p::Tuple{Int,Int},
+        q::Tuple{Int,Int},
+        lx::Int,
+        ly::Int
+    ) -> Int
+
+用途: 计算二维 PBC torus 上两点之间的距离平方.
+参数:
+- p::Tuple{Int,Int}, 第一个格点 `(x1, y1)`.
+- q::Tuple{Int,Int}, 第二个格点 `(x2, y2)`.
+- lx::Int, x 方向长度.
+- ly::Int, y 方向长度.
+返回:
+- Int, torus 距离平方.
+公式:
+- `dx = min(|x1-x2|, lx-|x1-x2|)`
+- `dy = min(|y1-y2|, ly-|y1-y2|)`
+- `dist2 = dx^2 + dy^2`
+"""
+function torus_distance_squared(
+    p::Tuple{Int,Int},
+    q::Tuple{Int,Int},
+    lx::Int,
+    ly::Int
+)::Int
+    dx = abs(p[1] - q[1])
+    dx = min(dx, lx - dx)
+    dy = abs(p[2] - q[2])
+    dy = min(dy, ly - dy)
+    return dx * dx + dy * dy
 end
 
 """
@@ -45,7 +77,15 @@ function list_sublattice_points(
     ly::Int,
     want_a::Bool
 )::Vector{Tuple{Int,Int}}
-    return FPS.list_sublattice_points(lx, ly, want_a)
+    sublattice_points = Tuple{Int,Int}[]
+    for x in 1:lx
+        for y in 1:ly
+            if is_sublattice_a(x, y) == want_a
+                push!(sublattice_points, (x, y))
+            end
+        end
+    end
+    return sublattice_points
 end
 
 """
@@ -77,6 +117,100 @@ function list_all_lattice_points(
 end
 
 """
+    min_distance_to_chosen(
+        point::Tuple{Int,Int},
+        chosen::Vector{Tuple{Int,Int}},
+        lx::Int,
+        ly::Int
+    ) -> Int
+
+用途: 计算候选点到已选 defect 集合的最小 torus 距离平方.
+参数:
+- point::Tuple{Int,Int}, 待评估格点.
+- chosen::Vector{Tuple{Int,Int}}, 已选 defect 坐标列表.
+- lx::Int, x 方向长度.
+- ly::Int, y 方向长度.
+返回:
+- Int, 最小 torus 距离平方. 当 `chosen` 为空时返回 `typemax(Int)`.
+"""
+function min_distance_to_chosen(
+    point::Tuple{Int,Int},
+    chosen::Vector{Tuple{Int,Int}},
+    lx::Int,
+    ly::Int
+)::Int
+    if isempty(chosen)
+        return typemax(Int)
+    end
+
+    min_distance_squared = typemax(Int)
+    for selected_point in chosen
+        distance_squared = torus_distance_squared(point, selected_point, lx, ly)
+        if distance_squared < min_distance_squared
+            min_distance_squared = distance_squared
+            if min_distance_squared == 0
+                break
+            end
+        end
+    end
+    return min_distance_squared
+end
+
+"""
+    select_fps_point(
+        candidates::Vector{Tuple{Int,Int}},
+        chosen::Vector{Tuple{Int,Int}},
+        used::Set{Tuple{Int,Int}},
+        lx::Int,
+        ly::Int
+    ) -> Tuple{Int,Int}
+
+用途: 在候选格点中选出 FPS 所需的“最大最小距离”格点.
+参数:
+- candidates::Vector{Tuple{Int,Int}}, 候选格点列表.
+- chosen::Vector{Tuple{Int,Int}}, 已选 defect 列表.
+- used::Set{Tuple{Int,Int}}, 已选 defect 集合, 用于跳过已用格点.
+- lx::Int, x 方向长度.
+- ly::Int, y 方向长度.
+返回:
+- Tuple{Int,Int}, 本轮选中的 defect 坐标.
+规则:
+- 首先最大化候选点到已选集合的最小 torus 距离平方.
+- 若出现并列, 按 `(x, y)` 字典序选择较小者, 保证确定性.
+"""
+function select_fps_point(
+    candidates::Vector{Tuple{Int,Int}},
+    chosen::Vector{Tuple{Int,Int}},
+    used::Set{Tuple{Int,Int}},
+    lx::Int,
+    ly::Int
+)::Tuple{Int,Int}
+    best_point = (-1, -1)
+    best_min_distance_squared = -1
+
+    for point in candidates
+        if point in used
+            continue
+        end
+
+        min_distance_squared = min_distance_to_chosen(point, chosen, lx, ly)
+        if min_distance_squared > best_min_distance_squared
+            best_min_distance_squared = min_distance_squared
+            best_point = point
+        elseif min_distance_squared == best_min_distance_squared
+            if point[1] < best_point[1] || (point[1] == best_point[1] && point[2] < best_point[2])
+                best_point = point
+            end
+        end
+    end
+
+    if best_point[1] < 0
+        throw(ArgumentError("没有可用的候选点, 请检查 ndefect 与子格数量."))
+    end
+    return best_point
+end
+
+"""
     generate_defect_positions_fps(
         lx::Int,
         ly::Int,
@@ -99,12 +233,36 @@ function generate_defect_positions_fps(
     ndefect::Int;
     first_defect::Tuple{Int,Int}=(div(lx, 3) + 1, div(ly, 3) + 1)
 )::Vector{Tuple{Int,Int}}
-    return FPS.generate_defect_positions_fps(
-        lx,
-        ly,
-        ndefect;
-        first_defect=first_defect
-    )
+    if lx <= 0 || ly <= 0
+        throw(ArgumentError("lx and ly must be positive."))
+    end
+    if ndefect < 0 || ndefect > lx * ly
+        throw(ArgumentError("ndefect must satisfy 0 <= ndefect <= lx * ly."))
+    end
+    if ndefect == 0
+        return Tuple{Int,Int}[]
+    end
+
+    first_x = mod1(first_defect[1], lx)
+    first_y = mod1(first_defect[2], ly)
+    first_point = (first_x, first_y)
+
+    defect_positions = Tuple{Int,Int}[first_point]
+    used_points = Set{Tuple{Int,Int}}(defect_positions)
+
+    start_is_a = is_sublattice_a(first_x, first_y)
+    candidates_a = list_sublattice_points(lx, ly, true)
+    candidates_b = list_sublattice_points(lx, ly, false)
+
+    for defect_idx in 2:ndefect
+        need_is_a = isodd(defect_idx) ? start_is_a : !start_is_a
+        candidates = need_is_a ? candidates_a : candidates_b
+        next_point = select_fps_point(candidates, defect_positions, used_points, lx, ly)
+        push!(defect_positions, next_point)
+        push!(used_points, next_point)
+    end
+
+    return defect_positions
 end
 
 """
@@ -252,7 +410,7 @@ function sample_weighted_point_by_min_distance(
             continue
         end
 
-        min_distance_squared = FPS.min_distance_to_chosen(point, chosen, lx, ly)
+        min_distance_squared = min_distance_to_chosen(point, chosen, lx, ly)
         point_weight = alpha == 0.0 ? 1.0 : (float(min_distance_squared) + SOFT_FPS_WEIGHT_EPSILON)^alpha
         total_weight += point_weight
         push!(available_points, point)

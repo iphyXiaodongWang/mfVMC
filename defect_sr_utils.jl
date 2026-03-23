@@ -756,9 +756,10 @@ end
 - 能量: :E, 使用 local_energy(model, vwf).
 - 每点 Sz: :Sz_i, 使用 get_Sz(vwf.sampler.state[i]).
 - 关联函数: :SS_i_j (i < j), 使用 measure_SiSj(vwf, i, j).
-- 派生量: :staggered_mz 与 :S_pi_pi, 在测量 :Sz_i 和 :SS_i_j 时同步累加, 避免重复计算.
+- 派生量: :staggered_mz, :average_abs_sz 与 :S_pi_pi, 在测量 :Sz_i 和 :SS_i_j 时同步累加, 避免重复计算.
 - 公式: S_i·S_j = Sz_i*Sz_j + 1/2*(S+_i S-_j + S-_i S+_j).
 - 公式: staggered_mz = sum_i [(-1)^(x_i+y_i) * Sz_i] / (Lx*Ly).
+- 公式: average_abs_sz = sum_i |Sz_i| / (Lx*Ly).
 - 公式: S_pi_pi = [2*sum_{i<j}((-1)^((x_i-x_j)+(y_i-y_j))*<Si·Sj>) + (3/4)*Nsite] / (Lx*Ly)^2.
 """
 function defination_observabels(
@@ -774,11 +775,13 @@ function defination_observabels(
 
     # 每个 sample 内在线累加, 由 :E 观测量触发重置.
     staggered_mz_acc = Ref(0.0)
+    average_abs_sz_acc = Ref(0.0)
     s_pi_pi_pair_acc = Ref(0.0)
     s_pi_pi_diag_const = 0.75 * n_sites / norm_sq
 
     observables[:E] = (model, vwf) -> begin
         staggered_mz_acc[] = 0.0
+        average_abs_sz_acc[] = 0.0
         s_pi_pi_pair_acc[] = 0.0
         return local_energy(model, vwf)
     end
@@ -791,6 +794,7 @@ function defination_observabels(
         observables[key] = (model, vwf) -> begin
             val = get_Sz(vwf.sampler.state[i])
             staggered_mz_acc[] += stagger_coeff * real(val)
+            average_abs_sz_acc[] += abs(real(val)) / norm_lattice
             return val
         end
     end
@@ -812,6 +816,7 @@ function defination_observabels(
 
     observables[:S_pi_pi] = (model, vwf) -> s_pi_pi_pair_acc[] + s_pi_pi_diag_const
     observables[:staggered_mz] = (model, vwf) -> staggered_mz_acc[]
+    observables[:average_abs_sz] = (model, vwf) -> average_abs_sz_acc[]
 
     return observables
 end
