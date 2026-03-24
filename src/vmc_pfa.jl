@@ -2,6 +2,7 @@ module VMC
 
 using Random, LinearAlgebra
 using OrderedCollections
+using SkewLinearAlgebra
 using ..Sampler
 
 
@@ -14,20 +15,37 @@ export measure_SxSx, measure_SplusSplus
 export measure_total_Sz, measure_total_Hole, measure_total_Doublon
 
 # export local_energy 
+function SkewMatrix!(F::AbstractMatrix{T}) where {T<:Number}
+    LinearAlgebra.require_one_based_indexing(F)
+    n = LinearAlgebra.checksquare(F)
 
+    @inbounds for i in 1:n
+        F[i, i] = zero(T)
+        for j in 1:i-1
+            value_ij = (F[i, j] - F[j, i]) / 2
+            F[i, j] = value_ij
+            F[j, i] = -value_ij
+        end
+    end
+    return F
+end
 # ==============================================================================
 # WorkSpace
 # ==============================================================================
 struct R1R2WS{T}
     N::Int
-    dr1::Vector{T}   # δr1 = newF1 - A[i,:]
-    dr2::Vector{T}   # δr2 = newF2 - A[j,:]
-    col1::Vector{T}  # col1 = Ainv' * δr1
-    col2::Vector{T}  # col2 = Ainv' * δr2
+    dr1::Vector{T}   # δr1[i] = gs_F[Rl',elec_locs[i]] - A[l,i]
+    dr2::Vector{T}   # δr2[i] = (1-δ_{i,l})(gs_F[Rm',elec_locs[i]] - A[m,i]) + δ_{i,l}(gs_F[Rm',Rl'] - gs_F[elec_locs[m],Rl'])
+    col1::Vector{T}  # col1 = Ainv * δr1
+    col2::Vector{T}  # col2 = Ainv * δr2
     xi::Vector{T}    # xi = copy(Ainv[:, i])
     xj::Vector{T}    # xj = copy(Ainv[:, j])
-    s0::Vector{T}    # 1st column of S
-    s1::Vector{T}    # 2nd column of S
+    a::T
+    b::T
+    c::T
+    d::T
+    e::T
+    f::T
 
     grad_buffer::Vector{T}
 end
@@ -38,9 +56,8 @@ end
 mutable struct vwf_pfa{T,S}
     # -- Matrices --
     gs_F::Matrix{T}
-    gs_F_t::Matrix{T}
 
-    awf_mat_t::Matrix{T}
+    awf_mat::Matrix{T}
     awf_inv::Matrix{T}
     awf_val::T
 
@@ -50,46 +67,48 @@ mutable struct vwf_pfa{T,S}
 
     # -- Workspace --
     ws::R1R2WS{T}
-    dUt_params::OrderedDict{Symbol,Matrix{T}}
-    dUt_list::Vector{Matrix{T}}
+    dF_params::OrderedDict{Symbol,Matrix{T}}
+    dF_list::Vector{Matrix{T}}
     param_keys::Vector{Symbol}
 end
 
-function vwf_pfa(U::Matrix{T}, sampler) where T
+function vwf_pfa(F::Matrix{T}, sampler) where T
     Nlat = sampler.N_sites
     expected_rows = 2 * Nlat
-    expected_cols = total_elec(sampler)
+    expected_cols = 2 * Nlat
 
-    @assert size(U, 1) == expected_rows "U rows $(size(U,1)) != 2*Nlat"
-    @assert size(U, 2) >= expected_cols "U cols $(size(U,2)) < Nelec"
+    @assert size(F, 1) == expected_rows "F rows $(size(F,1)) != 2*Nlat"
+    @assert size(F, 2) == expected_cols "F cols $(size(F,2)) != 2*Nlat"
 
-    dummy_ws = R1R2WS{T}(0, T[], T[], T[], T[], T[], T[], T[], T[], T[])
-
-    nelec = expected_cols
-    awf_mat_t = zeros(T, nelec, nelec)
+    dummy_ws = R1R2WS{T}(0, T[], T[], T[], T[], T[], T[], zero(T), zero(T), zero(T), zero(T), zero(T), zero(T), T[])
+    #nelec represet particle number conservation if sampler is nonPH
+    #nelec represet total sz conservation if sampler is PH
+    #one must sepcific one, or the fast update method fail
+    nelec = total_elec(sampler)
+    @assert nelec % 2 == 0 "total electron must be even!"
+    awf_mat = zeros(T, nelec, nelec)
     awf_inv = zeros(T, 1, 1)
 
-    dUt_params = OrderedDict{Symbol,Matrix{T}}()
-    dUt_list = Vector{Matrix{T}}()
+    dF_params = OrderedDict{Symbol,Matrix{T}}()
+    dF_list = Vector{Matrix{T}}()
     param_keys = Vector{Symbol}()
 
     return vwf_pfa{T,typeof(sampler)}(
-        U,
-        permutedims(U), # gs_F_t
-        awf_mat_t,      # awf_mat_t
+        SkewMatrix!(F),
+        awf_mat,      # awf_mat
         awf_inv,        # awf_inv (placeholder)
         T(0),
         one(T),
         sampler,
         dummy_ws,
-        dUt_params,
-        dUt_list,
+        dF_params,
+        dF_list,
         param_keys
     )
 end
 
 function ensure_ws!(v::vwf_pfa{T,S}) where {T,S}
-    N = size(v.awf_mat_t, 1)
+    N = size(v.awf_mat, 1)
     ws = v.ws
     if ws.N != N
         ws = R1R2WS{T}(
@@ -97,13 +116,13 @@ function ensure_ws!(v::vwf_pfa{T,S}) where {T,S}
             Vector{T}(undef, N), Vector{T}(undef, N),
             Vector{T}(undef, N), Vector{T}(undef, N),
             Vector{T}(undef, N), Vector{T}(undef, N),
-            Vector{T}(undef, N), Vector{T}(undef, N),
+            zero(T), zero(T), zero(T), zero(T), zero(T), zero(T),
             T[]
         )
         v.ws = ws
     end
 
-    n_params = length(v.dUt_params) # 注意：是 dU_params 还是 dUt_params，请保持变量名一致
+    n_params = length(v.dF_params) # 注意：是 dF_params 还是 dF_params，请保持变量名一致
     if length(ws.grad_buffer) != n_params
         resize!(ws.grad_buffer, n_params)
     end
@@ -111,29 +130,16 @@ function ensure_ws!(v::vwf_pfa{T,S}) where {T,S}
     return ws
 end
 
-# function update_dUt_list!(vwf::vwf_pfa)
-#     empty!(vwf.dUt_list)
-#     empty!(vwf.param_keys)
-
-#     for (k, v) in vwf.dUt_params
-#         push!(vwf.param_keys, k)
-#         push!(vwf.dUt_list, v)
-#     end
-
-#     ensure_ws!(vwf) 
-#     return nothing
-# end
-
 
 function update_vwf_params!(vwf::vwf_pfa{T}, new_params::OrderedDict{Symbol,Matrix{T}}) where T
-    vwf.dUt_params = new_params
+    vwf.dF_params = new_params
 
-    empty!(vwf.dUt_list)
+    empty!(vwf.dF_list)
     empty!(vwf.param_keys)
 
     for (k, v) in new_params
         push!(vwf.param_keys, k)
-        push!(vwf.dUt_list, v)
+        push!(vwf.dF_list, v)
     end
 
     ensure_ws!(vwf)
@@ -155,20 +161,24 @@ function init_gswf!(vwf::vwf_pfa{T,S}) where {T,S}
     #     end
     # end
 
-    if size(vwf.awf_mat_t, 1) != total_elec_count
-        vwf.awf_mat_t = zeros(T, total_elec_count, total_elec_count)
+    if size(vwf.awf_mat, 1) != total_elec_count || size(vwf.awf_mat, 2) != total_elec_count
+        vwf.awf_mat = zeros(T, total_elec_count, total_elec_count)
     end
-
     for i in 1:total_elec_count
-        row_in_U = ss.electron_locs[i]
-        copyto!(@view(vwf.awf_mat_t[:, i]), @view(vwf.gs_F_t[:, row_in_U]))
+        row_in_F = ss.electron_locs[i]
+        for j in i:total_elec_count
+            col_in_F = ss.electron_locs[j]
+            element = vwf.gs_F[row_in_F, col_in_F]
+            vwf.awf_mat[i, j] = element
+            vwf.awf_mat[j, i] = -element
+        end
+        vwf.awf_mat[i, i] = 0
     end
 
-    A_physical = transpose(vwf.awf_mat_t)
-    F = lu(A_physical)
-
-    vwf.awf_val = det(F)
-    vwf.awf_inv = inv(F)
+    #= A_physical = transpose(vwf.awf_mat)
+    F = lu(A_physical) =#
+    vwf.awf_val = pfaffian(vwf.awf_mat)
+    vwf.awf_inv = inv(vwf.awf_mat)
     vwf.current_ratio = one(T)
 
     ensure_ws!(vwf)
@@ -176,7 +186,7 @@ function init_gswf!(vwf::vwf_pfa{T,S}) where {T,S}
 end
 
 function rebuild_inverse!(vwf::vwf_pfa)
-    vwf.awf_inv = inv(transpose(vwf.awf_mat_t))
+    vwf.awf_inv = inv(vwf.awf_mat)
 end
 
 @inline function rank1_update_blas!(A::Matrix{T}, alpha::T, x::Vector{T}, y::Vector{T}) where T<:Float64
@@ -188,103 +198,114 @@ end
     BLAS.ger!(alpha, x, y_temp, A)
 end
 
+"""
+用途: 原位执行反对称的 rank-1 更新, 即 `A <- A + alpha * (x*y^T - y*x^T)`.
+"""
+@inline function skew_rank1_update_blas!(A::Matrix{T}, alpha::T, x::Vector{T}, y::Vector{T}) where {T<:Float64}
+    BLAS.ger!(alpha, x, y, A)
+    BLAS.ger!(-alpha, y, x, A)
+end
+
+"""
+用途: 原位执行复数情形下的反对称 rank-1 更新, 即 `A <- A + alpha * (x*y^T - y*x^T)`.
+应该用不到这个
+"""
+@inline function skew_rank1_update_blas!(A::Matrix{T}, alpha::T, x::Vector{T}, y::Vector{T}) where {T<:Complex}
+    n_row, n_col = size(A)
+    length(x) == n_row || throw(DimensionMismatch("length(x) = $(length(x)) != size(A, 1) = $n_row"))
+    length(y) == n_col || throw(DimensionMismatch("length(y) = $(length(y)) != size(A, 2) = $n_col"))
+
+    @inbounds for j in 1:n_col
+        x_j = x[j]
+        y_j = y[j]
+        for i in 1:n_row
+            A[i, j] += alpha * (x[i] * y_j - y[i] * x_j)
+        end
+    end
+end
+
 function ratio_rank1(vwf::vwf_pfa{T}, k::Int, new_row_idx_U::Int) where T
     val = zero(T)
-    N = size(vwf.awf_inv, 1)
-    @inbounds @simd for j in 1:N
-        val += vwf.gs_F_t[j, new_row_idx_U] * vwf.awf_inv[j, k]
+    @inbounds @simd for (j, loc) in enumerate(vwf.sampler.electron_locs)
+        val += vwf.gs_F[new_row_idx_U, loc] * vwf.awf_inv[j, k]
     end
     return val
 end
 
 function update_rank1!(vwf::vwf_pfa{T}, k::Int, new_row_idx_U::Int, ratio::T) where T
     ws = ensure_ws!(vwf)
-    A_t = vwf.awf_mat_t
+    A = vwf.awf_mat
     Ainv = vwf.awf_inv
-    N = size(A_t, 1)
 
-    @inbounds @simd for j in 1:N
-        ws.dr1[j] = vwf.gs_F_t[j, new_row_idx_U] - A_t[j, k]
+    @inbounds @simd for (j, loc) in enumerate(vwf.sampler.electron_locs)
+        ws.dr1[j] = vwf.gs_F[new_row_idx_U, loc] - A[k, j]
     end
 
-    mul!(ws.col1, transpose(Ainv), ws.dr1)
+    mul!(ws.col1, Ainv, ws.dr1)
     copyto!(ws.xi, @view Ainv[:, k])
-    rank1_update_blas!(Ainv, -1 / ratio, ws.xi, ws.col1)
+    skew_rank1_update_blas!(Ainv, 1 / ratio, ws.xi, ws.col1)
 
-    @inbounds @simd for j in 1:N
-        A_t[j, k] = vwf.gs_F_t[j, new_row_idx_U]
+    @inbounds @simd for (j, loc) in enumerate(vwf.sampler.electron_locs)
+        if j != k
+            A[k, j] = vwf.gs_F[new_row_idx_U, loc]
+            A[j, k] = vwf.gs_F[loc, new_row_idx_U]
+        else
+            A[j, j] = 0
+        end
     end
 
     vwf.awf_val *= ratio
 end
 
 function ratio_rank2(vwf::vwf_pfa{T}, k1::Int, k2::Int, new_row1_U::Int, new_row2_U::Int) where T
+    ws = ensure_ws!(vwf)
+    A = vwf.awf_mat
     Ainv = vwf.awf_inv
-    U_t = vwf.gs_F_t
-    N = size(Ainv, 1)
 
-    d11 = zero(T)
-    d12 = zero(T)
-    d21 = zero(T)
-    d22 = zero(T)
-
-    @inbounds @simd for j in 1:N
-        u1 = U_t[j, new_row1_U]
-        u2 = U_t[j, new_row2_U]
-        inv_k1 = Ainv[j, k1]
-        inv_k2 = Ainv[j, k2]
-
-        d11 += u1 * inv_k1
-        d12 += u1 * inv_k2
-        d21 += u2 * inv_k1
-        d22 += u2 * inv_k2
+    @inbounds @simd for (j, loc) in enumerate(vwf.sampler.electron_locs)
+        ws.dr1[j] = vwf.gs_F[new_row1_U, loc] - A[k1, j]
+        ws.dr2[j] = j == k1 ? vwf.gs_F[new_row2_U, new_row1_U] - vwf.gs_F[vwf.sampler.electron_locs[k2], new_row1_U] : vwf.gs_F[new_row2_U, loc] - A[k2, j]
     end
-    return d11 * d22 - d12 * d21
+    copyto!(ws.xi, @view Ainv[:, k1])
+    copyto!(ws.xj, @view Ainv[:, k2])
+    mul!(ws.col2, Ainv, ws.dr2)
+    ws.a = 1 + dot(ws.dr1, ws.xi)
+    ws.b = dot(ws.dr1, ws.col2)
+    ws.c = dot(ws.dr1, ws.xj)
+    ws.d = -dot(ws.dr2, ws.xi)
+    ws.e = Ainv[k1, k2]
+    ws.f = 1 + dot(ws.dr2, ws.xj)
+    return ws.a * ws.f - ws.b * ws.e + ws.c * ws.d
 end
 
 function update_rank2!(vwf::vwf_pfa{T}, k1::Int, k2::Int, new_row1_U::Int, new_row2_U::Int, ratio::T) where T
     ws = ensure_ws!(vwf)
-    A_t = vwf.awf_mat_t
+    A = vwf.awf_mat
     Ainv = vwf.awf_inv
-    N = size(A_t, 1)
+    N = size(A, 1)
 
-    @inbounds @simd for j in 1:N
-        ws.dr1[j] = vwf.gs_F_t[j, new_row1_U] - A_t[j, k1]
-        ws.dr2[j] = vwf.gs_F_t[j, new_row2_U] - A_t[j, k2]
-    end
+    mul!(ws.col1, Ainv, ws.dr1)
 
-    mul!(ws.col1, transpose(Ainv), ws.dr1)
-    mul!(ws.col2, transpose(Ainv), ws.dr2)
+    skew_rank1_update_blas!(Ainv, ws.f / ratio, ws.col1, ws.xi)
+    skew_rank1_update_blas!(Ainv, -ws.e / ratio, ws.col1, ws.col2)
+    skew_rank1_update_blas!(Ainv, ws.d / ratio, ws.col1, ws.xj)
+    skew_rank1_update_blas!(Ainv, ws.c / ratio, ws.xi, ws.col2)
+    skew_rank1_update_blas!(Ainv, -ws.b / ratio, ws.xi, ws.xj)
+    skew_rank1_update_blas!(Ainv, ws.a / ratio, ws.col2, ws.xj)
 
-    k_11 = 1.0 + ws.col1[k1]
-    k_12 = ws.col1[k2]
-    k_21 = ws.col2[k1]
-    k_22 = 1.0 + ws.col2[k2]
-
-    detK = k_11 * k_22 - k_12 * k_21
-    invDet = 1.0 / detK
-
-    i_11 = k_22 * invDet
-    i_12 = -k_12 * invDet
-    i_21 = -k_21 * invDet
-    i_22 = k_11 * invDet
-
-    copyto!(ws.xi, @view Ainv[:, k1])
-    copyto!(ws.xj, @view Ainv[:, k2])
-
-    @inbounds @simd for j in 1:N
-        xi_val = ws.xi[j]
-        xj_val = ws.xj[j]
-        ws.s0[j] = i_11 * xi_val + i_21 * xj_val
-        ws.s1[j] = i_12 * xi_val + i_22 * xj_val
-    end
-
-    rank1_update_blas!(Ainv, -one(T), ws.s0, ws.col1)
-    rank1_update_blas!(Ainv, -one(T), ws.s1, ws.col2)
-
-    @inbounds @simd for j in 1:N
-        A_t[j, k1] = vwf.gs_F_t[j, new_row1_U]
-        A_t[j, k2] = vwf.gs_F_t[j, new_row2_U]
+    @inbounds @simd for (j, loc) in enumerate(vwf.sampler.electron_locs)
+        if j == k1
+            A[k1, k1] = 0
+            A[k1, k2] = vwf.gs_F[new_row1_U, new_row2_U]
+            A[k2, k1] = vwf.gs_F[new_row2_U, new_row1_U]
+        elseif j == k2
+            A[k2, k2] = 0
+        else
+            A[k1, j] = vwf.gs_F[new_row1_U, loc]
+            A[j, k1] = vwf.gs_F[loc, new_row1_U]
+            A[k2, j] = vwf.gs_F[new_row2_U, loc]
+            A[j, k2] = vwf.gs_F[loc, new_row2_U]
+        end
     end
 
     vwf.awf_val *= ratio
@@ -421,25 +442,27 @@ function find_stable_config!(vwf::vwf_pfa{T}, kernel::AbstractMCMCKernel, rng::A
         # Sampler 已经更新了 electron_locs，直接利用它填充矩阵
         total_elec_count = total_elec(ss)
         for i in 1:total_elec_count
-            # electron_locs[i] 存储的是基组索引 (2*site+spin)，对应 gs_F_t 的列
-            basis_idx = ss.electron_locs[i]
-
-            # awf_mat_t 是转置存储的 (列是电子，行是轨道)
-            copyto!(@view(vwf.awf_mat_t[:, i]), @view(vwf.gs_F_t[:, basis_idx]))
+            row_in_F = ss.electron_locs[i]
+            for j in i:total_elec_count
+                col_in_F = ss.electron_locs[j]
+                element = vwf.gs_F[row_in_F, col_in_F]
+                vwf.awf_mat[i, j] = element
+                vwf.awf_mat[j, i] = -element
+            end
+            vwf.awf_mat[i, i] = 0
         end
 
         # === 3. 检查数值稳定性 ===
-        # 计算行列式
-        F = lu(transpose(vwf.awf_mat_t), check=false)
-        d = det(F)
+        # 计算pfaffian
+        d = pfaffian(vwf.awf_mat)
 
 
         try
             # 计算逆矩阵
-            current_inv = inv(transpose(vwf.awf_mat_t))
+            current_inv = inv(vwf.awf_mat)
 
             # 验证逆矩阵精度
-            prod_mat = current_inv * transpose(vwf.awf_mat_t)
+            prod_mat = current_inv * vwf.awf_mat
             diff = norm(prod_mat - I)
 
             if diff < tol_inv
@@ -721,12 +744,12 @@ function compute_grad_log_psi!(vwf::vwf_pfa{T}) where T
     fill!(O_vec, zero(T))
 
     # 3. 遍历所有可变参数
-    for (param_idx, dU_t) in enumerate(vwf.dUt_list)
+    for (param_idx, dF) in enumerate(vwf.dF_list)
 
         total_sum = zero(T)
 
         # 顺序：外层电子(elec)，内层轨道(orb)
-        # 优化理由：dU_t[orb, r] 和 A_inv[orb, elec] 第一维都是 orb，内存连续
+        # 优化理由：dF[orb, r] 和 A_inv[orb, elec] 第一维都是 orb，内存连续
         @inbounds for elec in 1:Nelec
             r = ss.electron_locs[elec]
 
@@ -734,10 +757,11 @@ function compute_grad_log_psi!(vwf::vwf_pfa{T}) where T
 
             # SIMD 内积
             @simd for orb in 1:Norb
-                col_sum += A_inv[orb, elec] * dU_t[orb, r]
+                o = ss.electron_locs[orb]
+                col_sum += A_inv[orb, elec] * dF[r, o]
             end
 
-            total_sum += col_sum
+            total_sum += 0.5 * col_sum
         end
 
         # 直接使用 enumerate 的索引，不再依赖计数器变量
