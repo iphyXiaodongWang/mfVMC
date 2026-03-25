@@ -40,17 +40,17 @@ function main()
     j2 = args["J2"]
     j3 = args["J3"]
     n_defect = args["Ndefect"]
-    defect_ansatz = args["defectansatz"]
+    #defect_ansatz = args["defectansatz"]
     target_sz = args["target_sz"]
     n_mc = args["nMC"]
     w_mc = args["wMC"]
     r_mc = args["rMC"]
     d_mc = args["dMC"]
     seed = args["seed"]
-    defect_seed = args["defect_seed"]
-    if defect_seed == typemin(Int)
-        defect_seed = seed
-    end
+    #defect_seed = args["defect_seed"]
+    #if defect_seed == typemin(Int)
+    #    defect_seed = seed
+    #end
     n_steps = args["nSR"]
     lr = args["lr"]
     lr_end = args["lr_end"]
@@ -61,13 +61,16 @@ function main()
     job = args["job"]
 
     n_sites_full = lx * ly
-    defect_positions = DefectGenerators.generate_defect_positions(
+    defect_positions = [(4, 2), (10, 7), (7, 10), (5, 8), (2, 11), (12, 6), (11, 1),
+        (4, 12), (9, 2), (2, 8), (10, 10), (9, 5), (2, 4), (5, 4), (5, 10)]
+    defect_positions = defect_positions[1:n_defect]
+    #= defect_positions = DefectGenerators.generate_defect_positions(
         defect_ansatz,
         lx,
         ly,
         n_defect;
         seed=defect_seed
-    )
+    ) =#
     defect_index = [xy_to_id_1based(x, y, lx, ly) for (x, y) in defect_positions]
     n_sites = n_sites_full - n_defect
 
@@ -86,10 +89,12 @@ function main()
     for (i, j) in bonds_j3
         push!(terms, OperatorTerm([:SS], [i, j], j3))
     end
-
+    index_1_1 = xy_to_reduced_id_1based(1, 1, lx, ly, defect_index)
     index_1_ly = xy_to_reduced_id_1based(1, ly, lx, ly, defect_index)
     index_lx_1 = xy_to_reduced_id_1based(lx, 1, lx, ly, defect_index)
     index_lx_ly = xy_to_reduced_id_1based(lx, ly, lx, ly, defect_index)
+
+    push!(terms, OperatorTerm([:Sz], [index_1_1], 0.3))
     push!(terms, OperatorTerm([:Sz], [index_1_ly], -0.3))
     push!(terms, OperatorTerm([:Sz], [index_lx_1], -0.3))
     push!(terms, OperatorTerm([:Sz], [index_lx_ly], 0.3))
