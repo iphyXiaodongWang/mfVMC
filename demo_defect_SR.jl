@@ -167,7 +167,7 @@ function main()
     elseif job == "measure"
         observables = defination_observabels(lx, ly, n_sites, defect_index)
         # 默认不保留历史, 如需阻塞法(Binning)请在此列出观测量名称
-        history_observables = [:E, :staggered_mz, :average_abs_sz, :S_pi_pi]
+        history_observables = [:E, :staggered_mz, :S_pi_pi]
         results = run_simulation(
             ham,
             vwf,

@@ -20,16 +20,42 @@ def plot_spin_lattice(
     title="Spin configuration (z-direction)",
     output="spin_lattice.png",
 ):
-    """绘制自旋格点图, 仅把缺失点视为 defect. 参数: mz_matrix为二维numpy数组, path为保存路径字符串, scale为箭头缩放系数float, show_value为bool表示是否显示数值. 返回: None."""
+    """用途: 绘制自旋格点图, 仅把缺失点视为 defect.
+
+    参数:
+    - mz_matrix: 2D numpy.ndarray, 形状为 `(Lx, Ly)`, 非 defect 位置存放 `<S_i^z>`, defect 位置为 `np.nan`.
+    - path: str, 输出目录路径.
+    - scale: float, 箭头长度缩放系数.
+    - show_value: bool, 是否在每个非 defect 格点上显示数值.
+    - title: str, 图片标题.
+    - output: str, 输出图片文件名.
+
+    返回:
+    - None.
+
+    说明:
+    - 当 `show_value=True` 时, 根据系统尺寸自动放大画布并缩放字号, 以减轻大尺寸系统中数值标签重叠的问题.
+    """
     lx, ly = mz_matrix.shape
-    plt.figure(figsize=(6, 6))
+    lattice_size = max(lx, ly)
+    if show_value:
+        figure_size = max(9.0, 0.7 * lattice_size)
+        font_size = max(4.0, min(8.0, 120.0 / lattice_size))
+        value_format = "{:.2f}"
+    else:
+        figure_size = max(6.0, 0.45 * lattice_size)
+        font_size = 8.0
+        value_format = "{:.3f}"
+
+    plt.figure(figsize=(figure_size, figure_size))
+    axis = plt.gca()
     for x in range(lx):
         for y in range(ly):
             if np.isnan(mz_matrix[x, y]):
                 circle = plt.Circle(
                     (x, y), radius=0.5, fill=False, edgecolor="black", linewidth=1
                 )
-                plt.gca().add_artist(circle)
+                axis.add_artist(circle)
                 continue
 
             plt.scatter(x, y, s=10, c="black")
@@ -37,11 +63,17 @@ def plot_spin_lattice(
                 plt.text(
                     x,
                     y,
-                    f"{mz_matrix[x, y]:.3f}",
+                    value_format.format(mz_matrix[x, y]),
                     ha="center",
                     va="center",
-                    fontsize=8,
+                    fontsize=font_size,
                     color="black",
+                    bbox={
+                        "facecolor": "white",
+                        "edgecolor": "none",
+                        "alpha": 0.75,
+                        "pad": 0.05,
+                    },
                 )
             if mz_matrix[x, y] != 0:
                 plt.arrow(
@@ -55,11 +87,12 @@ def plot_spin_lattice(
                     length_includes_head=False,
                     color="red" if mz_matrix[x, y] >= 0 else "blue",
                 )
-    plt.gca().set_aspect("equal", adjustable="box")
+    axis.set_aspect("equal", adjustable="box")
     plt.xticks(range(lx))
     plt.yticks(range(ly))
     plt.title(title)
-    plt.savefig(os.path.join(path, output))
+    plt.savefig(os.path.join(path, output), dpi=200, bbox_inches="tight")
+    plt.close()
 
 
 def parse_arguments():
