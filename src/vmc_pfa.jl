@@ -15,7 +15,7 @@ end
 # ==============================================================================
 # WorkSpace
 # ==============================================================================
-struct PfaR1R2WS{T}
+mutable struct PfaR1R2WS{T}
     N::Int
     dr1::Vector{T}   # δr1[i] = gs_F[Rl',elec_locs[i]] - A[l,i]
     dr2::Vector{T}   # δr2[i] = (1-δ_{i,l})(gs_F[Rm',elec_locs[i]] - A[m,i]) + δ_{i,l}(gs_F[Rm',Rl'] - gs_F[elec_locs[m],Rl'])

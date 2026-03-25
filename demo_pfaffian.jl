@@ -73,15 +73,14 @@ end
 # 3. 辅助函数
 # ==============================================================================
 
-function update_ansatz!(vwf, para_names::Vector{Symbol}, params::Vector{Float64}, LX, LY, BCX, BCY; target_sz::Int=0)
+function update_ansatz!(vwf, para_names::Vector{Symbol}, params::Vector{Float64}, LX, LY, BCX, BCY)
     # 这里也可以把 bcx, bcy 提出来作为参数
     kwargs = NamedTuple{Tuple(para_names)}(params)
     heisenberg_params = PartonSquare.HeisenbergParams(; Lx=LX, Ly=LY, bcx=BCX, bcy=BCY, chi1=1.0, kwargs...)
-    _, gs_U, dUt_params = PartonSquare.make_ansatz_and_derivs(heisenberg_params; para_names=para_names, target_sz=target_sz)
+    _, gs_F, dF_params = PartonSquare.make_ansatz_and_derivs_pfa(heisenberg_params; para_names=para_names)
 
-    copyto!(vwf.gs_U, gs_U)
-    copyto!(vwf.gs_U_t, permutedims(gs_U))
-    update_vwf_params!(vwf, dUt_params)
+    copyto!(vwf.gs_F, gs_F)
+    update_vwf_params!(vwf, dF_params)
     init_gswf!(vwf)
 end
 
@@ -147,18 +146,18 @@ function main()
     end
     ham = GeneralModel(N_sites, terms)
 
-    sampler = config_Heisenberg(N_sites, N_sites / 2)
+    sampler = config_Heisenberg(N_sites, div(N_sites, 2))
     init_config_Heisenberg!(sampler)
 
-    vwf = vwf_det(zeros(Float64, 2 * N_sites, N_sites + target_sz), sampler)
+    vwf = vwf_pfa(zeros(Float64, 2 * N_sites, 2 * N_sites), sampler)
     kernel = HeisenbergKernel(conserve_sz=true)
 
     # C. 更新波函数参数
     if rank == 0
         println("Initial parameters: $init_params")
     end
-    update_ansatz!(vwf, para_names, init_params, LX, LY, BCX, BCY; target_sz=target_sz)
-    update_vwf_func! = (vwf, params) -> update_ansatz!(vwf, para_names, params, LX, LY, BCX, BCY; target_sz=target_sz)
+    update_ansatz!(vwf, para_names, init_params, LX, LY, BCX, BCY)
+    update_vwf_func! = (vwf, params) -> update_ansatz!(vwf, para_names, params, LX, LY, BCX, BCY)
 
 
     # D. 运行模拟
