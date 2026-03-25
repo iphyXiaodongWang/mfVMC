@@ -12,7 +12,14 @@ import sys
 import argparse
 
 
-def plot_spin_lattice(mz_matrix, path, scale=1.0, show_value=False):
+def plot_spin_lattice(
+    mz_matrix,
+    path,
+    scale=1.0,
+    show_value=False,
+    title="Spin configuration (z-direction)",
+    output="spin_lattice.png",
+):
     """绘制自旋格点图, 仅把缺失点视为 defect. 参数: mz_matrix为二维numpy数组, path为保存路径字符串, scale为箭头缩放系数float, show_value为bool表示是否显示数值. 返回: None."""
     lx, ly = mz_matrix.shape
     plt.figure(figsize=(6, 6))
@@ -51,8 +58,8 @@ def plot_spin_lattice(mz_matrix, path, scale=1.0, show_value=False):
     plt.gca().set_aspect("equal", adjustable="box")
     plt.xticks(range(lx))
     plt.yticks(range(ly))
-    plt.title("Spin configuration (z-direction)")
-    plt.savefig(os.path.join(path, "spin_lattice.png"))
+    plt.title(title)
+    plt.savefig(os.path.join(path, output))
 
 
 def parse_arguments():
@@ -75,6 +82,7 @@ args = parse_arguments()
 path = args.path
 lx = ly = args.L
 mz_matrix = np.full((lx, ly), np.nan)
+inverse_mz_matrix = np.full((lx, ly), np.nan)
 folder = "./data/"
 """ for name in os.listdir(folder):
     path = folder + name + "/"
@@ -119,4 +127,12 @@ for x in range(lx):
         key = f"mz_{x}_{y}"
         if key in Sz:
             mz_matrix[x, y] = Sz[key]
+            inverse_mz_matrix[x, y] = Sz[key] * ((-1) ** (x + y))
 plot_spin_lattice(mz_matrix, path, show_value=True)
+plot_spin_lattice(
+    inverse_mz_matrix,
+    path,
+    show_value=False,
+    title="Domain Configuration",
+    output="domain.png",
+)
