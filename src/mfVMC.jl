@@ -27,9 +27,9 @@ using .Utils
 export compute_eig_and_dU_reg1, expand_spatial_to_spinful, add_term_ij_PH, blocking_binning, extract_min_energy
 
 # 导出 VMC 模块的内容0
-include("vmc_det.jl") # 确保这个文件包含更新后的代码
-using .VMC  # 确保加载 VMC 模块
-export vwf_det, VMCRunner, update_vwf_params!
+include("vmc.jl")
+using .VMC
+export vwf_det, vwf_pfa, VMCRunner, update_vwf_params!
 export init_gswf!, mcmc_step!, calc_ham_eng, accept_move!, rebuild_inverse!
 export measure_green, measure_SzSz, measure_SplusSminus, measure_SiSj, get_Sz, calc_ratio, compute_grad_log_psi!
 export measure_total_Sz, measure_total_Hole, measure_total_Doublon
