@@ -326,8 +326,8 @@ function init_config_Hubbard!(ss::Configuration; n_doublon::Union{Int,Nothing}=n
             ss.electron_locs[elec_id_counter] = idx_global
         end
     end
-    total_elec = total_elec(ss)
-    @assert elec_id_counter == total_elec "total elec number ($elec_id_counter) is not ($total_elec)"
+    total_elec_count = total_elec(ss)
+    @assert elec_id_counter == total_elec_count "total elec number ($elec_id_counter) is not ($total_elec_count)"
 
     return ss
 end
@@ -1608,4 +1608,3 @@ end
 
 
 end # module
-

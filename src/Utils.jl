@@ -4,7 +4,8 @@ using LinearAlgebra
 using Statistics
 using JSON
 
-export compute_eig_and_dU_reg1, expand_spatial_to_spinful, add_term_ij_PH
+export compute_eig_and_dU_reg1, expand_spatial_to_spinful, add_term_ij_PH, add_term_ij_nonPH, add_term_ij_pfa_pairing
+export pinv_derivative
 export blocking_binning
 export extract_min_energy
 
@@ -49,7 +50,40 @@ function add_term_ij_PH(tmat, i, j, chi, eta; singlet::Bool=true)
     tmat[(i-1)*2+1, (j-1)*2+2] += eta
     tmat[(j-1)*2+1, (i-1)*2+2] += eta * sign
 end
+function add_term_ij_nonPH(tmat, i, j, chi)
+    @assert i != j
+    tmat[(i-1)*2+1, (j-1)*2+1] += chi        # Julia 1-based
+    tmat[(i-1)*2+2, (j-1)*2+2] += chi
+end
+function add_term_ij_pfa_pairing(tmat, i, j, eta; singlet::Bool=true)
+    sign = singlet ? 1 : -1
+    @assert i != j
+    tmat[(i-1)*2+1, (j-1)*2+2] += eta
+    tmat[(j-1)*2+1, (i-1)*2+2] += eta * sign
+end
 
+function pinv_derivative(A::AbstractMatrix, dA::AbstractMatrix, pinvA::AbstractMatrix)
+    # 转为浮点/复数矩阵，避免类型问题
+    A = Matrix{Float64}(A)
+    dA = Matrix{Float64}(dA)
+    pinvA = Matrix{Float64}(pinvA)
+    # 伪逆
+    #pinvA = pinv(A; rtol=rtol)
+
+    # 一些常用量
+    pinvAH = pinvA'        # A^{+\dagger}
+    dAH = dA'        # (∂A)^\dagger
+
+    I_left = I - pinvA * A   # I - A^+ A
+    I_right = I - A * pinvA   # I - A A^+
+
+    # 三项公式
+    term1 = -pinvA * dA * pinvA
+    term2 = pinvA * pinvAH * dAH * I_right
+    term3 = I_left * dAH * pinvAH * pinvA
+
+    return term1 + term2 + term3
+end
 squeeze1(v) = (isa(v, AbstractVector) && length(v) == 1 ? v[1] : v)
 """
 阻塞法估计均值标准误，同时给出 n_eff 与 tau_int 的粗估。

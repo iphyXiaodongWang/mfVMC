@@ -163,6 +163,39 @@ function build_ham_PH(p::HeisenbergParams)
     H = Hermitian(H + H')
     return H
 end
+function build_ham_pfa(p::HeisenbergParams)
+    Lx, Ly = p.Lx, p.Ly
+    Nlat = Lx * Ly
+    chi1 = p.chi1
+    etad1 = p.etad1
+    etas1 = p.etas1
+    mz = p.mz
+    hblock = zeros(Float64, 2 * Nlat, 2 * Nlat)
+    pblock = zeros(Float64, 2 * Nlat, 2 * Nlat)
+    H = zeros(Float64, 4 * Nlat, 4 * Nlat)
+    for x in 1:Lx
+        for y in 1:Ly
+            id0 = xy_to_idx(x, y, Ly)
+            Q = (-1)^(x + y)
+            # --- Y 方向 ---
+            idy = (y == Ly) ? xy_to_idx(x, 1, Ly) : xy_to_idx(x, y + 1, Ly)
+            bc_y = (y == Ly) ? p.bcy : 1.0
+            # --- X 方向 ---
+            idx = (x == Lx) ? xy_to_idx(1, y, Ly) : xy_to_idx(x + 1, y, Ly)
+            bc_x = (x == Lx) ? p.bcx : 1.0
+            add_term_ij_nonPH(hblock, id0, idx, chi1 * bc_x)
+            add_term_ij_nonPH(hblock, id0, idy, chi1 * bc_y)
+            add_term_ij_pfa_pairing(pblock, id0, idx, (+etas1 - etad1) * bc_x)
+            add_term_ij_pfa_pairing(pblock, id0, idy, (+etas1 + etad1) * bc_y)
+            hblock[2*(id0-1)+1, 2*(id0-1)+1] += Q * mz / 2
+            hblock[2*(id0-1)+2, 2*(id0-1)+2] += -Q * mz / 2
+        end
+    end
+    hblock.+=hblock'
+    pblock.-=pblock'
+    H=Hermitian([-hblock -pblock;pblock hblock])
+    return H
+end
 function make_ansatz_and_derivs(p::HeisenbergParams; para_names::Vector{Symbol}=[:etad1, :etas1, :mz], target_sz::Int=0)
     H = build_ham_PH(p)
     H_alphas = Dict{Symbol,Matrix{Float64}}()
@@ -188,7 +221,35 @@ function make_ansatz_and_derivs(p::HeisenbergParams; para_names::Vector{Symbol}=
     dUt_occ = OrderedDict(alpha => permutedims(real.(dU_dict[alpha][:, 1:n_occ])) for alpha in para_names)
     return ε, U_occ, dUt_occ
 end
+function make_ansatz_and_derivs_pfa(p::HeisenbergParams; para_names::Vector{Symbol}=[:etad1, :etas1, :mz])
+    H = build_ham_pfa(p)
+    H_alphas = Dict{Symbol,Matrix{Float64}}()
+    for name in para_names
+        pp = HeisenbergParams(; (; name => 1.0, :Lx => p.Lx, :Ly => p.Ly, :bcx => p.bcx, :bcy => p.bcy)...)
+        dH = build_ham_pfa(pp)
+        H_alphas[name] = dH
+    end
+    # 2. 对角化并计算导数 (Utils)
+    ε, U_full, dE, dU_dict = Utils.compute_eig_and_dU_reg1(H, H_alphas)
+    eig_eq_error = norm(Matrix(H) * U_full - U_full * Diagonal(ε))
+    if is_root_rank()
+        println("Eigen equation error (HU - Uε): ", eig_eq_error)
+    end
+    # 3. 计算F矩阵及其导数
+    N=div(length(ε),2)
+    umatrix=U_full[1:N,1:N]
+    vmatrix=U_full[N+1:end,1:N]
+    pinv_umatrix=pinv(umatrix)
+    F=vmatrix*pinv_umatrix
+    F_alphas=OrderedDict{Symbol,Matrix{Float64}}()
+    for name in para_names
+        dumatrix=dU_dict[name][1:N,1:N]
+        dvmatrix=dU_dict[name][N+1:end,1:N]
+        F_alphas[name] = dvmatrix*pinv_umatrix+vmatrix* pinv_derivative(umatrix,dumatrix,pinv_umatrix)
+    end
 
+    return ε, F, F_alphas
+end
 # ======================================================================
 # Defect Heisenberg (PH, determinant)
 # ======================================================================
@@ -497,5 +558,4 @@ function make_defect_ansatz_and_derivs(
     return ε, real.(U_occ), dUt_occ
 end
 end
-
 # module
