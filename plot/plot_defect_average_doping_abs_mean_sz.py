@@ -298,20 +298,22 @@ def collect_all_seed_rows(data_root, lattice_size):
     return all_seed_rows
 
 
-def compute_mean_and_std(values):
-    """用途: 计算均值与样本标准差.
+def compute_mean_std_and_se(values):
+    """用途: 计算均值, 样本标准差与平均值标准误差.
 
     参数:
     - values: list[float], 待统计数值列表.
 
     返回:
-    - tuple[float, float], `(mean_value, std_value)`.
+    - tuple[float, float, float], `(mean_value, std_value, se_value)`.
 
     公式:
     - 均值:
       `mean = (1 / N) * sum_i x_i`
     - 样本标准差:
       `std = sqrt(sum_i (x_i - mean)^2 / (N - 1))`, 当 `N < 2` 时返回 `NaN`.
+    - 平均值标准误差:
+      `SE = std / sqrt(N)`, 当 `N < 2` 时返回 `NaN`.
     """
 
     n_value = len(values)
@@ -320,14 +322,16 @@ def compute_mean_and_std(values):
 
     mean_value = sum(values) / n_value
     if n_value < 2:
-        return mean_value, math.nan
+        return mean_value, math.nan, math.nan
 
     variance = sum((value - mean_value) ** 2 for value in values) / (n_value - 1)
-    return mean_value, math.sqrt(variance)
+    std_value = math.sqrt(variance)
+    se_value = std_value / math.sqrt(n_value)
+    return mean_value, std_value, se_value
 
 
 def build_average_rows(seed_rows):
-    """用途: 按 Ndefect 汇总不同 defect_seed 的均值与标准差.
+    """用途: 按 Ndefect 汇总不同 defect_seed 的均值, 样本标准差与标准误差.
 
     参数:
     - seed_rows: list[dict], 所有 per-seed 明细数据.
@@ -345,11 +349,11 @@ def build_average_rows(seed_rows):
         rows = grouped_rows[ndefect]
         doping = rows[0]["doping"]
 
-        abs_staggered_mean, abs_staggered_std = compute_mean_and_std(
+        abs_staggered_mean, abs_staggered_std, abs_staggered_se = compute_mean_std_and_se(
             [row["abs_staggered_mz"] for row in rows]
         )
-        spi_mean, spi_std = compute_mean_and_std([row["S_pi_pi"] for row in rows])
-        abs_mean_sz_mean, abs_mean_sz_std = compute_mean_and_std(
+        spi_mean, spi_std, spi_se = compute_mean_std_and_se([row["S_pi_pi"] for row in rows])
+        abs_mean_sz_mean, abs_mean_sz_std, abs_mean_sz_se = compute_mean_std_and_se(
             [row["average_abs_mean_sz"] for row in rows]
         )
 
@@ -360,10 +364,13 @@ def build_average_rows(seed_rows):
                 "n_seed_used": len(rows),
                 "abs_staggered_mz_mean": abs_staggered_mean,
                 "abs_staggered_mz_std": abs_staggered_std,
+                "abs_staggered_mz_se": abs_staggered_se,
                 "S_pi_pi_mean": spi_mean,
                 "S_pi_pi_std": spi_std,
+                "S_pi_pi_se": spi_se,
                 "average_abs_mean_sz_mean": abs_mean_sz_mean,
                 "average_abs_mean_sz_std": abs_mean_sz_std,
+                "average_abs_mean_sz_se": abs_mean_sz_se,
             }
         )
 
@@ -400,7 +407,7 @@ def write_seed_summary_csv(output_path, seed_rows):
 
 
 def write_average_summary_csv(output_path, average_rows):
-    """用途: 将按 Ndefect 汇总后的均值和标准差写入 CSV.
+    """用途: 将按 Ndefect 汇总后的均值, 标准差和标准误差写入 CSV.
 
     参数:
     - output_path: Path, 输出 CSV 路径.
@@ -416,10 +423,13 @@ def write_average_summary_csv(output_path, average_rows):
         "n_seed_used",
         "abs_staggered_mz_mean",
         "abs_staggered_mz_std",
+        "abs_staggered_mz_se",
         "S_pi_pi_mean",
         "S_pi_pi_std",
+        "S_pi_pi_se",
         "average_abs_mean_sz_mean",
         "average_abs_mean_sz_std",
+        "average_abs_mean_sz_se",
     ]
     with output_path.open("w", encoding="utf-8", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=fieldnames)
@@ -428,7 +438,7 @@ def write_average_summary_csv(output_path, average_rows):
 
 
 def plot_average_rows(output_path, average_rows):
-    """用途: 绘制不同 doping 下三个观测量的均值与标准差误差棒图.
+    """用途: 绘制不同 doping 下三个观测量的均值与标准误差误差棒图.
 
     参数:
     - output_path: Path, 输出图片路径.
@@ -445,7 +455,7 @@ def plot_average_rows(output_path, average_rows):
     axes[0].errorbar(
         doping_values,
         [row["abs_staggered_mz_mean"] for row in average_rows],
-        yerr=[row["abs_staggered_mz_std"] for row in average_rows],
+        yerr=[row["abs_staggered_mz_se"] for row in average_rows],
         fmt="o-",
         capsize=4,
         linewidth=1.2,
@@ -459,7 +469,7 @@ def plot_average_rows(output_path, average_rows):
     axes[1].errorbar(
         doping_values,
         [row["S_pi_pi_mean"] for row in average_rows],
-        yerr=[row["S_pi_pi_std"] for row in average_rows],
+        yerr=[row["S_pi_pi_se"] for row in average_rows],
         fmt="o-",
         capsize=4,
         linewidth=1.2,
@@ -473,7 +483,7 @@ def plot_average_rows(output_path, average_rows):
     axes[2].errorbar(
         doping_values,
         [row["average_abs_mean_sz_mean"] for row in average_rows],
-        yerr=[row["average_abs_mean_sz_std"] for row in average_rows],
+        yerr=[row["average_abs_mean_sz_se"] for row in average_rows],
         fmt="o-",
         capsize=4,
         linewidth=1.2,

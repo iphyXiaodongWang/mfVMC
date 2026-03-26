@@ -31,11 +31,11 @@ function parse_commandline()
         "--bcx"
         help = "Boundary condition phase in X (1.0 or -1.0)"
         arg_type = Float64
-        default = 1.0
+        default = 0.99
         "--bcy"
         help = "Boundary condition phase in Y (1.0 or -1.0)"
         arg_type = Float64
-        default = 1.0
+        default = 1.01
         "--etad1"
         help = "MF parameters"
         arg_type = Float64

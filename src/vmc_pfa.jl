@@ -268,12 +268,12 @@ function update_rank2!(vwf::vwf_pfa{T}, k1::Int, k2::Int, new_row1_U::Int, new_r
 
     mul!(ws.col1, Ainv, ws.dr1)
 
-    skew_rank1_update_blas!(Ainv, ws.f / ratio, ws.col1, ws.xi)
-    skew_rank1_update_blas!(Ainv, -ws.e / ratio, ws.col1, ws.col2)
-    skew_rank1_update_blas!(Ainv, ws.d / ratio, ws.col1, ws.xj)
-    skew_rank1_update_blas!(Ainv, ws.c / ratio, ws.xi, ws.col2)
-    skew_rank1_update_blas!(Ainv, -ws.b / ratio, ws.xi, ws.xj)
-    skew_rank1_update_blas!(Ainv, ws.a / ratio, ws.col2, ws.xj)
+    skew_rank1_update_blas!(Ainv, -ws.f / ratio, ws.col1, ws.xi)
+    skew_rank1_update_blas!(Ainv, ws.e / ratio, ws.col1, ws.col2)
+    skew_rank1_update_blas!(Ainv, -ws.d / ratio, ws.col1, ws.xj)
+    skew_rank1_update_blas!(Ainv, -ws.c / ratio, ws.xi, ws.col2)
+    skew_rank1_update_blas!(Ainv, ws.b / ratio, ws.xi, ws.xj)
+    skew_rank1_update_blas!(Ainv, -ws.a / ratio, ws.col2, ws.xj)
 
     @inbounds @simd for j in eachindex(electron_locs)
         loc = electron_locs[j]

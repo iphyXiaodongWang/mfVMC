@@ -240,13 +240,20 @@ function make_ansatz_and_derivs_pfa(p::HeisenbergParams; para_names::Vector{Symb
 	N=div(length(ε), 2)
 	umatrix = U_full[1:N, 1:N]
 	vmatrix = U_full[(N+1):end, 1:N]
+	if is_root_rank()
+		parity = det(umatrix + vmatrix) * det(umatrix - vmatrix)
+		println("parity=", parity)
+	end
 	pinv_umatrix=pinv(umatrix)
 	F=vmatrix*pinv_umatrix
+	F .= 0.5 .* (F .- F')
 	F_alphas=OrderedDict{Symbol, Matrix{Float64}}()
 	for name in para_names
 		dumatrix=dU_dict[name][1:N, 1:N]
 		dvmatrix=dU_dict[name][(N+1):end, 1:N]
-		F_alphas[name] = dvmatrix*pinv_umatrix+vmatrix * pinv_derivative(umatrix, dumatrix, pinv_umatrix)
+		dF=dvmatrix*pinv_umatrix+vmatrix * pinv_derivative(umatrix, dumatrix, pinv_umatrix)
+		dF.=0.5 .* (dF .- dF')
+		F_alphas[name] = dF
 	end
 
 	return ε, F, F_alphas
