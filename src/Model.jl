@@ -295,12 +295,12 @@ function compute_term_energy(term::OperatorTerm, vwf)
 
     spin, site_cdag, site_c, cdag_first = pair
     if cdag_first
-        hopping_val = measure_green(vwf, site_cdag, site_c, spin)
+        hopping_val = -measure_green(vwf, site_cdag, site_c, spin)
         return term.coef * diag_factor * real(hopping_val)
     end
 
     delta_val = site_cdag == site_c ? 1.0 : 0.0
-    hopping_val = measure_green(vwf, site_cdag, site_c, spin)
+    hopping_val = -measure_green(vwf, site_cdag, site_c, spin)
     return term.coef * diag_factor * (delta_val - real(hopping_val))
 end
 

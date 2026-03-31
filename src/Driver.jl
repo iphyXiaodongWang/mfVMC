@@ -327,6 +327,11 @@ function run_sr_optimization(model, vwf, kernel,
             for _ in 1:vmc.decorr_steps
                 for _ in 1:Nlat
                     mcmc_step!(runner, rng)
+                    steps_since_rebuild += 1
+                    if steps_since_rebuild >= vmc.rebuild_every
+                        rebuild_inverse!(vwf)
+                        steps_since_rebuild = 0
+                    end
                 end
             end
 

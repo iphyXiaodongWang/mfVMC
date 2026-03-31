@@ -565,5 +565,106 @@ function make_defect_ansatz_and_derivs(
 	)
 	return ε, real.(U_occ), dUt_occ
 end
+# ======================================================================
+# Defect Heisenberg (PH, determinant)
+# ======================================================================
+struct HubbardParams
+	Lx::Int
+	Ly::Int
+	bcx::Float64
+	bcy::Float64
+	mu::Float64
+	chi1::Float64
+	etad1::Float64
+	etas1::Float64
+	mz::Dict{Symbol, Float64}
+end
+function HubbardParams(;
+	Lx::Int,
+	Ly::Int,
+	bcx::Float64 = 1.0,
+	bcy::Float64 = 1.0,
+	mu::Float64 = 0.0,
+	chi1::Float64 = 0.0,
+	etad1::Float64 = 0.0,
+	etas1::Float64 = 0.0,
+	mz::Dict{Symbol, Float64} = Dict{Symbol, Float64}()
+)
+	return HubbardParams(Lx, Ly, bcx, bcy, mu, chi1, etad1, etas1,mz)
+end
+function build_ham_PH(p::HubbardParams)
+	Lx, Ly = p.Lx, p.Ly
+	Nlat = Lx * Ly
+	chi1 = p.chi1
+	etad1 = p.etad1
+	etas1 = p.etas1
+	mz = p.mz
+	mu = p.mu
+	H = zeros(Float64, 2 * Nlat, 2 * Nlat)
+	for x in 1:Lx
+		mz0 = get(mz, Symbol("mz_$(x)"), 0.0)
+		for y in 1:Ly
+			id0 = xy_to_idx(x, y, Ly)
+			Q = (-1)^(x + y)
+			# --- Y 方向 ---
+			idy = (y == Ly) ? xy_to_idx(x, 1, Ly) : xy_to_idx(x, y + 1, Ly)
+			bc_y = (y == Ly) ? p.bcy : 1.0
+			# --- X 方向 ---
+			idx = (x == Lx) ? xy_to_idx(1, y, Ly) : xy_to_idx(x + 1, y, Ly)
+			bc_x = (x == Lx) ? p.bcx : 1.0
+			add_term_ij_PH(H, id0, idx, chi1 * bc_x, (+etas1 - etad1) * bc_x)
+			add_term_ij_PH(H, id0, idy, chi1 * bc_y, (etas1 + etad1) * bc_y)
+			H[2*(id0-1)+1, 2*(id0-1)+1] += Q * mz0 / 2 + mu / 2
+			H[2*(id0-1)+2, 2*(id0-1)+2] += Q * mz0 / 2 - mu / 2
+		end
+	end
+
+	H = Hermitian(H + H')
+	return H
+end
+function make_ansatz_and_derivs(p::HubbardParams; param_names::Vector{Symbol} = [:etad1, :etas1, :mz], target_sz::Int = 0)
+	H = build_ham_PH(p)
+
+	H_alphas = OrderedDict{Symbol, Matrix{Float64}}()
+	for name in param_names
+		if occursin(r"_\d+$", String(name))
+			idx = findfirst('_', String(name))
+			str = String(name)[1:(idx-1)]
+			p_alpha = HubbardParams(;
+				(; :Lx => p.Lx,
+					:Ly => p.Ly,
+					:bcx => p.bcx,
+					:bcy => p.bcy,
+					Symbol(str) => Dict(name => 1.0))...,
+			)
+		else
+			p_alpha = HubbardParams(;
+				(; :Lx => p.Lx,
+					:Ly => p.Ly,
+					:bcx => p.bcx,
+					:bcy => p.bcy,
+					name => 1.0)...,
+			)
+		end
+		H_alphas[name] = build_ham_PH(p_alpha)
+	end
+
+	# 2. 对角化并计算导数 (Utils)
+	ε, U_full, dE, dU_dict = Utils.compute_eig_and_dU_reg1(H, H_alphas)
+	eig_eq_error = norm(Matrix(H) * U_full - U_full * Diagonal(ε))
+	if is_root_rank()
+		println("Eigen equation error (HU - Uε): ", eig_eq_error)
+	end
+	#做了PH变换后粒子数不再守恒，守恒的只有total Sz，根据输入的target_sz截取
+	# 3. 截取占据态并封装
+	Nlat = p.Lx * p.Ly
+	n_occ = Nlat + target_sz
+	if is_root_rank()
+		println("ε is", ε[(n_occ-4):(n_occ+4)])
+	end
+	U_occ = U_full[:, 1:n_occ]
+	dUt_occ = OrderedDict(alpha => permutedims(real.(dU_dict[alpha][:, 1:n_occ])) for alpha in param_names)
+	return ε, U_occ, dUt_occ
+end
 end
 # module
