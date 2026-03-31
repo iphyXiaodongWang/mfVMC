@@ -5,11 +5,13 @@ using DelimitedFiles
 using LinearAlgebra
 using Statistics
 using ArgParse
+using JSON
 # using FFWT
 
 # === 1. 环境设置 ===
-push!(LOAD_PATH, "./src")
-push!(LOAD_PATH, ".")
+push!(LOAD_PATH, joinpath(@__DIR__, "src"))
+push!(LOAD_PATH, @__DIR__)
+
 
 using mfVMC
 include("PartonSquare.jl")
@@ -162,6 +164,49 @@ function update_ansatz!(vwf, param_names::Vector{Symbol}, params::Vector{Float64
     init_gswf!(vwf)
 end
 
+function build_exponential_lr_func(
+    lr_start::Float64,
+    lr_end::Float64,
+    n_steps::Int
+)::Function
+    if n_steps <= 1
+        return (lr0, step) -> lr_end
+    end
+    if lr_start == 0.0
+        return (lr0, step) -> 0.0
+    end
+    if lr_start < 0.0 || lr_end < 0.0
+        error("lr and lr_end must be non-negative.")
+    end
+
+    lr_decay_gamma = (lr_end / lr_start)^(1.0 / (n_steps - 1))
+    return (lr0, step) -> lr0 * (lr_decay_gamma^(step - 1))
+end
+
+function defination_observabels(lx::Int, ly::Int)::Dict{Symbol,Function}
+    observables = Dict{Symbol,Function}()
+    observables[:E] = local_energy
+    for x in 1:lx, y in 1:ly
+        i = idx(x, y, lx, ly)
+        key = Symbol("Sz_$(x)_$(y)")
+        observables[key] = (model, vwf) -> begin
+            val = get_Sz(vwf.sampler.state[i])
+            return val
+        end
+        key = Symbol("n_$(x)_$(y)")
+        observables[key] = (model, vwf) -> begin
+            st = vwf.sampler.state[i]
+            n_up = (st & UP) != 0 ? 1.0 : 0.0
+            n_dn = (st & DN) != 0 ? 1.0 : 0.0
+            return n_up + n_dn
+        end
+    end
+    return observables
+end
+function idx(x::Int, y::Int, lx::Int, ly::Int)
+    return mod(x - 1, lx) * ly + mod(y - 1, ly) + 1
+end
+
 # ==============================================================================
 # 4. 主程序
 # ==============================================================================
@@ -171,20 +216,21 @@ function main()
 
     session = init_mpi_session()
     rank = session.rank
+    is_root = (rank == session.root)
 
     # ---------------------------------------------------------
     # A. 参数设定 (全部集中在这里)
     # ---------------------------------------------------------
-    LX = args["Lx"]
-    LY = args["Ly"]
+    lx = args["Lx"]
+    ly = args["Ly"]
     BCX = args["bcx"]
     BCY = args["bcy"]
     target_sz = args["target_sz"]
     doping = args["doping"]
-    # if mod(LX, 4) == 0
+    # if mod(lx, 4) == 0
     #     BCX = -1
     # end
-    # if mod(LY, 4) == 0
+    # if mod(ly, 4) == 0
     #     BCY = -1
     # end
     nMC = args["nMC"]
@@ -192,22 +238,32 @@ function main()
     rMC = args["rMC"]
     dMC = args["dMC"]
     seed = args["seed"]
-    nSR = args["nSR"]
+    n_steps = args["nSR"]
     lr = args["lr"]
     lr_end = args["lr_end"]
+    if isnan(lr_end)
+        lr_end = lr
+    end
 
     t1 = args["t1"]
     t2 = args["t2"]
     U = args["U"]
-
-    N_sites = LX * LY
+    job = args["job"]
+    init_params_json = args["init_params_json"]
+    N_sites = lx * ly
     #要优化的参数
-    para_names = [:etad1, :etas1, :mu]
-    init_params = [args[String(alpha)] for alpha in para_names]
+    param_names = [:etad1, :etas1, :mu]
+    init_params = [args[String(alpha)] for alpha in param_names]
     #对每一列的mz，构建mean field参数mz_i,i为第几列
-    for i in 1:LY
-        push!(para_names, Symbol("mz_$i"))
+    for i in 1:ly
+        push!(param_names, Symbol("mz_$i"))
         push!(init_params, args["mz"])
+    end
+    if !isempty(init_params_json)
+        init_params = build_init_params_from_json(init_params_json, param_names)
+        if is_root
+            println("Loaded initial parameters from json: $(init_params_json)")
+        end
     end
 
 
@@ -219,15 +275,14 @@ function main()
         decorr_steps=dMC,
         seed=args["seed"] + rank
     )
-    sr_params = SRParams(vmc_params=meas_params, n_steps=nSR)
     # ---------------------------------------------------------
 
     # B. 模型与波函数初始化
     #GeneralModel定义
     bonds1 = Tuple{Int,Int}[]
     bonds2 = Tuple{Int,Int}[]
-    idx(x, y) = mod(x - 1, LX) * LY + mod(y - 1, LY) + 1
-    for y in 1:LY, x in 1:LX
+    idx(x, y) = mod(x - 1, lx) * ly + mod(y - 1, ly) + 1
+    for y in 1:ly, x in 1:lx
         u = idx(x, y)
         push!(bonds1, (u, idx(x + 1, y)))
         push!(bonds1, (u, idx(x, y + 1)))
@@ -267,13 +322,89 @@ function main()
     if rank == 0
         println("Initial parameters: $init_params")
     end
-    update_ansatz!(vwf, para_names, init_params, LX, LY, BCX, BCY, target_sz)
-    update_vwf_func! = (vwf, params) -> update_ansatz!(vwf, para_names, params, LX, LY, BCX, BCY, target_sz)
+    update_ansatz!(vwf, param_names, init_params, lx, ly, BCX, BCY, target_sz)
 
 
     # D. 运行模拟
-    results = run_sr_optimization(ham, vwf, kernel, init_params, update_vwf_func!, sr_params; log_file="logs/sr_history.txt", param_names=para_names)
+    folder = "logs"
+    mkpath(folder)
 
+    if job == "SR"
+        sr_params = SRParams(vmc_params=meas_params, n_steps=n_steps, lr=lr)
+        exp_lr_func = build_exponential_lr_func(lr, lr_end, n_steps)
+
+        update_vwf_func! = (vwf, params) -> update_ansatz!(vwf, param_names, params, lx, ly, BCX, BCY, target_sz)
+
+        run_sr_optimization(
+            ham,
+            vwf,
+            kernel,
+            init_params,
+            update_vwf_func!,
+            sr_params;
+            log_file=joinpath(folder, "sr_history.txt"),
+            param_names=param_names,
+            lr_func=exp_lr_func
+        )
+        if is_root
+            min_energy = extract_min_energy(joinpath(folder, "sr_history.txt"))
+        end
+    elseif job == "measure"
+        observables = defination_observabels(lx, ly)
+        # 默认不保留历史, 如需阻塞法(Binning)请在此列出观测量名称
+        history_observables = [:E]
+        results = run_simulation(
+            ham,
+            vwf,
+            kernel,
+            observables,
+            meas_params;
+            history_observables=history_observables
+        )
+        if is_root && results !== nothing
+            means = results[:means]
+            mean_dict = Dict{Symbol,Any}()
+            for (key, value) in means
+                if value isa Number
+                    mean_dict[key] = real(value)
+                else
+                    mean_dict[key] = value
+                end
+            end
+
+            histories = results[:histories]
+            if !isempty(histories)
+                mean_hist, se_dict, n_eff_dict, tau_int_dict, _ = blocking_binning(histories)
+
+                txt_file = joinpath(folder, "block_binning.txt")
+                open(txt_file, "w") do io
+                    println(io, "# Observable\tMean\tSE\tN_eff\tTau_int")
+                    for name in sort(collect(keys(mean_hist)))
+                        mean_val = mean_hist[name]
+                        se_val = se_dict[name]
+                        n_eff_val = n_eff_dict[name]
+                        tau_val = tau_int_dict[name]
+
+                        if mean_val isa Number && se_val isa Number && n_eff_val isa Number && tau_val isa Number
+                            @printf(io, "%s\t%.10f\t%.10f\t%.6f\t%.6f\n",
+                                String(name), mean_val, se_val, n_eff_val, tau_val)
+                        else
+                            println(io, "$(String(name))\t$(mean_val)\t$(se_val)\t$(n_eff_val)\t$(tau_val)")
+                        end
+                    end
+                end
+            end
+
+            json_file = joinpath(folder, "block_binning_mean.json")
+            mean_dict_str = Dict{String,Any}()
+            for (key, value) in mean_dict
+                mean_dict_str[String(key)] = value
+            end
+            open(json_file, "w") do io
+                JSON.print(io, mean_dict_str)
+            end
+        end
+    end
 end
 
 main()

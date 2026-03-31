@@ -8,7 +8,65 @@ export compute_eig_and_dU_reg1, expand_spatial_to_spinful, add_term_ij_PH, add_t
 export pinv_derivative
 export blocking_binning
 export extract_min_energy
+export build_init_params_from_json
 
+"""
+    build_init_params_from_json(
+        json_path::AbstractString,
+        param_names::Vector{Symbol}
+    ) -> Vector{Float64}
+
+用途: 根据参数名顺序从 json 文件构造初始参数列表.
+参数:
+- json_path::AbstractString, json 文件路径.
+- param_names::Vector{Symbol}, 参数名列表.
+返回:
+- Vector{Float64}, 按 param_names 顺序排列的参数数值.
+"""
+function build_init_params_from_json(
+    json_path::AbstractString,
+    param_names::Vector{Symbol}
+)::Vector{Float64}
+    param_dict = read_params_from_json(json_path)
+    init_params = Float64[]
+    missing_keys = String[]
+
+    for name in param_names
+        key = String(name)
+        if haskey(param_dict, key)
+            push!(init_params, param_dict[key])
+        else
+            push!(missing_keys, key)
+        end
+    end
+
+    if !isempty(missing_keys)
+        error("Missing parameters in json: $(join(missing_keys, ", "))")
+    end
+
+    return init_params
+end
+function read_params_from_json(file_path::AbstractString)::Dict{String,Float64}
+    if !isfile(file_path)
+        error("JSON file not found: $(file_path)")
+    end
+
+    raw_dict = JSON.parsefile(file_path)
+    param_dict = Dict{String,Float64}()
+
+    for (key, value) in raw_dict
+        if !(value isa Number)
+            error("Invalid value for key $(key) in json: $(value)")
+        end
+        param_dict[String(key)] = Float64(value)
+    end
+
+    if isempty(param_dict)
+        error("No valid key-value pairs found in json: $(file_path)")
+    end
+
+    return param_dict
+end
 function compute_eig_and_dU_reg1(H::AbstractMatrix{T}, H_alphas; eta::Real=1e-8) where T
     H_sym = Hermitian(H)
     ε, U = eigen(H_sym)

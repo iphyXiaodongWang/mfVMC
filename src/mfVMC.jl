@@ -26,6 +26,7 @@ using .Utils
 using .Utils
 export compute_eig_and_dU_reg1, expand_spatial_to_spinful, add_term_ij_PH, add_term_ij_nonPH, add_term_ij_pfa_pairing, blocking_binning, extract_min_energy
 export pinv_derivative
+export build_init_params_from_json
 # 导出 VMC 模块的内容0
 include("vmc.jl")
 using .VMC
