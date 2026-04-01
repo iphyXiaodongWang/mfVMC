@@ -10,7 +10,6 @@
 输出:
 - charge_distribution.png
 - spin_distribution.png
-- charge_spin_distribution.png
 """
 
 from __future__ import annotations
@@ -22,6 +21,7 @@ from pathlib import Path
 from typing import Dict, Tuple
 
 import matplotlib.pyplot as plt
+from matplotlib.patches import Circle
 import numpy as np
 
 
@@ -195,124 +195,219 @@ def configure_matplotlib_font() -> None:
     plt.rcParams["axes.unicode_minus"] = False
 
 
-def plot_single_map(
-    matrix: np.ndarray,
-    title_text: str,
-    colorbar_label: str,
-    colormap_name: str,
-    output_path: Path,
-    symmetric_color_scale: bool = False,
-) -> None:
-    """用途: 绘制单个二维分布图.
+def compute_circle_radius(
+    value_abs: float,
+    value_abs_max: float,
+    min_radius: float = 0.06,
+    max_radius: float = 0.42,
+) -> float:
+    """用途: 将数值绝对值线性映射到圆半径.
 
     参数:
-    - matrix: np.ndarray, 数据矩阵.
-    - title_text: str, 图标题.
-    - colorbar_label: str, 色条标签.
-    - colormap_name: str, 颜色映射名.
+    - value_abs: float, 当前格点的绝对值.
+    - value_abs_max: float, 全局最大绝对值.
+    - min_radius: float, 最小半径.
+    - max_radius: float, 最大半径.
+
+    返回:
+    - float, 映射后的圆半径.
+    """
+    if value_abs_max <= 1e-12:
+        return 0.5 * (min_radius + max_radius)
+    scale = max(0.0, min(1.0, value_abs / value_abs_max))
+    return min_radius + scale * (max_radius - min_radius)
+
+
+def setup_lattice_axis(axis: plt.Axes, lx: int, ly: int, title_text: str) -> None:
+    """用途: 配置格点绘图坐标轴.
+
+    参数:
+    - axis: plt.Axes, 目标坐标轴.
+    - lx, ly: Int, 晶格尺寸.
+    - title_text: str, 标题.
+
+    返回:
+    - None.
+    """
+    axis.set_xlim(-0.5, lx - 0.5)
+    axis.set_ylim(-0.5, ly - 0.5)
+    axis.set_aspect("equal", adjustable="box")
+    axis.set_xlabel("x")
+    axis.set_ylabel("y")
+    axis.set_title(title_text)
+    axis.set_xticks(np.arange(lx))
+    axis.set_yticks(np.arange(ly))
+    axis.grid(color="#bbbbbb", linewidth=0.6, alpha=0.6)
+
+
+def draw_charge_circles(
+    axis: plt.Axes,
+    charge_matrix: np.ndarray,
+    facecolor: str = "#4C78A8",
+) -> None:
+    """用途: 在格点上绘制 charge 密度圆圈图.
+
+    参数:
+    - axis: plt.Axes, 目标坐标轴.
+    - charge_matrix: np.ndarray, charge 数据矩阵.
+    - facecolor: str, 圆填充颜色.
+
+    返回:
+    - None.
+    """
+    valid_values = charge_matrix[np.isfinite(charge_matrix)]
+    if valid_values.size == 0:
+        return
+    vmax_abs = float(np.max(np.abs(valid_values)))
+
+    lx, ly = charge_matrix.shape
+    for x_coord in range(lx):
+        for y_coord in range(ly):
+            value = charge_matrix[x_coord, y_coord]
+            if not np.isfinite(value):
+                continue
+            radius = compute_circle_radius(abs(float(value)), vmax_abs)
+            circle = Circle(
+                (x_coord, y_coord),
+                radius=radius,
+                facecolor=facecolor,
+                edgecolor="black",
+                linewidth=0.7,
+                alpha=0.75,
+            )
+            axis.add_patch(circle)
+
+
+def draw_spin_circles(axis: plt.Axes, spin_matrix: np.ndarray) -> None:
+    """用途: 在格点上绘制 spin 密度圆圈图.
+
+    参数:
+    - axis: plt.Axes, 目标坐标轴.
+    - spin_matrix: np.ndarray, spin 数据矩阵.
+
+    返回:
+    - None.
+
+    说明:
+    - 圆半径表示 |Sz|.
+    - 圆颜色表示符号, 正值红色, 负值蓝色, 零值灰色.
+    """
+    valid_values = spin_matrix[np.isfinite(spin_matrix)]
+    if valid_values.size == 0:
+        return
+    vmax_abs = float(np.max(np.abs(valid_values)))
+
+    lx, ly = spin_matrix.shape
+    for x_coord in range(lx):
+        for y_coord in range(ly):
+            value = spin_matrix[x_coord, y_coord]
+            if not np.isfinite(value):
+                continue
+            value_float = float(value)
+            radius = compute_circle_radius(abs(value_float), vmax_abs)
+            if value_float > 0:
+                facecolor = "#D62728"
+            elif value_float < 0:
+                facecolor = "#1F77B4"
+            else:
+                facecolor = "#9E9E9E"
+            circle = Circle(
+                (x_coord, y_coord),
+                radius=radius,
+                facecolor=facecolor,
+                edgecolor="black",
+                linewidth=0.7,
+                alpha=0.80,
+            )
+            axis.add_patch(circle)
+
+
+def annotate_site_values(
+    axis: plt.Axes,
+    matrix: np.ndarray,
+    fmt: str = "{:.3f}",
+    text_color: str = "black",
+) -> None:
+    """用途: 在每个格点附近标注数值.
+
+    参数:
+    - axis: plt.Axes, 目标坐标轴.
+    - matrix: np.ndarray, 待标注数据矩阵.
+    - fmt: str, 数值格式化模板.
+    - text_color: str, 文字颜色.
+
+    返回:
+    - None.
+    """
+    lx, ly = matrix.shape
+    font_size = 9 if max(lx, ly) <= 10 else 7
+    for x_coord in range(lx):
+        for y_coord in range(ly):
+            value = matrix[x_coord, y_coord]
+            if not np.isfinite(value):
+                continue
+            axis.text(
+                x_coord + 0.12,
+                y_coord + 0.12,
+                fmt.format(float(value)),
+                fontsize=font_size,
+                color=text_color,
+                ha="left",
+                va="bottom",
+                bbox={"facecolor": "white", "alpha": 0.65, "edgecolor": "none", "pad": 0.2},
+            )
+
+
+def plot_charge_map(
+    charge_matrix: np.ndarray,
+    output_path: Path,
+) -> None:
+    """用途: 绘制 charge 密度分布图(圆半径表示大小).
+
+    参数:
+    - charge_matrix: np.ndarray, charge 数据矩阵.
     - output_path: Path, 输出图片路径.
-    - symmetric_color_scale: bool, 是否使用关于0对称色标.
 
     返回:
     - None.
     """
     figure, axis = plt.subplots(figsize=(6.2, 5.6))
-    valid_values = matrix[np.isfinite(matrix)]
-
-    if valid_values.size == 0:
-        vmin = 0.0
-        vmax = 1.0
-    elif symmetric_color_scale:
-        vmax_abs = float(np.max(np.abs(valid_values)))
-        vmax_abs = max(vmax_abs, 1e-12)
-        vmin, vmax = -vmax_abs, vmax_abs
-    else:
-        vmin = float(np.min(valid_values))
-        vmax = float(np.max(valid_values))
-        if abs(vmax - vmin) < 1e-12:
-            vmax = vmin + 1e-12
-
-    image = axis.imshow(
-        matrix.T,
-        origin="lower",
-        cmap=colormap_name,
-        vmin=vmin,
-        vmax=vmax,
-        interpolation="nearest",
-    )
-    axis.set_xlabel("x")
-    axis.set_ylabel("y")
-    axis.set_title(title_text)
-    axis.set_xticks(np.arange(matrix.shape[0]))
-    axis.set_yticks(np.arange(matrix.shape[1]))
-    axis.grid(color="white", linewidth=0.45, alpha=0.35)
-    colorbar = figure.colorbar(image, ax=axis)
-    colorbar.set_label(colorbar_label)
+    setup_lattice_axis(axis, charge_matrix.shape[0], charge_matrix.shape[1], "Charge distribution <n_i>")
+    draw_charge_circles(axis, charge_matrix)
+    annotate_site_values(axis, charge_matrix, fmt="{:.3f}", text_color="#111111")
 
     figure.savefig(output_path, dpi=220, bbox_inches="tight")
     plt.close(figure)
 
 
-def plot_combined_maps(
-    charge_matrix: np.ndarray,
+def plot_spin_map(
     spin_matrix: np.ndarray,
     output_path: Path,
 ) -> None:
-    """用途: 在同一画布展示 Charge 与 Spin 分布.
+    """用途: 绘制 spin 密度分布图(颜色表示正负, 半径表示大小).
 
     参数:
-    - charge_matrix: np.ndarray, Charge 数据矩阵.
-    - spin_matrix: np.ndarray, Spin 数据矩阵.
+    - spin_matrix: np.ndarray, spin 数据矩阵.
     - output_path: Path, 输出图片路径.
 
     返回:
     - None.
     """
-    figure, axes = plt.subplots(1, 2, figsize=(12.0, 5.2), constrained_layout=True)
+    figure, axis = plt.subplots(figsize=(6.2, 5.6))
+    setup_lattice_axis(axis, spin_matrix.shape[0], spin_matrix.shape[1], "Spin distribution <S_i^z>")
+    draw_spin_circles(axis, spin_matrix)
+    annotate_site_values(axis, spin_matrix, fmt="{:+.3f}", text_color="#111111")
 
-    charge_valid = charge_matrix[np.isfinite(charge_matrix)]
-    charge_vmin = float(np.min(charge_valid)) if charge_valid.size > 0 else 0.0
-    charge_vmax = float(np.max(charge_valid)) if charge_valid.size > 0 else 1.0
-    if abs(charge_vmax - charge_vmin) < 1e-12:
-        charge_vmax = charge_vmin + 1e-12
-
-    spin_valid = spin_matrix[np.isfinite(spin_matrix)]
-    spin_vmax_abs = float(np.max(np.abs(spin_valid))) if spin_valid.size > 0 else 1.0
-    spin_vmax_abs = max(spin_vmax_abs, 1e-12)
-
-    image0 = axes[0].imshow(
-        charge_matrix.T,
-        origin="lower",
-        cmap="viridis",
-        vmin=charge_vmin,
-        vmax=charge_vmax,
-        interpolation="nearest",
+    legend_handles = [
+        Circle((0, 0), radius=0.2, facecolor="#D62728", edgecolor="black", label="Sz > 0"),
+        Circle((0, 0), radius=0.2, facecolor="#1F77B4", edgecolor="black", label="Sz < 0"),
+    ]
+    axis.legend(
+        handles=legend_handles,
+        loc="upper left",
+        bbox_to_anchor=(1.02, 1.0),
+        frameon=True,
     )
-    axes[0].set_title("Charge distribution <n_i>")
-    axes[0].set_xlabel("x")
-    axes[0].set_ylabel("y")
-    axes[0].set_xticks(np.arange(charge_matrix.shape[0]))
-    axes[0].set_yticks(np.arange(charge_matrix.shape[1]))
-    axes[0].grid(color="white", linewidth=0.45, alpha=0.35)
-    colorbar0 = figure.colorbar(image0, ax=axes[0])
-    colorbar0.set_label("<n_i>")
-
-    image1 = axes[1].imshow(
-        spin_matrix.T,
-        origin="lower",
-        cmap="coolwarm",
-        vmin=-spin_vmax_abs,
-        vmax=spin_vmax_abs,
-        interpolation="nearest",
-    )
-    axes[1].set_title("Spin distribution <S_i^z>")
-    axes[1].set_xlabel("x")
-    axes[1].set_ylabel("y")
-    axes[1].set_xticks(np.arange(spin_matrix.shape[0]))
-    axes[1].set_yticks(np.arange(spin_matrix.shape[1]))
-    axes[1].grid(color="white", linewidth=0.45, alpha=0.35)
-    colorbar1 = figure.colorbar(image1, ax=axes[1])
-    colorbar1.set_label("<S_i^z>")
 
     figure.savefig(output_path, dpi=220, bbox_inches="tight")
     plt.close(figure)
@@ -358,31 +453,14 @@ def main() -> None:
 
     charge_path = output_dir / "charge_distribution.png"
     spin_path = output_dir / "spin_distribution.png"
-    combined_path = output_dir / "charge_spin_distribution.png"
 
-    plot_single_map(
-        matrix=charge_matrix,
-        title_text="Charge distribution <n_i>",
-        colorbar_label="<n_i>",
-        colormap_name="viridis",
-        output_path=charge_path,
-        symmetric_color_scale=False,
-    )
-    plot_single_map(
-        matrix=spin_matrix,
-        title_text="Spin distribution <S_i^z>",
-        colorbar_label="<S_i^z>",
-        colormap_name="coolwarm",
-        output_path=spin_path,
-        symmetric_color_scale=True,
-    )
-    plot_combined_maps(charge_matrix, spin_matrix, combined_path)
+    plot_charge_map(charge_matrix, charge_path)
+    plot_spin_map(spin_matrix, spin_path)
 
     print(f"[OK] input: {input_path}")
     print(f"[OK] lattice: Lx={lx}, Ly={ly}, index_offset=({x_offset},{y_offset})")
     print(f"[OK] output: {charge_path}")
     print(f"[OK] output: {spin_path}")
-    print(f"[OK] output: {combined_path}")
 
 
 if __name__ == "__main__":
