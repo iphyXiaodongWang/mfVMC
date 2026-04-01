@@ -127,8 +127,8 @@ function measure_SplusSminus(vwf, i::Int, j::Int)
     ss = vwf.sampler
     if can_exchange(ss, i, j)
         prop = build_exchange(ss, i, j)
-        # Operator: 0.5 * (S+S- + h.c.)
-        return -calc_ratio(vwf, prop)
+        # 非 Hubbard 的自旋关联测量沿用 Ndefect3 约定
+        return calc_ratio(vwf, prop)
     end
     return 0.0
 end
