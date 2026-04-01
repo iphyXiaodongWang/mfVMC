@@ -114,6 +114,10 @@ function parse_commandline()
         help = "Doping level"
         arg_type = Float64
         default = 0.125
+        "--lambda"
+        help = "assuming length of stripe"
+        arg_type = Int
+        default = 4
     end
 
     return parse_args(s)
@@ -127,17 +131,19 @@ function update_ansatz!(vwf, param_names::Vector{Symbol}, params::Vector{Float64
     # 这里也可以把 bcx, bcy 提出来作为参数
     param_map = Dict{Symbol,Float64}(zip(param_names, params))
 
-    mu = get(param_map, :mu, 0.0)
     etad1 = get(param_map, :etad1, 0.0)
     etas1 = get(param_map, :etas1, 0.0)
 
     mz = Dict{Symbol,Float64}()
+    mu = Dict{Symbol,Float64}()
 
     for (name, value) in param_map
         name_str = String(name)
         if startswith(name_str, "mz_")
             mz[name] = value
-        elseif name == :mu || name == :etad1 || name == :etas1
+        elseif startswith(name_str, "mu_")
+            mu[name] = value
+        elseif name == :etad1 || name == :etas1
             continue
         else
             error("Unknown parameter name: $name")
@@ -149,10 +155,10 @@ function update_ansatz!(vwf, param_names::Vector{Symbol}, params::Vector{Float64
         Ly=ly,
         bcx=bcx,
         bcy=bcy,
-        mu=mu,
         chi1=1.0,
         etad1=etad1,
         etas1=etas1,
+        mu=mu,
         mz=mz
     )
 
@@ -227,6 +233,7 @@ function main()
     BCY = args["bcy"]
     target_sz = args["target_sz"]
     doping = args["doping"]
+    lambda = args["lambda"]
     # if mod(lx, 4) == 0
     #     BCX = -1
     # end
@@ -252,12 +259,22 @@ function main()
     init_params_json = args["init_params_json"]
     N_sites = lx * ly
     #要优化的参数
-    param_names = [:etad1, :etas1, :mu]
+    param_names = [:etad1, :etas1]
     init_params = [args[String(alpha)] for alpha in param_names]
     #对每一列的mz，构建mean field参数mz_i,i为第几列
     for i in 1:lx
+        istripe = div(i - 1, lambda)
+        Q = (-1)^istripe
         push!(param_names, Symbol("mz_$i"))
-        push!(init_params, args["mz"])
+        push!(param_names, Symbol("mu_$i"))
+        if i % lambda == 1 || i % lambda == 0
+            #stripe的边界mz设成0,内部mz每隔一个stripe反号一次
+            push!(init_params, 0.0)
+            push!(init_params, args["mu"])
+        else
+            push!(init_params, args["mz"] * Q)
+            push!(init_params, args["mu"])
+        end
     end
     if !isempty(init_params_json)
         init_params = build_init_params_from_json(init_params_json, param_names)

@@ -8,8 +8,8 @@ using ArgParse
 # using FFWT
 
 # === 1. 环境设置 ===
-push!(LOAD_PATH, "./src")
-push!(LOAD_PATH, ".")
+push!(LOAD_PATH, joinpath(@__DIR__, "src"))
+push!(LOAD_PATH, @__DIR__)
 
 using mfVMC
 include("PartonSquare.jl")
