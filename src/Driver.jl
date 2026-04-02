@@ -128,8 +128,10 @@ function run_simulation(
     steps_since_rebuild = 0
     for _ in 1:params.warmup_steps
         for _ in 1:Nlat
-            mcmc_step!(runner, rng)
-            steps_since_rebuild += 1
+            accept, _, _, _ = mcmc_step!(runner, rng)
+            if accept
+                steps_since_rebuild += 1
+            end
             if steps_since_rebuild >= params.rebuild_every
                 rebuild_inverse!(vwf)
                 steps_since_rebuild = 0
@@ -158,8 +160,10 @@ function run_simulation(
         # Decorrelation
         for _ in 1:params.decorr_steps
             for _ in 1:Nlat
-                mcmc_step!(runner, rng)
-                steps_since_rebuild += 1
+                accept, _, _, _ = mcmc_step!(runner, rng)
+                if accept
+                    steps_since_rebuild += 1
+                end
                 if steps_since_rebuild >= params.rebuild_every
                     rebuild_inverse!(vwf)
                     steps_since_rebuild = 0
@@ -310,14 +314,20 @@ function run_sr_optimization(model, vwf, kernel,
 
         # Warmup (Necessary after parameter change)
         steps_since_rebuild = 0
+        nstep = 0
+        naccept = 0
         for _ in 1:vmc.warmup_steps
             for _ in 1:Nlat
-                mcmc_step!(runner, rng)
-            end
-            steps_since_rebuild += Nlat
-            if steps_since_rebuild >= vmc.rebuild_every
-                rebuild_inverse!(vwf)
-                steps_since_rebuild = 0
+                accept, _, _, _ = mcmc_step!(runner, rng)
+                nstep += 1
+                if accept
+                    naccept += 1
+                    steps_since_rebuild += 1
+                end
+                if steps_since_rebuild >= vmc.rebuild_every
+                    rebuild_inverse!(vwf)
+                    steps_since_rebuild = 0
+                end
             end
         end
         rebuild_inverse!(vwf)
@@ -326,8 +336,12 @@ function run_sr_optimization(model, vwf, kernel,
         for _ in 1:n_local
             for _ in 1:vmc.decorr_steps
                 for _ in 1:Nlat
-                    mcmc_step!(runner, rng)
-                    steps_since_rebuild += 1
+                    accept, _, _, _ = mcmc_step!(runner, rng)
+                    nstep += 1
+                    if accept
+                        naccept += 1
+                        steps_since_rebuild += 1
+                    end
                     if steps_since_rebuild >= vmc.rebuild_every
                         rebuild_inverse!(vwf)
                         steps_since_rebuild = 0
@@ -344,6 +358,7 @@ function run_sr_optimization(model, vwf, kernel,
         means, E_history = collect_sr_data(obs_buf, session)
 
         if is_root
+            @printf("Step %3d | Accept rate: %.2f %%\n", step, 100 * naccept / nstep)
             # [Fix] 使用泛型 Solver，自动处理类型
             delta, grad_vec, E_err = solve_sr_update(means, E_history;
                 diag_shift=sr_params.diag_shift,
