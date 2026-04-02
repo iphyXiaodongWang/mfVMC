@@ -598,9 +598,7 @@ function update_defect_ansatz!(
             shared_matrix[i, :, :] = dut_params[name]
         end
     end
-    MPI.Win_sync(win)
     MPI.Barrier(session_shm.comm)
-    MPI.Win_sync(win)
     #gs_u广播
     gs_u = MPI.bcast(gs_u, 0, session_shm.comm)
 

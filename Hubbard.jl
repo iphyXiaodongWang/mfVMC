@@ -166,7 +166,11 @@ function update_ansatz!(vwf, param_names::Vector{Symbol}, params::Vector{Float64
 
     copyto!(vwf.gs_U, gs_U)
     copyto!(vwf.gs_U_t, permutedims(gs_U))
-    update_vwf_params!(vwf, dUt_params)
+    dUt_matrix = zeros(Float64, length(param_names), size(gs_U, 2), size(gs_U, 1))
+    for (idx, name) in enumerate(param_names)
+        dUt_matrix[idx, :, :] = dUt_params[name]
+    end
+    update_vwf_params!(vwf, param_names, dUt_matrix)
     init_gswf!(vwf)
 end
 
