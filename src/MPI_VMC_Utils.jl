@@ -4,11 +4,11 @@ using MPI
 using LinearAlgebra
 using Statistics
 
-export MPISession, init_mpi_session
+export MPISession, init_mpi_session, init_node_mpi_session
 export ObservableBuffer, register_scalar!, register_vector!, register_matrix!
 export reset_buffers!, increment_counter!, accumulate_sample!, accumulate_sr_matrix!
-export record_scalar! 
-export mpi_reduce_all, mpi_gather_scalar 
+export record_scalar!
+export mpi_reduce_all, mpi_gather_scalar
 
 struct MPISession
     comm::MPI.Comm
@@ -25,24 +25,32 @@ function init_mpi_session()
     return MPISession(comm, MPI.Comm_rank(comm), MPI.Comm_size(comm), 0)
 end
 
+function init_node_mpi_session(session::MPISession)
+    # 这里我们使用 MPI 的共享内存功能，创建一个新的 communicator
+    comm_shm = MPI.Comm_split_type(session.comm, MPI.COMM_TYPE_SHARED, session.rank)
+    rank_shm = MPI.Comm_rank(comm_shm)
+    size_shm = MPI.Comm_size(comm_shm)
+    return MPISession(comm_shm, rank_shm, size_shm, 0)
+end
+
 struct ObservableBuffer{T}
     # 这一部分依然用来存 SR 矩阵和梯度，采用累加方式（省内存）
-    scalars::Dict{Symbol, Vector{T}} 
-    vectors::Dict{Symbol, Vector{T}}
-    matrices::Dict{Symbol, Matrix{T}}
+    scalars::Dict{Symbol,Vector{T}}
+    vectors::Dict{Symbol,Vector{T}}
+    matrices::Dict{Symbol,Matrix{T}}
     counter::Vector{Int}
-    
+
     # === 新增：专门用于存能量历史 ===
-    scalar_histories::Dict{Symbol, Vector{T}} 
+    scalar_histories::Dict{Symbol,Vector{T}}
 end
 
 function ObservableBuffer(::Type{T}=ComplexF64) where T
     return ObservableBuffer{T}(
-        Dict{Symbol, Vector{T}}(),
-        Dict{Symbol, Vector{T}}(),
-        Dict{Symbol, Matrix{T}}(),
+        Dict{Symbol,Vector{T}}(),
+        Dict{Symbol,Vector{T}}(),
+        Dict{Symbol,Matrix{T}}(),
         [0],
-        Dict{Symbol, Vector{T}}() # 初始化为空
+        Dict{Symbol,Vector{T}}() # 初始化为空
     )
 end
 
@@ -61,10 +69,16 @@ end
 function reset_buffers!(obs::ObservableBuffer{T}) where T
     obs.counter[1] = 0
     # 清空累加器
-    for v in values(obs.scalars); fill!(v, zero(T)); end
-    for v in values(obs.vectors); fill!(v, zero(T)); end
-    for v in values(obs.matrices); fill!(v, zero(T)); end
-    
+    for v in values(obs.scalars)
+        fill!(v, zero(T))
+    end
+    for v in values(obs.vectors)
+        fill!(v, zero(T))
+    end
+    for v in values(obs.matrices)
+        fill!(v, zero(T))
+    end
+
     # === 清空能量列表 ===
     for v in values(obs.scalar_histories)
         empty!(v)
@@ -123,13 +137,15 @@ function mpi_reduce_all(obs::ObservableBuffer{T}, session::MPISession) where T
     comm = session.comm
     root = session.root
     local_count = obs.counter[1]
-    
+
     # 汇总总样本数
     total_count = MPI.Reduce(local_count, MPI.SUM, root, comm)
-    
-    results = Dict{Symbol, Any}()
-    if session.rank == root && total_count == 0; total_count = 1; end
-    
+
+    results = Dict{Symbol,Any}()
+    if session.rank == root && total_count == 0
+        total_count = 1
+    end
+
     function reduce_helper(local_data)
         summed = MPI.Reduce(local_data, MPI.SUM, root, comm)
         if session.rank == root
@@ -145,21 +161,21 @@ function mpi_reduce_all(obs::ObservableBuffer{T}, session::MPISession) where T
             results[name] = res[1] # 只有 Root 才能解包
         end
     end
-    
+
     for (name, val) in obs.vectors
         res = reduce_helper(val)
         if session.rank == session.root
             results[name] = res
         end
     end
-    
+
     for (name, val) in obs.matrices
         res = reduce_helper(val)
         if session.rank == session.root
             results[name] = res
         end
     end
-    
+
     if session.rank == root
         results[:count] = total_count
         return results
@@ -178,13 +194,13 @@ mpi_gather_energies:
 function mpi_gather_scalar(obs::ObservableBuffer{T}, session::MPISession, name::Symbol) where T
     comm = session.comm
     root = session.root
-    
+
     # 获取本地数据，如果不存在则为空向量（防止报错）
     local_data = get(obs.scalar_histories, name, T[])
-    
+
     # MPI.Gather 拼接数据
     all_data = MPI.Gather(local_data, root, comm)
-    
+
     if session.rank == root
         # 展平结果
         return reduce(vcat, all_data)

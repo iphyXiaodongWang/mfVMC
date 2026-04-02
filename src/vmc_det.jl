@@ -33,8 +33,7 @@ mutable struct vwf_det{T,S}
 
     # -- Workspace --
     ws::R1R2WS{T}
-    dUt_params::OrderedDict{Symbol,Matrix{T}}
-    dUt_list::Vector{Matrix{T}}
+    dUt_matrix::Array{T,3}
     param_keys::Vector{Symbol}
 end
 
@@ -51,9 +50,7 @@ function vwf_det(U::Matrix{T}, sampler) where T
     nelec = expected_cols
     awf_mat_t = zeros(T, nelec, nelec)
     awf_inv = zeros(T, 1, 1)
-
-    dUt_params = OrderedDict{Symbol,Matrix{T}}()
-    dUt_list = Vector{Matrix{T}}()
+    dUt_matrix = zeros(T, 1, 1, 1)
     param_keys = Vector{Symbol}()
 
     return vwf_det{T,typeof(sampler)}(
@@ -65,8 +62,7 @@ function vwf_det(U::Matrix{T}, sampler) where T
         one(T),
         sampler,
         dummy_ws,
-        dUt_params,
-        dUt_list,
+        dUt_matrix,
         param_keys
     )
 end
@@ -86,7 +82,7 @@ function ensure_ws!(v::vwf_det{T,S}) where {T,S}
         v.ws = ws
     end
 
-    n_params = length(v.dUt_params) # 注意：是 dU_params 还是 dUt_params，请保持变量名一致
+    n_params = length(v.param_keys)
     if length(ws.grad_buffer) != n_params
         resize!(ws.grad_buffer, n_params)
     end
@@ -94,31 +90,17 @@ function ensure_ws!(v::vwf_det{T,S}) where {T,S}
     return ws
 end
 
-# function update_dUt_list!(vwf::vwf_det)
-#     empty!(vwf.dUt_list)
-#     empty!(vwf.param_keys)
-
-#     for (k, v) in vwf.dUt_params
-#         push!(vwf.param_keys, k)
-#         push!(vwf.dUt_list, v)
-#     end
-
-#     ensure_ws!(vwf) 
-#     return nothing
-# end
 
 
-function update_vwf_params!(vwf::vwf_det{T}, new_params::OrderedDict{Symbol,Matrix{T}}) where T
-    vwf.dUt_params = new_params
+function update_vwf_params!(vwf::vwf_det{T}, param_names::Vector{Symbol}, dUt_matrix::Array{T,3}) where T
 
-    empty!(vwf.dUt_list)
     empty!(vwf.param_keys)
 
-    for (k, v) in new_params
-        push!(vwf.param_keys, k)
-        push!(vwf.dUt_list, v)
+    for name in param_names
+        push!(vwf.param_keys, name)
     end
 
+    vwf.dUt_matrix = dUt_matrix
     ensure_ws!(vwf)
     return nothing
 end
@@ -350,8 +332,8 @@ function compute_grad_log_psi!(vwf::vwf_det{T}) where T
     fill!(O_vec, zero(T))
 
     # 3. 遍历所有可变参数
-    for (param_idx, dU_t) in enumerate(vwf.dUt_list)
-
+    for idx in eachindex(vwf.param_keys)
+        dU_t = vwf.dUt_matrix[idx, :, :]
         total_sum = zero(T)
 
         # 顺序：外层电子(elec)，内层轨道(orb)
@@ -370,7 +352,7 @@ function compute_grad_log_psi!(vwf::vwf_det{T}) where T
         end
 
         # 直接使用 enumerate 的索引，不再依赖计数器变量
-        O_vec[param_idx] = total_sum
+        O_vec[idx] = total_sum
     end
 
     # 直接返回 buffer 引用，避免 copy

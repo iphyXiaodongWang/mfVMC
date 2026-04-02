@@ -45,7 +45,7 @@ export HeisenbergModel, HubbardModel, GeneralModel, OperatorTerm, local_energy
 include("MPI_VMC_Utils.jl")
 using .MPI_VMC_Utils
 
-export MPISession, init_mpi_session
+export MPISession, init_mpi_session, init_node_mpi_session
 export ObservableBuffer, register_scalar!, register_vector!, register_matrix!
 export reset_buffers!, increment_counter!, accumulate_sample!, accumulate_sr_matrix!
 export record_scalar!

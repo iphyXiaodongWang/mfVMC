@@ -524,7 +524,10 @@ function update_defect_ansatz!(
     chi1::Float64,
     defect_positions::Vector{Tuple{Int,Int}},
     defect_index::Vector{Int},
-    target_sz::Int
+    target_sz::Int;
+    session_shm::MPISession=nothing,
+    shared_matrix::Array{Float64,3}=nothing,
+    win::MPI.Win=nothing
 )
     param_map = Dict{Symbol,Float64}(zip(param_names, params))
 
@@ -582,16 +585,28 @@ function update_defect_ansatz!(
         defect_positions=defect_positions,
         defect_index=defect_index
     )
-
-    _, gs_u, dut_params = PartonSquare.make_defect_ansatz_and_derivs(
-        defect_params;
-        param_names=param_names,
-        target_sz=target_sz
-    )
+    #只有shared_root求解导数矩阵,其它的通过广播和共享内存获得
+    gs_u = nothing
+    if session_shm.rank == 0
+        _, gs_u, dut_params = PartonSquare.make_defect_ansatz_and_derivs(
+            defect_params;
+            param_names=param_names,
+            target_sz=target_sz
+        )
+        #dut存入共享内存矩阵
+        for (i, name) in enumerate(param_names)
+            shared_matrix[i, :, :] = dut_params[name]
+        end
+    end
+    MPI.Win_sync(win)
+    MPI.Barrier(session_shm.comm)
+    MPI.Win_sync(win)
+    #gs_u广播
+    gs_u = MPI.bcast(gs_u, 0, session_shm.comm)
 
     copyto!(vwf.gs_U, gs_u)
     copyto!(vwf.gs_U_t, permutedims(gs_u))
-    update_vwf_params!(vwf, dut_params)
+    update_vwf_params!(vwf, param_names, shared_matrix)
     init_gswf!(vwf)
 end
 

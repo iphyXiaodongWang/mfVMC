@@ -109,6 +109,15 @@ function main()
     if is_root
         println("Initial parameters: $init_params")
     end
+    nparams = length(param_names)
+    #每个节点的共享内存MPI,用于存储导数矩阵以节省内存。我们只给矩阵分配内存
+    session_shm = init_node_mpi_session(session)
+    local_length = session_shm.rank == 0 ? nparams * (2 * n_sites) * (n_sites + target_sz) : 0
+    win, _ = MPI.Win_allocate_shared(Ptr{Float64}, local_length, session_shm.comm)
+    shared_matrix = MPI.Win_shared_query(Array{Float64}, (nparams, n_sites + target_sz, 2 * n_sites), win; rank=0)
+    if session_shm.rank == 0
+        println("MPI 共享内存已分配: 大小 = $(sizeof(shared_matrix) / 1e6) MB, 矩阵维度 = $(size(shared_matrix))")
+    end
 
     meas_params = VMCParams(
         total_samples=n_mc,
@@ -128,7 +137,10 @@ function main()
         args["chi1"],
         defect_positions,
         defect_index,
-        target_sz
+        target_sz;
+        session_shm=session_shm,
+        shared_matrix=shared_matrix,
+        win=win
     )
     folder = joinpath("logs", "defect_seed_$(defect_seed)", "target_sz_$(target_sz)")
     mkpath(folder)
@@ -147,7 +159,10 @@ function main()
             args["chi1"],
             defect_positions,
             defect_index,
-            target_sz
+            target_sz;
+            session_shm=session_shm,
+            shared_matrix=shared_matrix,
+            win=win
         )
 
         run_sr_optimization(
