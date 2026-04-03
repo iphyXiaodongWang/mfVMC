@@ -114,7 +114,7 @@ function main()
     session_shm = init_node_mpi_session(session)
     local_length = session_shm.rank == 0 ? nparams * (2 * n_sites) * (n_sites + target_sz) : 0
     win, _ = MPI.Win_allocate_shared(Ptr{Float64}, local_length, session_shm.comm)
-    shared_matrix = MPI.Win_shared_query(Array{Float64}, (nparams, n_sites + target_sz, 2 * n_sites), win; rank=0)
+    shared_matrix = MPI.Win_shared_query(Array{Float64}, (n_sites + target_sz, 2 * n_sites, nparams), win; rank=0)
     if session_shm.rank == 0
         println("MPI 共享内存已分配: 大小 = $(sizeof(shared_matrix) / 1e6) MB, 矩阵维度 = $(size(shared_matrix))")
     end

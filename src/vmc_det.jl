@@ -333,7 +333,7 @@ function compute_grad_log_psi!(vwf::vwf_det{T}) where T
 
     # 3. 遍历所有可变参数
     for idx in eachindex(vwf.param_keys)
-        dU_t = vwf.dUt_matrix[idx, :, :]
+        dU_t = @view vwf.dUt_matrix[:, :, idx]
         total_sum = zero(T)
 
         # 顺序：外层电子(elec)，内层轨道(orb)

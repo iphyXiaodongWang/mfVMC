@@ -595,7 +595,7 @@ function update_defect_ansatz!(
         )
         #dut存入共享内存矩阵
         for (i, name) in enumerate(param_names)
-            shared_matrix[i, :, :] = dut_params[name]
+            copyto!(@view(shared_matrix[:, :, i]), dut_params[name])
         end
     end
     MPI.Barrier(session_shm.comm)
