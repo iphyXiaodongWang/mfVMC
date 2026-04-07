@@ -142,7 +142,11 @@ function main()
         shared_matrix=shared_matrix,
         win=win
     )
-    folder = joinpath("logs", "defect_seed_$(defect_seed)", "target_sz_$(target_sz)")
+    if defect_ansatz == "FPS"
+        folder = joinpath("logs", "target_sz_$(target_sz)")
+    else
+        folder = joinpath("logs", "defect_seed_$(defect_seed)", "target_sz_$(target_sz)")
+    end
     mkpath(folder)
     if job == "SR"
         sr_params = SRParams(vmc_params=meas_params, n_steps=n_steps, lr=lr)

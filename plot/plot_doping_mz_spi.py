@@ -30,7 +30,7 @@ def parse_arguments():
         "--output",
         type=str,
         default=None,
-        help="输出图片路径. 默认保存到 result_root/summary_doping_mz_spi.png",
+        help="输出图片路径. 默认保存到 result_root/summary_doping_mz_spi.svg",
     )
     parser.add_argument(
         "--signed-mz",
@@ -238,7 +238,7 @@ def main():
     l_value = infer_l_from_root(result_root, args.L)
 
     if args.output is None:
-        output_path = os.path.join(result_root, "summary_doping_mz_spi.png")
+        output_path = os.path.join(result_root, "summary_doping_mz_spi.svg")
     else:
         output_path = args.output
 
