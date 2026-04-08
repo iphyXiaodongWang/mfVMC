@@ -361,6 +361,11 @@ function main()
     for i in 1:N_sites
         push!(terms, OperatorTerm([:n_up, :n_dn], [i, i], U))
     end
+    #pinning potential
+    for i in 1:ly
+        push!(terms, OperatorTerm([:Sz], [idx(1, i)], 0.1 * (-1)^(i + 1)))
+        push!(terms, OperatorTerm([:Sz], [idx(lx, i)], -0.1 * (-1)^(i + lx)))
+    end
     ham = GeneralModel(N_sites, terms)
 
     nelec = Int(N_sites * (1 + doping))

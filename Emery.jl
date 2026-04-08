@@ -251,12 +251,6 @@ function main()
     target_sz = args["target_sz"]
     doping = args["doping"]
     lambda = args["lambda"]
-    # if mod(lx, 4) == 0
-    #     BCX = -1
-    # end
-    # if mod(ly, 4) == 0
-    #     BCY = -1
-    # end
     nMC = args["nMC"]
     wMC = args["wMC"]
     rMC = args["rMC"]
@@ -269,9 +263,14 @@ function main()
         lr_end = lr
     end
 
-    t1 = args["t1"]
-    t2 = args["t2"]
-    U = args["U"]
+    tpd = args["tpd"]
+    tpp = args["tpp"]
+    Ud = args["Ud"]
+    Up = args["Up"]
+    Vpd = args["Vpd"]
+    Vpp = args["Vpp"]
+    Delta = args["Delta"]
+
     job = args["job"]
     ansatz = args["ansatz"]
     init_params_json = args["init_params_json"]
