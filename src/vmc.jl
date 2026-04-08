@@ -4,8 +4,10 @@ using Random, LinearAlgebra
 using OrderedCollections
 using SkewLinearAlgebra
 using ..Sampler
+using ..Projector
 
 export vwf_det, vwf_pfa, VMCRunner, update_vwf_params!
+export set_projector!, update_vwf_projector_params!, get_vwf_projector_param_names, get_vwf_projector_param_values, get_vwf_total_param_names
 export init_gswf!, mcmc_step!, calc_ham_eng, accept_move!, rebuild_inverse!
 export measure_green, measure_SzSz, measure_SplusSminus, measure_SiSj, get_Sz, calc_ratio, compute_grad_log_psi!
 export measure_SxSx, measure_SplusSplus
@@ -49,7 +51,8 @@ function measure_green(vwf, i::Int, j::Int, spin_idx::Int8)
     st_j = ss.state[j]
     if ((st_j & spin_idx) != 0) && ((st_i & spin_idx) == 0)
         prop = build_single_hop(ss, j, i, spin_idx)
-        return spin_idx == DN && ifPH(ss) ? -calc_ratio(vwf, prop) : calc_ratio(vwf, prop)
+        ratio_total = calc_total_ratio(vwf, prop)
+        return spin_idx == DN && ifPH(ss) ? -ratio_total : ratio_total
     end
     return 0.0
 end
@@ -81,7 +84,7 @@ function measure_green(vwf, i::Int, spin_i::Int8, j::Int, spin_j::Int8)
 
             # 构建翻转 Proposal: 把 spin_j 翻转为 spin_i
             prop = build_spin_flip(ss, j, spin_j)
-            return calc_ratio(vwf, prop)
+            return calc_total_ratio(vwf, prop)
         end
     end
 
@@ -95,12 +98,12 @@ function measure_green(vwf, i::Int, spin_i::Int8, j::Int, spin_j::Int8)
         # 2.1: 普通跳跃 c^dag_{i, sig} c_{j, sig}
         # j->i, 自旋不变
         prop = build_single_hop(ss, j, i, spin_j)
-        return calc_ratio(vwf, prop)
+        return calc_total_ratio(vwf, prop)
     else
         # 2.2: 自旋翻转跳跃 c^dag_{i, sig'} c_{j, sig}
         # j->i, 自旋从 spin_j 变为 spin_i
         prop = build_spin_flip_hop(ss, j, i, spin_j)
-        return calc_ratio(vwf, prop)
+        return calc_total_ratio(vwf, prop)
     end
 end
 
@@ -128,7 +131,7 @@ function measure_SplusSminus(vwf, i::Int, j::Int)
     if can_exchange(ss, i, j)
         prop = build_exchange(ss, i, j)
         # 非 Hubbard 的自旋关联测量沿用 Ndefect3 约定
-        return calc_ratio(vwf, prop)
+        return calc_total_ratio(vwf, prop)
     end
     return 0.0
 end
@@ -157,7 +160,7 @@ function measure_SplusSplus(vwf, i::Int, j::Int)
     end
 
     # Rank-2 Update, 系数 +1
-    return calc_ratio(vwf, prop)
+    return calc_total_ratio(vwf, prop)
 end
 
 """
@@ -178,7 +181,7 @@ function measure_SminusSminus(vwf, i::Int, j::Int)
         return 0.0
     end
 
-    return calc_ratio(vwf, prop)
+    return calc_total_ratio(vwf, prop)
 end
 
 """
@@ -231,6 +234,60 @@ function calc_ratio(vwf, p::MoveProposal)
     end
 end
 
+
+"""
+用途: 计算 projector 对应的比值 `P(C') / P(C)`。
+
+参数:
+- `vwf`: 波函数对象。
+- `p::MoveProposal`: Monte Carlo proposal。
+
+返回:
+- `Number`: projector 比值。若波函数未携带 projector, 返回 1.0。
+"""
+function calc_projector_ratio(vwf, p::MoveProposal)
+    if hasproperty(vwf, :projector)
+        return Projector.projector_ratio(getproperty(vwf, :projector), vwf.sampler, p)
+    end
+    return 1.0
+end
+
+
+"""
+用途: 在已知波函数比值 `psi_ratio` 的情况下, 计算总比值。
+
+数学公式:
+- `ratio_total = ratio_wf * ratio_projector`
+
+参数:
+- `vwf`: 波函数对象。
+- `p::MoveProposal`: Monte Carlo proposal。
+- `psi_ratio`: 波函数本体比值 `Psi_0(C')/Psi_0(C)`。
+
+返回:
+- `Number`: 总比值 `Psi_tot(C')/Psi_tot(C)`。
+"""
+function calc_total_ratio(vwf, p::MoveProposal, psi_ratio)
+    ratio_projector = calc_projector_ratio(vwf, p)
+    return psi_ratio * ratio_projector
+end
+
+
+"""
+用途: 直接计算总比值 `Psi_tot(C') / Psi_tot(C)`。
+
+参数:
+- `vwf`: 波函数对象。
+- `p::MoveProposal`: Monte Carlo proposal。
+
+返回:
+- `Number`: 总比值。
+"""
+function calc_total_ratio(vwf, p::MoveProposal)
+    psi_ratio = calc_ratio(vwf, p)
+    return calc_total_ratio(vwf, p, psi_ratio)
+end
+
 function accept_move!(vwf, p::MoveProposal, ratio)
     vwf.current_ratio = ratio
 
@@ -255,10 +312,11 @@ function mcmc_step!(vwf, kernel::AbstractMCMCKernel, rng::AbstractRNG; detailed_
     end
 
     psi_ratio = calc_ratio(vwf, prop)
+    total_ratio = calc_total_ratio(vwf, prop, psi_ratio)
 
     # 3. 计算接受概率 (Metropolis-Hastings)
     # P_acc = |psi_new/psi_old|^2 * (N_forward / N_reverse)
-    accept_prob = abs2(psi_ratio)
+    accept_prob = abs2(total_ratio)
     # Detailed Balance Correction
     if detailed_balance
         n_fwd = count_choices(kernel, cfg, s1, s2)
@@ -269,9 +327,9 @@ function mcmc_step!(vwf, kernel::AbstractMCMCKernel, rng::AbstractRNG; detailed_
     # 4. 接受/拒绝
     if rand(rng) < accept_prob
         accept_move!(vwf, prop, psi_ratio)
-        return true, accept_prob, psi_ratio, prop
+        return true, accept_prob, total_ratio, prop
     else
-        return false, accept_prob, psi_ratio, prop
+        return false, accept_prob, total_ratio, prop
     end
 end
 
@@ -307,11 +365,12 @@ function mcmc_step!(runner::VMCRunner, rng::AbstractRNG; detailed_balance::Bool=
 
     # 2. 计算波函数比值 psi_new / psi_old
     psi_ratio = calc_ratio(vwf, prop)
+    total_ratio = calc_total_ratio(vwf, prop, psi_ratio)
     # prob_ratio = 
 
     # 3. 计算接受概率 (Metropolis-Hastings)
     # P_acc = |psi_new/psi_old|^2 * (N_forward / N_reverse)
-    accept_prob = abs2(psi_ratio)
+    accept_prob = abs2(total_ratio)
     # Detailed Balance Correction
     if detailed_balance
         n_fwd = count_choices(kernel, cfg, s1, s2)
@@ -322,9 +381,9 @@ function mcmc_step!(runner::VMCRunner, rng::AbstractRNG; detailed_balance::Bool=
     # 4. 接受/拒绝
     if rand(rng) < accept_prob
         accept_move!(vwf, prop, psi_ratio)
-        return true, accept_prob, psi_ratio, prop
+        return true, accept_prob, total_ratio, prop
     else
-        return false, accept_prob, psi_ratio, prop
+        return false, accept_prob, total_ratio, prop
     end
 end
 

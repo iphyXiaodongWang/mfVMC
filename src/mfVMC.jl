@@ -21,6 +21,15 @@ export count_choices, count_choices_reserve
 export has_up, has_dn
 
 # ------------------
+include("Projector.jl")
+using .Projector
+export AbstractProjector, AbstractProjectorTerm
+export NoProjectorTerm, GutzwillerProjectorTerm, CompositeProjector
+export projector_ratio, projector_log_derivative!, projector_log_derivative
+export projector_param_names, projector_param_values, projector_param_count
+export update_projector_params!, check_projector_consistency
+
+# ------------------
 include("Utils.jl")
 using .Utils
 using .Utils
@@ -31,6 +40,7 @@ export build_init_params_from_json
 include("vmc.jl")
 using .VMC
 export vwf_det, vwf_pfa, VMCRunner, update_vwf_params!
+export set_projector!, update_vwf_projector_params!, get_vwf_projector_param_names, get_vwf_projector_param_values, get_vwf_total_param_names
 export init_gswf!, mcmc_step!, calc_ham_eng, accept_move!, rebuild_inverse!
 export measure_green, measure_SzSz, measure_SplusSminus, measure_SiSj, get_Sz, calc_ratio, compute_grad_log_psi!
 export measure_total_Sz, measure_total_Hole, measure_total_Doublon

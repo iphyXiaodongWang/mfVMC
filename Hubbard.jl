@@ -122,6 +122,13 @@ function parse_commandline()
         help = "assuming length of stripe"
         arg_type = Int
         default = 4
+        "--use_projector"
+        help = "Whether to enable projector"
+        action = :store_true
+        "--g"
+        help = "Gutzwiller projector parameter"
+        arg_type = Float64
+        default = 2.0
     end
 
     return parse_args(s)
@@ -131,9 +138,15 @@ end
 # 3. 辅助函数
 # ==============================================================================
 
-function update_ansatz!(vwf, param_names::Vector{Symbol}, params::Vector{Float64}, lx, ly, bcx, bcy, target_sz::Int)
+function update_ansatz!(vwf, param_names::Vector{Symbol}, params::Vector{Float64}, lx, ly, bcx, bcy, target_sz::Int; nparams_proj::Int=0)
+    # 支持输入为 wf 参数 + projector 参数的拼接向量
+    nparms = length(param_names)
+    wf_param_names = param_names[1:(nparms-nparams_proj)]
+    wf_param_values = params[1:(nparms-nparams_proj)]
+    projector_param_names = param_names[(nparms-nparams_proj+1):end]
+    projector_param_values = params[(nparms-nparams_proj+1):end]
     # 这里也可以把 bcx, bcy 提出来作为参数
-    param_map = Dict{Symbol,Float64}(zip(param_names, params))
+    param_map = Dict{Symbol,Float64}(zip(wf_param_names, wf_param_values))
 
     etad1 = get(param_map, :etad1, 0.0)
     etas1 = get(param_map, :etas1, 0.0)
@@ -166,16 +179,19 @@ function update_ansatz!(vwf, param_names::Vector{Symbol}, params::Vector{Float64
         mz=mz
     )
 
-    _, gs_U, dUt_params = PartonSquare.make_ansatz_and_derivs(hubbard_params; param_names=param_names, target_sz=target_sz)
+    _, gs_U, dUt_params = PartonSquare.make_ansatz_and_derivs(hubbard_params; param_names=wf_param_names, target_sz=target_sz)
 
     copyto!(vwf.gs_U, gs_U)
     copyto!(vwf.gs_U_t, permutedims(gs_U))
-    dUt_matrix = zeros(Float64, size(gs_U, 2), size(gs_U, 1), length(param_names))
-    for (idx, name) in enumerate(param_names)
+    dUt_matrix = zeros(Float64, size(gs_U, 2), size(gs_U, 1), length(wf_param_names))
+    for (idx, name) in enumerate(wf_param_names)
         dUt_matrix[:, :, idx] = dUt_params[name]
     end
-    update_vwf_params!(vwf, param_names, dUt_matrix)
+    update_vwf_params!(vwf, wf_param_names, dUt_matrix)
     init_gswf!(vwf)
+    if !isempty(projector_param_names)
+        update_vwf_projector_params!(vwf, projector_param_names, projector_param_values)
+    end
 end
 
 function build_exponential_lr_func(
@@ -265,37 +281,55 @@ function main()
     U = args["U"]
     job = args["job"]
     ansatz = args["ansatz"]
+    use_projector = args["use_projector"]
+    g = args["g"]
     init_params_json = args["init_params_json"]
     N_sites = lx * ly
     #要优化的参数
-    param_names = [:etad1, :etas1]
-    init_params = [args[String(alpha)] for alpha in param_names]
+    wf_param_names = [:etad1, :etas1]
+    wf_init_params = [args[String(alpha)] for alpha in wf_param_names]
     #对每一列的mz，构建mean field参数mz_i,i为第几列
     if ansatz == "Stripe"
         for i in 1:lx
             istripe = div(i - 1, lambda)
             Q = (-1)^istripe
-            push!(param_names, Symbol("mz_$i"))
-            push!(param_names, Symbol("mu_$i"))
+            push!(wf_param_names, Symbol("mz_$i"))
+            push!(wf_param_names, Symbol("mu_$i"))
             if i % lambda == 1 || i % lambda == 0
                 #stripe的边界mz设成0,内部mz每隔一个stripe反号一次
-                push!(init_params, 0.0)
-                push!(init_params, args["mu"])
+                push!(wf_init_params, 0.0)
+                push!(wf_init_params, args["mu"])
             else
-                push!(init_params, args["mz"] * Q)
-                push!(init_params, args["mu"])
+                push!(wf_init_params, args["mz"] * Q)
+                push!(wf_init_params, args["mu"])
             end
         end
     elseif ansatz == "AFM"
         for i in 1:lx
-            push!(param_names, Symbol("mz_$i"))
-            push!(param_names, Symbol("mu_$i"))
-            push!(init_params, args["mz"])
-            push!(init_params, args["mu"])
+            push!(wf_param_names, Symbol("mz_$i"))
+            push!(wf_param_names, Symbol("mu_$i"))
+            push!(wf_init_params, args["mz"])
+            push!(wf_init_params, args["mu"])
         end
     else
         error("Unknown ansatz type: $ansatz")
     end
+    #Projector定义
+    projector = CompositeProjector([NoProjectorTerm()])
+    nparams_proj = 0
+    proj_init_params = Float64[]
+    if use_projector
+        nparams_proj = 1
+        proj_init_params = [g]
+        projector = CompositeProjector([
+            GutzwillerProjectorTerm(param_name=:g, g=g)
+        ])
+    end
+    proj_param_names = projector_param_names(projector)
+    #把波函数参数和投影算符参数拼接成一个向量，供优化器使用
+    init_params = vcat(wf_init_params, proj_init_params)
+    param_names = vcat(wf_param_names, proj_param_names)
+
     if !isempty(init_params_json)
         init_params = build_init_params_from_json(init_params_json, param_names)
         if is_root
@@ -353,13 +387,14 @@ function main()
     init_config_Hubbard!(sampler)
 
     vwf = vwf_det(zeros(Float64, 2 * N_sites, N_sites + target_sz), sampler)
+    set_projector!(vwf, projector)
     kernel = HubbardKernel(conserve_sz=true)
 
     # C. 更新波函数参数
     if rank == 0
         println("Initial parameters: $init_params")
     end
-    update_ansatz!(vwf, param_names, init_params, lx, ly, BCX, BCY, target_sz)
+    update_ansatz!(vwf, param_names, init_params, lx, ly, BCX, BCY, target_sz; nparams_proj=nparams_proj)
 
 
     # D. 运行模拟
@@ -370,7 +405,7 @@ function main()
         sr_params = SRParams(vmc_params=meas_params, n_steps=n_steps, lr=lr)
         exp_lr_func = build_exponential_lr_func(lr, lr_end, n_steps)
 
-        update_vwf_func! = (vwf, params) -> update_ansatz!(vwf, param_names, params, lx, ly, BCX, BCY, target_sz)
+        update_vwf_func! = (vwf, params) -> update_ansatz!(vwf, param_names, params, lx, ly, BCX, BCY, target_sz; nparams_proj=nparams_proj)
 
         run_sr_optimization(
             ham,

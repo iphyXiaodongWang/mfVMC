@@ -30,6 +30,7 @@ mutable struct vwf_det{T,S}
     current_ratio::T
 
     sampler::S
+    projector::Projector.CompositeProjector
 
     # -- Workspace --
     ws::R1R2WS{T}
@@ -37,7 +38,22 @@ mutable struct vwf_det{T,S}
     param_keys::Vector{Symbol}
 end
 
-function vwf_det(U::Matrix{T}, sampler) where T
+"""
+用途: 构造默认的空 projector 容器。
+
+参数:
+- 无。
+
+返回:
+- `Projector.CompositeProjector`, 包含一个 `NoProjectorTerm`。
+"""
+function build_default_projector()
+    projector = Projector.CompositeProjector([Projector.NoProjectorTerm()])
+    Projector.check_projector_consistency(projector)
+    return projector
+end
+
+function vwf_det(U::Matrix{T}, sampler; projector::Projector.CompositeProjector=build_default_projector()) where T
     Nlat = sampler.N_sites
     expected_rows = 2 * Nlat
     expected_cols = total_elec(sampler)
@@ -52,6 +68,7 @@ function vwf_det(U::Matrix{T}, sampler) where T
     awf_inv = zeros(T, 1, 1)
     dUt_matrix = zeros(T, 1, 1, 1)
     param_keys = Vector{Symbol}()
+    Projector.check_projector_consistency(projector)
 
     return vwf_det{T,typeof(sampler)}(
         U,
@@ -61,6 +78,7 @@ function vwf_det(U::Matrix{T}, sampler) where T
         T(0),
         one(T),
         sampler,
+        projector,
         dummy_ws,
         dUt_matrix,
         param_keys
@@ -82,7 +100,7 @@ function ensure_ws!(v::vwf_det{T,S}) where {T,S}
         v.ws = ws
     end
 
-    n_params = length(v.param_keys)
+    n_params = length(v.param_keys) + Projector.projector_param_count(v.projector)
     if length(ws.grad_buffer) != n_params
         resize!(ws.grad_buffer, n_params)
     end
@@ -104,6 +122,115 @@ function update_vwf_params!(vwf::vwf_det{T}, param_names::Vector{Symbol}, dUt_ma
     ensure_ws!(vwf)
     return nothing
 end
+
+
+"""
+用途: 为 determinant 波函数设置 projector 对象。
+
+参数:
+- `vwf::vwf_det`: determinant 波函数对象。
+- `projector::Projector.CompositeProjector`: 新的 projector 容器。
+
+返回:
+- `nothing`。
+"""
+function set_projector!(vwf::vwf_det, projector::Projector.CompositeProjector)
+    Projector.check_projector_consistency(projector)
+    vwf.projector = projector
+    ensure_ws!(vwf)
+    return nothing
+end
+
+
+"""
+用途: 更新 determinant 波函数中 projector 的参数。
+
+参数:
+- `vwf::vwf_det`: determinant 波函数对象。
+- `param_names::Vector{Symbol}`: projector 参数名列表。
+- `param_values::Vector{<:Real}`: 与参数名对应的参数值列表。
+
+返回:
+- `nothing`。
+"""
+function update_vwf_projector_params!(
+    vwf::vwf_det,
+    param_names::Vector{Symbol},
+    param_values::Vector{<:Real},
+)
+    Projector.update_projector_params!(vwf.projector, param_names, param_values)
+    ensure_ws!(vwf)
+    return nothing
+end
+
+
+"""
+用途: 按 projector 内部顺序更新 determinant 波函数中的 projector 参数。
+
+参数:
+- `vwf::vwf_det`: determinant 波函数对象。
+- `param_values::Vector{<:Real}`: 按内部顺序排列的参数值列表。
+
+返回:
+- `nothing`。
+"""
+function update_vwf_projector_params!(
+    vwf::vwf_det,
+    param_values::Vector{<:Real},
+)
+    Projector.update_projector_params!(vwf.projector, param_values)
+    ensure_ws!(vwf)
+    return nothing
+end
+
+
+"""
+用途: 获取 determinant 波函数中 projector 的参数名列表。
+
+参数:
+- `vwf::vwf_det`: determinant 波函数对象。
+
+返回:
+- `Vector{Symbol}`: projector 参数名列表。
+"""
+function get_vwf_projector_param_names(vwf::vwf_det)
+    return Projector.projector_param_names(vwf.projector)
+end
+
+
+"""
+用途: 获取 determinant 波函数中 projector 的参数值列表。
+
+参数:
+- `vwf::vwf_det`: determinant 波函数对象。
+
+返回:
+- `Vector{Float64}`: projector 参数值列表。
+"""
+function get_vwf_projector_param_values(vwf::vwf_det)
+    return Projector.projector_param_values(vwf.projector)
+end
+
+
+"""
+用途: 获取 determinant 波函数的总参数名列表。
+
+拼接顺序:
+- 先返回波函数参数 `vwf.param_keys`;
+- 再返回 projector 参数 `projector_param_names(vwf.projector)`。
+
+参数:
+- `vwf::vwf_det`: determinant 波函数对象。
+
+返回:
+- `Vector{Symbol}`: 总参数名列表。
+"""
+function get_vwf_total_param_names(vwf::vwf_det)
+    wf_names = copy(vwf.param_keys)
+    proj_names = Projector.projector_param_names(vwf.projector)
+    return vcat(wf_names, proj_names)
+end
+
 
 function init_gswf!(vwf::vwf_det{T,S}) where {T,S}
     ss = vwf.sampler
@@ -331,8 +458,9 @@ function compute_grad_log_psi!(vwf::vwf_det{T}) where T
     O_vec = ws.grad_buffer
     fill!(O_vec, zero(T))
 
-    # 3. 遍历所有可变参数
-    for idx in eachindex(vwf.param_keys)
+    # 3. 先计算波函数参数梯度部分
+    wf_param_count = length(vwf.param_keys)
+    for idx in 1:wf_param_count
         dU_t = @view vwf.dUt_matrix[:, :, idx]
         total_sum = zero(T)
 
@@ -353,6 +481,15 @@ function compute_grad_log_psi!(vwf::vwf_det{T}) where T
 
         # 直接使用 enumerate 的索引，不再依赖计数器变量
         O_vec[idx] = total_sum
+    end
+
+    # 4. 再拼接 projector 参数梯度部分
+    projector_param_count = Projector.projector_param_count(vwf.projector)
+    if projector_param_count > 0
+        start_idx = wf_param_count + 1
+        end_idx = wf_param_count + projector_param_count
+        projector_view = @view O_vec[start_idx:end_idx]
+        Projector.projector_log_derivative!(projector_view, vwf.projector, ss)
     end
 
     # 直接返回 buffer 引用，避免 copy
