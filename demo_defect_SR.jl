@@ -112,6 +112,8 @@ function main()
     nparams = length(param_names)
     #每个节点的共享内存MPI,用于存储导数矩阵以节省内存。我们只给矩阵分配内存
     session_shm = init_node_mpi_session(session)
+    leaders_color = session_shm.rank == 0 ? 0 : Int(MPI.API.MPI_UNDEFINED[])
+    leaders_comm = MPI.Comm_split(session.comm, leaders_color, rank)
     local_length = session_shm.rank == 0 ? nparams * (2 * n_sites) * (n_sites + target_sz) : 0
     win, _ = MPI.Win_allocate_shared(Ptr{Float64}, local_length, session_shm.comm)
     shared_matrix = MPI.Win_shared_query(Array{Float64}, (n_sites + target_sz, 2 * n_sites, nparams), win; rank=0)
@@ -140,6 +142,7 @@ function main()
         target_sz;
         session_shm=session_shm,
         shared_matrix=shared_matrix,
+        leaders_comm=leaders_comm,
         win=win
     )
     if defect_ansatz == "FPS"
@@ -166,6 +169,7 @@ function main()
             target_sz;
             session_shm=session_shm,
             shared_matrix=shared_matrix,
+            leaders_comm=leaders_comm,
             win=win
         )
 

@@ -510,6 +510,10 @@ end
 - chi1: 固定的 chi1 参数.
 - defect_positions, defect_index: defect 位置与 index (1-based).
 - target_sz: 目标 total Sz.
+- session_shm: 节点共享内存 communicator 对应的会话信息.
+- shared_matrix: 节点共享内存中的导数三维矩阵.
+- leaders_comm: 仅由各节点共享内存 root 组成的 communicator.
+- win: MPI 共享内存 window 句柄.
 返回:
 - nothing.
 """
@@ -527,6 +531,7 @@ function update_defect_ansatz!(
     target_sz::Int;
     session_shm::MPISession=nothing,
     shared_matrix::Array{Float64,3}=nothing,
+    leaders_comm::Union{Nothing,MPI.Comm}=nothing,
     win::MPI.Win=nothing
 )
     param_map = Dict{Symbol,Float64}(zip(param_names, params))
@@ -585,15 +590,19 @@ function update_defect_ansatz!(
         defect_positions=defect_positions,
         defect_index=defect_index
     )
-    #只有shared_root求解导数矩阵,其它的通过广播和共享内存获得
-    gs_u = nothing
-    if session_shm.rank == 0
-        _, gs_u, dut_params = PartonSquare.make_defect_ansatz_and_derivs(
-            defect_params;
-            param_names=param_names,
-            target_sz=target_sz
-        )
-        #dut存入共享内存矩阵
+    # MPI 路径: 全局 root 对角化, world rank 分担参数导数, 仅在 root 汇总后广播给共享内存 root.
+    is_shared_root = (session_shm.rank == 0)
+    _, gs_u, dut_params = PartonSquare.make_defect_ansatz_and_derivs_MPI(
+        defect_params;
+        param_names=param_names,
+        target_sz=target_sz,
+        world_comm=MPI.COMM_WORLD,
+        leaders_comm=leaders_comm,
+        is_shared_root=is_shared_root
+    )
+
+    # 每个节点仅由共享内存 root 写入共享矩阵, 其余 rank 通过共享内存读取.
+    if is_shared_root
         for (i, name) in enumerate(param_names)
             copyto!(@view(shared_matrix[:, :, i]), dut_params[name])
         end

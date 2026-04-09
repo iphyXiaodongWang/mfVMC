@@ -7,7 +7,7 @@ using Utils
 using MPI
 
 export U1SFlux, make_ansatz_and_derivs
-export DefectHeisenbergParams, make_defect_ansatz_and_derivs
+export DefectHeisenbergParams, make_defect_ansatz_and_derivs, make_defect_ansatz_and_derivs_MPI
 
 """
 	U1SFlux
@@ -501,9 +501,52 @@ function construct_defect_ph_tmat(
 end
 
 """
+	build_defect_dh_dparam(p::DefectHeisenbergParams, name::Symbol) -> Matrix{Float64}
+
+用途: 构造 defect ansatz 中单个参数 `name` 对应的导数矩阵 `dH/dname`.
+参数:
+- p::DefectHeisenbergParams, 当前 defect 参数.
+- name::Symbol, 目标参数名.
+返回:
+- Matrix{Float64}, 与 `construct_defect_ph_tmat(p)` 同维度的导数矩阵.
+说明:
+- 对于形如 `mz_x_y`、`chi2_x_y` 的 site 依赖参数, 只在对应坐标位置置 1.0.
+- 对于全局参数 (如 `mu`、`etad1`、`etas1`), 直接将该参数置 1.0.
+"""
+function build_defect_dh_dparam(
+	p::DefectHeisenbergParams,
+	name::Symbol
+)::Matrix{Float64}
+	if occursin(r"_\d+_\d+$", String(name))
+		idx = findfirst('_', String(name))
+		str = String(name)[1:(idx-1)]
+		p_alpha = DefectHeisenbergParams(;
+			(; :Lx => p.Lx,
+				:Ly => p.Ly,
+				:bcx => p.bcx,
+				:bcy => p.bcy,
+				Symbol(str) => Dict(name => 1.0),
+				:defect_positions => p.defect_positions,
+				:defect_index => p.defect_index)...,
+		)
+	else
+		p_alpha = DefectHeisenbergParams(;
+			(; :Lx => p.Lx,
+				:Ly => p.Ly,
+				:bcx => p.bcx,
+				:bcy => p.bcy,
+				name => 1.0,
+				:defect_positions => p.defect_positions,
+				:defect_index => p.defect_index)...,
+		)
+	end
+	return construct_defect_ph_tmat(p_alpha)
+end
+
+"""
 	make_defect_ansatz_and_derivs(p::DefectHeisenbergParams; param_names::Vector{Symbol}, target_sz::Int)
 
-生成 defect 版波函数与导数.
+生成 defect 版波函数与导数 (串行版本).
 参数:
 - p::DefectHeisenbergParams, 模型参数.
 - param_names::Vector{Symbol}, 需要求导的参数列表.
@@ -517,35 +560,10 @@ function make_defect_ansatz_and_derivs(
 	target_sz::Int = 0,
 )
 	H = construct_defect_ph_tmat(p)
-
 	H_alphas = OrderedDict{Symbol, Matrix{Float64}}()
 	for name in param_names
-		if occursin(r"_\d+_\d+$", String(name))
-			idx = findfirst('_', String(name))
-			str = String(name)[1:(idx-1)]
-			p_alpha = DefectHeisenbergParams(;
-				(; :Lx => p.Lx,
-					:Ly => p.Ly,
-					:bcx => p.bcx,
-					:bcy => p.bcy,
-					Symbol(str) => Dict(name => 1.0),
-					:defect_positions => p.defect_positions,
-					:defect_index => p.defect_index)...,
-			)
-		else
-			p_alpha = DefectHeisenbergParams(;
-				(; :Lx => p.Lx,
-					:Ly => p.Ly,
-					:bcx => p.bcx,
-					:bcy => p.bcy,
-					name => 1.0,
-					:defect_positions => p.defect_positions,
-					:defect_index => p.defect_index)...,
-			)
-		end
-		H_alphas[name] = construct_defect_ph_tmat(p_alpha)
+		H_alphas[name] = build_defect_dh_dparam(p, name)
 	end
-
 	ε, U_full, dE, dU_dict = Utils.compute_eig_and_dU_reg1(H, H_alphas)
 	eig_eq_error = norm(Matrix(H) * U_full - U_full * Diagonal(ε))
 	if is_root_rank()
@@ -555,7 +573,9 @@ function make_defect_ansatz_and_derivs(
 	n_lat = size(H, 1) ÷ 2
 	n_occ = n_lat + target_sz
 	if is_root_rank()
-		println("ε is", ε[(n_occ-4):(n_occ+4)])
+		left_idx = max(1, n_occ - 4)
+		right_idx = min(length(ε), n_occ + 4)
+		println("ε is", ε[left_idx:right_idx])
 	end
 
 	U_occ = U_full[:, 1:n_occ]
@@ -563,6 +583,121 @@ function make_defect_ansatz_and_derivs(
 		alpha => permutedims(real.(dU_dict[alpha][:, 1:n_occ]))
 		for alpha in param_names
 	)
+	return ε, real.(U_occ), dUt_occ
+end
+
+"""
+	make_defect_ansatz_and_derivs_MPI(
+		p::DefectHeisenbergParams;
+		param_names::Vector{Symbol},
+		target_sz::Int,
+		world_comm::MPI.Comm,
+		leaders_comm::Union{Nothing,MPI.Comm},
+		is_shared_root::Bool
+	)
+
+用途: defect ansatz 的 MPI 导数版本.
+参数:
+- p::DefectHeisenbergParams, 模型参数.
+- param_names::Vector{Symbol}, 需要求导的参数列表.
+- target_sz::Int, 目标 total Sz.
+- world_comm::MPI.Comm, 全局 communicator.
+- leaders_comm::Union{Nothing,MPI.Comm}, 仅共享内存 root 组成的 communicator.
+- is_shared_root::Bool, 当前 rank 是否为本节点共享内存 root.
+返回:
+- ε, gs_U, dUt_params.
+  - ε: 本征值向量.
+  - gs_U: 占据轨道矩阵.
+  - dUt_params: 仅在 `is_shared_root=true` 的 rank 上返回完整 `OrderedDict`, 其它 rank 返回空字典.
+公式:
+- dU = U * (F .* (U' * dH * U)),
+  其中 F_{mn} = -Re[1 / (ε_m - ε_n + i*eta)], 且 F_{mm}=0.
+并行流程:
+- 全局 root 对角化并广播 `ε` 与 `U`.
+- 参数按 world rank 做 cyclic 分配.
+- 各 rank 计算自己的 dUt 切片后, 用 `Reduce(SUM)` 仅汇总到全局 root.
+- 全局 root 再向 leaders_comm 广播完整 dUt, 供每个节点共享内存 root 写入共享矩阵.
+"""
+function make_defect_ansatz_and_derivs_MPI(
+	p::DefectHeisenbergParams;
+	param_names::Vector{Symbol},
+	target_sz::Int = 0,
+	world_comm::MPI.Comm = MPI.COMM_WORLD,
+	leaders_comm::Union{Nothing,MPI.Comm} = nothing,
+	is_shared_root::Bool = true,
+	eta::Real = 1e-8,
+)
+	if !MPI.Initialized() || MPI.Comm_size(world_comm) <= 1
+		return make_defect_ansatz_and_derivs(p; param_names=param_names, target_sz=target_sz)
+	end
+
+	world_rank = MPI.Comm_rank(world_comm)
+	world_size = MPI.Comm_size(world_comm)
+	world_root = 0
+
+	H_root = nothing
+	ε = nothing
+	U_full = nothing
+	if world_rank == world_root
+		H_root = construct_defect_ph_tmat(p)
+		H_sym = Hermitian(H_root)
+		ε, U_full = eigen(H_sym)
+	end
+	ε = MPI.bcast(ε, world_root, world_comm)
+	U_full = MPI.bcast(U_full, world_root, world_comm)
+
+	diff_mat = ε .- ε' .+ im * eta
+	F = -real.(1.0 ./ diff_mat)
+	F[diagind(F)] .= 0.0
+
+	n_spin = size(U_full, 1)
+	n_lat = n_spin ÷ 2
+	n_occ = n_lat + target_sz
+	n_param = length(param_names)
+
+	local_dut_tensor = zeros(Float64, n_occ, n_spin, n_param)
+	for alpha_idx in (world_rank+1):world_size:n_param
+		alpha_name = param_names[alpha_idx]
+		dH_alpha = build_defect_dh_dparam(p, alpha_name)
+		dH_mo = U_full' * dH_alpha * U_full
+		dU_alpha = U_full * (F .* dH_mo)
+		local_dut_tensor[:, :, alpha_idx] .= permutedims(real.(dU_alpha[:, 1:n_occ]))
+	end
+
+	global_dut_tensor = world_rank == world_root ? similar(local_dut_tensor) : local_dut_tensor
+	MPI.Reduce!(local_dut_tensor, global_dut_tensor, MPI.SUM, world_root, world_comm)
+
+	if world_rank == world_root
+		eig_eq_error = norm(Matrix(H_root) * U_full - U_full * Diagonal(ε))
+		println("Eigen equation error (HU - Uε): ", eig_eq_error)
+		left_idx = max(1, n_occ - 4)
+		right_idx = min(length(ε), n_occ + 4)
+		println("ε is", ε[left_idx:right_idx])
+	end
+
+	shared_dut_tensor = nothing
+	if is_shared_root
+		if leaders_comm === nothing
+			if world_rank != world_root
+				error("leaders_comm is required for non-root shared leaders in MPI mode.")
+			end
+			shared_dut_tensor = global_dut_tensor
+		else
+			leaders_root = 0
+			if world_rank == world_root
+				shared_dut_tensor = global_dut_tensor
+			end
+			shared_dut_tensor = MPI.bcast(shared_dut_tensor, leaders_root, leaders_comm)
+		end
+	end
+
+	U_occ = U_full[:, 1:n_occ]
+	dUt_occ = OrderedDict{Symbol, Matrix{Float64}}()
+	if is_shared_root
+		for (alpha_idx, alpha_name) in enumerate(param_names)
+			dUt_occ[alpha_name] = copy(@view(shared_dut_tensor[:, :, alpha_idx]))
+		end
+	end
 	return ε, real.(U_occ), dUt_occ
 end
 # ======================================================================
