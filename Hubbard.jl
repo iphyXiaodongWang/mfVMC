@@ -122,13 +122,10 @@ function parse_commandline()
         help = "assuming length of stripe"
         arg_type = Int
         default = 4
-        "--use_projector"
-        help = "Whether to enable projector"
-        action = :store_true
         "--g"
         help = "Gutzwiller projector parameter"
         arg_type = Float64
-        default = 2.0
+        default = 1.0
     end
 
     return parse_args(s)
@@ -281,7 +278,6 @@ function main()
     U = args["U"]
     job = args["job"]
     ansatz = args["ansatz"]
-    use_projector = args["use_projector"]
     g = args["g"]
     init_params_json = args["init_params_json"]
     N_sites = lx * ly
@@ -315,16 +311,11 @@ function main()
         error("Unknown ansatz type: $ansatz")
     end
     #Projector定义
-    projector = CompositeProjector([NoProjectorTerm()])
-    nparams_proj = 0
-    proj_init_params = Float64[]
-    if use_projector
-        nparams_proj = 1
-        proj_init_params = [g]
-        projector = CompositeProjector([
-            GutzwillerProjectorTerm(param_name=:g, g=g)
-        ])
-    end
+    nparams_proj = 1
+    proj_init_params = [g]
+    projector = CompositeProjector([
+        GutzwillerProjectorTerm(param_name=:g, g=g)
+    ])
     proj_param_names = projector_param_names(projector)
     #把波函数参数和投影算符参数拼接成一个向量，供优化器使用
     init_params = vcat(wf_init_params, proj_init_params)
