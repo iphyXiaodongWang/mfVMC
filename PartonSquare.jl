@@ -711,6 +711,7 @@ struct HubbardParams
 	chi1::Float64
 	etad1::Float64
 	etas1::Float64
+	chi2::Float64
 	mu::Dict{Symbol, Float64}
 	mz::Dict{Symbol, Float64}
 end
@@ -722,10 +723,11 @@ function HubbardParams(;
 	chi1::Float64 = 0.0,
 	etad1::Float64 = 0.0,
 	etas1::Float64 = 0.0,
+	chi2::Float64 =0.0,
 	mu::Dict{Symbol, Float64} = Dict{Symbol, Float64}(),
 	mz::Dict{Symbol, Float64} = Dict{Symbol, Float64}()
 )
-	return HubbardParams(Lx, Ly, bcx, bcy, chi1, etad1, etas1, mu, mz)
+	return HubbardParams(Lx, Ly, bcx, bcy, chi1, etad1, etas1, chi2, mu, mz)
 end
 function build_ham_PH(p::HubbardParams)
 	Lx, Ly = p.Lx, p.Ly
@@ -733,6 +735,7 @@ function build_ham_PH(p::HubbardParams)
 	chi1 = p.chi1
 	etad1 = p.etad1
 	etas1 = p.etas1
+	chi2 = p.chi2
 	mz = p.mz
 	mu = p.mu
 	H = zeros(Float64, 2 * Nlat, 2 * Nlat)
@@ -748,8 +751,15 @@ function build_ham_PH(p::HubbardParams)
 			# --- X 方向 ---
 			idx = (x == Lx) ? xy_to_idx(1, y, Ly) : xy_to_idx(x + 1, y, Ly)
 			bc_x = (x == Lx) ? p.bcx : 1.0
+			# --- 次近邻对角方向 ---
+			idpp = xy_to_idx((x == Lx) ? 1 : x + 1, (y == Ly) ? 1 : y + 1, Ly)
+			idmp = xy_to_idx((x == 1) ? Lx : x - 1, (y == Ly) ? 1 : y + 1, Ly)
+			bc_pp = ((x == Lx) ? p.bcx : 1.0) * ((y == Ly) ? p.bcy : 1.0)
+			bc_mp = ((x == 1) ? p.bcx : 1.0) * ((y == Ly) ? p.bcy : 1.0)
 			add_term_ij_PH(H, id0, idx, chi1 * bc_x, (+etas1 - etad1) * bc_x)
 			add_term_ij_PH(H, id0, idy, chi1 * bc_y, (etas1 + etad1) * bc_y)
+			add_term_ij_PH(H, id0, idpp, chi2 * bc_pp, 0.0)
+			add_term_ij_PH(H, id0, idmp, chi2 * bc_mp, 0.0)
 			H[2*(id0-1)+1, 2*(id0-1)+1] += Q * mz0 / 2 + mu0 / 2
 			H[2*(id0-1)+2, 2*(id0-1)+2] += Q * mz0 / 2 - mu0 / 2
 		end

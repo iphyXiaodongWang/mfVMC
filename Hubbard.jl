@@ -58,6 +58,10 @@ function parse_commandline()
         help = "MF parameters"
         arg_type = Float64
         default = 0.01
+        "--chi2"
+        help = "Next-nearest neighbor hopping in MF ansatz. Default follows --t2"
+        arg_type = Float64
+        default = -0.2
         "--mz"
         help = "AFM order parameters"
         arg_type = Float64
@@ -147,6 +151,7 @@ function update_ansatz!(vwf, param_names::Vector{Symbol}, params::Vector{Float64
 
     etad1 = get(param_map, :etad1, 0.0)
     etas1 = get(param_map, :etas1, 0.0)
+    chi2 = get(param_map, :chi2, 0.0)
 
     mz = Dict{Symbol,Float64}()
     mu = Dict{Symbol,Float64}()
@@ -157,7 +162,7 @@ function update_ansatz!(vwf, param_names::Vector{Symbol}, params::Vector{Float64
             mz[name] = value
         elseif startswith(name_str, "mu_")
             mu[name] = value
-        elseif name == :etad1 || name == :etas1
+        elseif name == :etad1 || name == :etas1 || name == :chi2
             continue
         else
             error("Unknown parameter name: $name")
@@ -172,6 +177,7 @@ function update_ansatz!(vwf, param_names::Vector{Symbol}, params::Vector{Float64
         chi1=1.0,
         etad1=etad1,
         etas1=etas1,
+        chi2=chi2,
         mu=mu,
         mz=mz
     )
@@ -282,8 +288,8 @@ function main()
     init_params_json = args["init_params_json"]
     N_sites = lx * ly
     #要优化的参数
-    wf_param_names = [:etad1, :etas1]
-    wf_init_params = [args[String(alpha)] for alpha in wf_param_names]
+    wf_param_names = [:etad1, :etas1, :chi2]
+    wf_init_params = [args["etad1"], args["etas1"], args["chi2"]]
     #对每一列的mz，构建mean field参数mz_i,i为第几列
     if ansatz == "Stripe"
         for i in 1:lx
