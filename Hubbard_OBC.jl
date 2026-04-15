@@ -43,13 +43,13 @@ function parse_commandline()
         arg_type = Float64
         default = 8.0
         "--bcx"
-        help = "Boundary condition phase in X (1.0 or -1.0)"
-        arg_type = Float64
-        default = 1.001
-        "--bcy"
-        help = "Boundary condition phase in Y. Use 0.0 for OBC in Y"
+        help = "Boundary condition phase in X. Use 0.0 for OBC in X"
         arg_type = Float64
         default = 0.0
+        "--bcy"
+        help = "Boundary condition phase in Y (1.0 or -1.0) for periodic Y"
+        arg_type = Float64
+        default = 0.999
         "--etad1"
         help = "MF parameters"
         arg_type = Float64
@@ -258,11 +258,17 @@ function main()
     ly = args["Ly"]
     BCX = args["bcx"]
     BCY = args["bcy"]
-    if abs(BCY) > 1e-12
+    if abs(BCX) > 1e-12
         if is_root
-            println("[Hubbard_OBC] Force y-open boundary: override --bcy=$BCY to 0.0")
+            println("[Hubbard_OBC] Force x-open boundary: override --bcx=$BCX to 0.0")
         end
-        BCY = 0.0
+        BCX = 0.0
+    end
+    if abs(BCY) <= 1e-12
+        if is_root
+            println("[Hubbard_OBC] Force y-periodic boundary: override --bcy=$BCY to 1.0")
+        end
+        BCY = 1.0
     end
     target_sz = args["target_sz"]
     doping = args["doping"]
@@ -356,26 +362,28 @@ function main()
 
     # B. 模型与波函数初始化
     # GeneralModel定义
-    # OBC的情况下, 只有x方向周期边界, y方向开边界
+    # OBC的情况下, 只有x方向开边界, y方向周期边界
     bonds1 = Tuple{Int,Int}[]
     bonds2 = Tuple{Int,Int}[]
 
-    # 线性索引: x方向周期, y方向不开边界绕回
-    idx(x, y) = mod(x - 1, lx) * ly + (y - 1) + 1
+    # 线性索引: x方向不开边界绕回, y方向周期
+    idx(x, y) = (x - 1) * ly + mod(y - 1, ly) + 1
 
     for y in 1:ly, x in 1:lx
         u = idx(x, y)
-        # x方向最近邻: 始终周期连接
-        push!(bonds1, (u, idx(x + 1, y)))
-
-        # y方向最近邻: 仅在内部层连接, 不做 y=Ly -> 1 绕回
-        if y < ly
-            push!(bonds1, (u, idx(x, y + 1)))
+        # x方向最近邻: 仅在内部列连接, 不做 x=Lx -> 1 绕回
+        if x < lx
+            push!(bonds1, (u, idx(x + 1, y)))
         end
 
-        # 对角t2项: 仅在 y < Ly 时连接到上一层
-        if y < ly
+        # y方向最近邻: 始终周期连接
+        push!(bonds1, (u, idx(x, y + 1)))
+
+        # 对角t2项: y方向周期, x方向不开边界绕回
+        if x < lx
             push!(bonds2, (u, idx(x + 1, y + 1)))
+        end
+        if x > 1
             push!(bonds2, (u, idx(x - 1, y + 1)))
         end
     end
