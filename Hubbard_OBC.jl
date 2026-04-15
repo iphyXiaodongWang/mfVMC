@@ -130,6 +130,14 @@ function parse_commandline()
         help = "Gutzwiller projector parameter"
         arg_type = Float64
         default = 1.0
+        "--vj1"
+        help = "Jastrow projector parameter on nearest-neighbor bonds"
+        arg_type = Float64
+        default = 0.0
+        "--vj2"
+        help = "Jastrow projector parameter on next-nearest-neighbor bonds"
+        arg_type = Float64
+        default = 0.0
     end
 
     return parse_args(s)
@@ -297,6 +305,8 @@ function main()
     job = args["job"]
     ansatz = args["ansatz"]
     g = args["g"]
+    vj1 = args["vj1"]
+    vj2 = args["vj2"]
     init_params_json = args["init_params_json"]
     N_sites = lx * ly
     #要优化的参数
@@ -330,25 +340,6 @@ function main()
     else
         error("Unknown ansatz type: $ansatz")
     end
-
-    #Projector定义
-    nparams_proj = 1
-    proj_init_params = [g]
-    projector = CompositeProjector([
-        GutzwillerProjectorTerm(param_name=:g, g=g)
-    ])
-    proj_param_names = projector_param_names(projector)
-    #把波函数参数和投影算符参数拼接成一个向量，供优化器使用
-    init_params = vcat(wf_init_params, proj_init_params)
-    param_names = vcat(wf_param_names, proj_param_names)
-
-    if !isempty(init_params_json)
-        init_params = build_init_params_from_json(init_params_json, param_names)
-        if is_root
-            println("Loaded initial parameters from json: $(init_params_json)")
-        end
-    end
-
 
     # VMC 采样参数
     meas_params = VMCParams(
@@ -387,6 +378,47 @@ function main()
             push!(bonds2, (u, idx(x - 1, y + 1)))
         end
     end
+
+    site_to_neighbor_sites_j1 = [Int[] for _ in 1:N_sites]
+    for (site_i, site_j) in bonds1
+        if !(site_j in site_to_neighbor_sites_j1[site_i])
+            push!(site_to_neighbor_sites_j1[site_i], site_j)
+        end
+        if !(site_i in site_to_neighbor_sites_j1[site_j])
+            push!(site_to_neighbor_sites_j1[site_j], site_i)
+        end
+    end
+
+    site_to_neighbor_sites_j2 = [Int[] for _ in 1:N_sites]
+    for (site_i, site_j) in bonds2
+        if !(site_j in site_to_neighbor_sites_j2[site_i])
+            push!(site_to_neighbor_sites_j2[site_i], site_j)
+        end
+        if !(site_i in site_to_neighbor_sites_j2[site_j])
+            push!(site_to_neighbor_sites_j2[site_j], site_i)
+        end
+    end
+
+    # Projector 定义
+    projector = CompositeProjector([
+        GutzwillerProjectorTerm(param_name=:g, g=g),
+        JastrowProjectorTerm(param_name=:vj1, v=vj1, site_to_neighbor_sites=site_to_neighbor_sites_j1),
+        JastrowProjectorTerm(param_name=:vj2, v=vj2, site_to_neighbor_sites=site_to_neighbor_sites_j2)
+    ])
+    proj_param_names = projector_param_names(projector)
+    proj_init_params = projector_param_values(projector)
+    nparams_proj = length(proj_param_names)
+    # 把波函数参数和投影算符参数拼接成一个向量, 供优化器使用
+    init_params = vcat(wf_init_params, proj_init_params)
+    param_names = vcat(wf_param_names, proj_param_names)
+
+    if !isempty(init_params_json)
+        init_params = build_init_params_from_json(init_params_json, param_names)
+        if is_root
+            println("Loaded initial parameters from json: $(init_params_json)")
+        end
+    end
+
     terms = OperatorTerm[]
     for (i, j) in bonds1
         push!(terms, OperatorTerm([:cdag_up, :c_up], [i, j], -t1))

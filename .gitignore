@@ -1,7 +1,7 @@
 logs/
 *.md
 .juliaup
-test/
+test/*
 results/
 others/
 __pycache__/
