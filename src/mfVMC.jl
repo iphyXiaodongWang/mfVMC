@@ -30,6 +30,16 @@ export projector_param_names, projector_param_values, projector_param_count
 export update_projector_params!, check_projector_consistency
 
 # ------------------
+include("Backflow.jl")
+using .Backflow
+export AbstractBackflowTerm, NoBackflowTerm, Eq4BackflowTerm
+export uses_backflow
+export backflow_param_names, backflow_param_values, backflow_param_count
+export update_backflow_params!
+export compute_doublon_hole_masks, compute_recombination_mask
+export build_backflow_orbitals, build_eq4_backflow_orbitals
+
+# ------------------
 include("Utils.jl")
 using .Utils
 using .Utils
@@ -40,7 +50,8 @@ export build_init_params_from_json
 include("vmc.jl")
 using .VMC
 export vwf_det, vwf_pfa, VMCRunner, update_vwf_params!
-export set_projector!, update_vwf_projector_params!, get_vwf_projector_param_names, get_vwf_projector_param_values, get_vwf_total_param_names
+export set_projector!, set_backflow!, update_vwf_projector_params!, update_vwf_backflow_params!
+export get_vwf_projector_param_names, get_vwf_projector_param_values, get_vwf_backflow_param_names, get_vwf_backflow_param_values, get_vwf_total_param_names
 export init_gswf!, mcmc_step!, calc_ham_eng, accept_move!, rebuild_inverse!
 export measure_green, measure_SzSz, measure_SplusSminus, measure_SiSj, get_Sz, calc_ratio, compute_grad_log_psi!
 export measure_total_Sz, measure_total_Hole, measure_total_Doublon

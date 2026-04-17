@@ -20,8 +20,10 @@ end
 # ==============================================================================
 mutable struct vwf_det{T,S}
     # -- Matrices --
+    base_gs_U::Matrix{T}
     gs_U::Matrix{T}
     gs_U_t::Matrix{T}
+    backflow_u::Matrix{T}
 
     awf_mat_t::Matrix{T}
     awf_inv::Matrix{T}
@@ -31,6 +33,7 @@ mutable struct vwf_det{T,S}
 
     sampler::S
     projector::Projector.CompositeProjector
+    backflow::Backflow.AbstractBackflowTerm
 
     # -- Workspace --
     ws::R1R2WS{T}
@@ -53,7 +56,26 @@ function build_default_projector()
     return projector
 end
 
-function vwf_det(U::Matrix{T}, sampler; projector::Projector.CompositeProjector=build_default_projector()) where T
+
+"""
+用途: 构造默认的空 backflow 对象。
+
+参数:
+- 无。
+
+返回:
+- `Backflow.NoBackflowTerm`, 表示当前 determinant 不启用 backflow。
+"""
+function build_default_backflow()
+    return Backflow.NoBackflowTerm()
+end
+
+function vwf_det(
+    U::Matrix{T},
+    sampler;
+    projector::Projector.CompositeProjector=build_default_projector(),
+    backflow::Backflow.AbstractBackflowTerm=build_default_backflow(),
+) where T
     Nlat = sampler.N_sites
     expected_rows = 2 * Nlat
     expected_cols = total_elec(sampler)
@@ -69,16 +91,23 @@ function vwf_det(U::Matrix{T}, sampler; projector::Projector.CompositeProjector=
     dUt_matrix = zeros(T, 1, 1, 1)
     param_keys = Vector{Symbol}()
     Projector.check_projector_consistency(projector)
+    base_gs_u = copy(U)
+    gs_u = copy(U)
+    gs_u_t = permutedims(U)
+    backflow_u = copy(U)
 
     return vwf_det{T,typeof(sampler)}(
-        U,
-        permutedims(U), # gs_U_t
+        base_gs_u,      # base_gs_U
+        gs_u,           # gs_U
+        gs_u_t,         # gs_U_t
+        backflow_u,     # backflow_u
         awf_mat_t,      # awf_mat_t
         awf_inv,        # awf_inv (placeholder)
         T(0),
         one(T),
         sampler,
         projector,
+        backflow,
         dummy_ws,
         dUt_matrix,
         param_keys
@@ -100,7 +129,7 @@ function ensure_ws!(v::vwf_det{T,S}) where {T,S}
         v.ws = ws
     end
 
-    n_params = length(v.param_keys) + Projector.projector_param_count(v.projector)
+    n_params = length(v.param_keys) + Projector.projector_param_count(v.projector) + Backflow.backflow_param_count(v.backflow)
     if length(ws.grad_buffer) != n_params
         resize!(ws.grad_buffer, n_params)
     end
@@ -137,6 +166,24 @@ end
 function set_projector!(vwf::vwf_det, projector::Projector.CompositeProjector)
     Projector.check_projector_consistency(projector)
     vwf.projector = projector
+    ensure_ws!(vwf)
+    return nothing
+end
+
+
+"""
+用途: 为 determinant 波函数设置 backflow 对象, 并立即刷新当前有效轨道矩阵。
+
+参数:
+- `vwf::vwf_det`: determinant 波函数对象。
+- `backflow::Backflow.AbstractBackflowTerm`: 新的 backflow 对象。
+
+返回:
+- `nothing`。
+"""
+function set_backflow!(vwf::vwf_det, backflow::Backflow.AbstractBackflowTerm)
+    vwf.backflow = backflow
+    refresh_backflow_orbitals!(vwf)
     ensure_ws!(vwf)
     return nothing
 end
@@ -185,6 +232,50 @@ end
 
 
 """
+用途: 更新 determinant 波函数中的 backflow 参数。
+
+参数:
+- `vwf::vwf_det`: determinant 波函数对象。
+- `param_names::Vector{Symbol}`: backflow 参数名列表。
+- `param_values::Vector{<:Real}`: 与参数名对应的参数值列表。
+
+返回:
+- `nothing`。
+"""
+function update_vwf_backflow_params!(
+    vwf::vwf_det,
+    param_names::Vector{Symbol},
+    param_values::Vector{<:Real},
+)
+    Backflow.update_backflow_params!(vwf.backflow, param_names, param_values)
+    refresh_backflow_orbitals!(vwf)
+    ensure_ws!(vwf)
+    return nothing
+end
+
+
+"""
+用途: 按 backflow 内部顺序更新 determinant 波函数中的 backflow 参数。
+
+参数:
+- `vwf::vwf_det`: determinant 波函数对象。
+- `param_values::Vector{<:Real}`: 按内部顺序排列的参数值列表。
+
+返回:
+- `nothing`。
+"""
+function update_vwf_backflow_params!(
+    vwf::vwf_det,
+    param_values::Vector{<:Real},
+)
+    Backflow.update_backflow_params!(vwf.backflow, param_values)
+    refresh_backflow_orbitals!(vwf)
+    ensure_ws!(vwf)
+    return nothing
+end
+
+
+"""
 用途: 获取 determinant 波函数中 projector 的参数名列表。
 
 参数:
@@ -213,6 +304,34 @@ end
 
 
 """
+用途: 获取 determinant 波函数中 backflow 的参数名列表。
+
+参数:
+- `vwf::vwf_det`: determinant 波函数对象。
+
+返回:
+- `Vector{Symbol}`: backflow 参数名列表。
+"""
+function get_vwf_backflow_param_names(vwf::vwf_det)
+    return Backflow.backflow_param_names(vwf.backflow)
+end
+
+
+"""
+用途: 获取 determinant 波函数中 backflow 的参数值列表。
+
+参数:
+- `vwf::vwf_det`: determinant 波函数对象。
+
+返回:
+- `Vector{Float64}`: backflow 参数值列表。
+"""
+function get_vwf_backflow_param_values(vwf::vwf_det)
+    return Backflow.backflow_param_values(vwf.backflow)
+end
+
+
+"""
 用途: 获取 determinant 波函数的总参数名列表。
 
 拼接顺序:
@@ -228,24 +347,69 @@ end
 function get_vwf_total_param_names(vwf::vwf_det)
     wf_names = copy(vwf.param_keys)
     proj_names = Projector.projector_param_names(vwf.projector)
-    return vcat(wf_names, proj_names)
+    backflow_names = Backflow.backflow_param_names(vwf.backflow)
+    return vcat(wf_names, proj_names, backflow_names)
 end
 
 
-function init_gswf!(vwf::vwf_det{T,S}) where {T,S}
-    ss = vwf.sampler
-    initialize_lists!(ss)
-    total_elec_count = total_elec(ss)
+"""
+用途: 根据当前采样构型刷新 determinant 使用的有效轨道矩阵。
 
-    # elec_locs = zeros(Int, total_elec)    
-    # count_found = 0
-    # for loc_idx in 1:length(ss.map_spin_to_id)
-    #     eid = ss.map_spin_to_id[loc_idx]
-    #     if eid != 0
-    #         elec_locs[eid] = loc_idx 
-    #         count_found += 1
-    #     end
-    # end
+参数:
+- `vwf::vwf_det{T}`: determinant 波函数对象。
+
+返回:
+- `nothing`。
+"""
+function refresh_backflow_orbitals!(vwf::vwf_det{T}) where {T}
+    if Backflow.uses_backflow(vwf.backflow)
+        refreshed_orbitals = Backflow.build_backflow_orbitals(vwf.base_gs_U, vwf.sampler.state, vwf.backflow)
+        if size(vwf.backflow_u) != size(refreshed_orbitals)
+            vwf.backflow_u = similar(refreshed_orbitals)
+        end
+        copyto!(vwf.backflow_u, refreshed_orbitals)
+        copyto!(vwf.gs_U, vwf.backflow_u)
+    else
+        copyto!(vwf.backflow_u, vwf.base_gs_U)
+        copyto!(vwf.gs_U, vwf.base_gs_U)
+    end
+
+    copyto!(vwf.gs_U_t, permutedims(vwf.gs_U))
+    return nothing
+end
+
+
+"""
+用途: 根据给定轨道矩阵与电子位置列表构造 Slater 方阵。
+
+参数:
+- `orbitals::AbstractMatrix{T}`: 轨道矩阵, 行对应基底索引, 列对应轨道。
+- `electron_locs::Vector{Int}`: 电子所在的内部基底索引列表。
+
+返回:
+- `Matrix{T}`: 形状为 `(N_elec, N_elec)` 的 Slater 方阵。
+"""
+function build_slater_matrix_from_orbitals(
+    orbitals::AbstractMatrix{T},
+    electron_locs::Vector{Int},
+) where {T}
+    return Matrix{T}(orbitals[electron_locs, :])
+end
+
+
+"""
+用途: 根据当前采样构型完整重建 determinant 的 Slater 矩阵、行列式与逆矩阵。
+
+参数:
+- `vwf::vwf_det{T}`: determinant 波函数对象。
+
+返回:
+- `nothing`。
+"""
+function rebuild_slater_state!(vwf::vwf_det{T,S}) where {T,S}
+    ss = vwf.sampler
+    total_elec_count = total_elec(ss)
+    refresh_backflow_orbitals!(vwf)
 
     if size(vwf.awf_mat_t, 1) != total_elec_count
         vwf.awf_mat_t = zeros(T, total_elec_count, total_elec_count)
@@ -267,7 +431,18 @@ function init_gswf!(vwf::vwf_det{T,S}) where {T,S}
     return nothing
 end
 
+function init_gswf!(vwf::vwf_det{T,S}) where {T,S}
+    ss = vwf.sampler
+    initialize_lists!(ss)
+    rebuild_slater_state!(vwf)
+    return nothing
+end
+
 function rebuild_inverse!(vwf::vwf_det)
+    if Backflow.uses_backflow(vwf.backflow)
+        rebuild_slater_state!(vwf)
+        return nothing
+    end
     vwf.awf_inv = inv(transpose(vwf.awf_mat_t))
 end
 
@@ -382,6 +557,30 @@ function update_rank2!(vwf::vwf_det{T}, k1::Int, k2::Int, new_row1_U::Int, new_r
     vwf.awf_val *= ratio
 end
 
+
+"""
+用途: 在启用 backflow 时, 通过复制 proposal 后构型并直接重建 Slater 方阵来计算比值。
+
+参数:
+- `vwf::vwf_det{T}`: determinant 波函数对象。
+- `proposal::MoveProposal`: Monte Carlo proposal。
+
+返回:
+- `T`: `Psi_new / Psi_old` 的 determinant 比值。
+"""
+function calc_ratio_rebuild(vwf::vwf_det{T}, proposal::MoveProposal) where {T}
+    if proposal.site1 == 0
+        return one(T)
+    end
+
+    new_sampler = copy_config(vwf.sampler)
+    commit_move!(new_sampler, proposal)
+
+    new_orbitals = Backflow.build_backflow_orbitals(vwf.base_gs_U, new_sampler.state, vwf.backflow)
+    new_slater = build_slater_matrix_from_orbitals(new_orbitals, new_sampler.electron_locs)
+    return det(new_slater) / vwf.awf_val
+end
+
 function find_stable_config!(vwf::vwf_det{T}, kernel::AbstractMCMCKernel, rng::AbstractRNG) where T
     ss = vwf.sampler
 
@@ -392,6 +591,7 @@ function find_stable_config!(vwf::vwf_det{T}, kernel::AbstractMCMCKernel, rng::A
 
     for attempt in 1:max_attempts
         init_config_rand!(ss, kernel)
+        refresh_backflow_orbitals!(vwf)
 
         # === 2. 根据新构型重建矩阵 ===
         # Sampler 已经更新了 electron_locs，直接利用它填充矩阵
@@ -490,6 +690,28 @@ function compute_grad_log_psi!(vwf::vwf_det{T}) where T
         end_idx = wf_param_count + projector_param_count
         projector_view = @view O_vec[start_idx:end_idx]
         Projector.projector_log_derivative!(projector_view, vwf.projector, ss)
+    end
+
+    # 5. 最后拼接 backflow 参数梯度部分
+    backflow_pairs = Backflow.build_backflow_derivative_orbitals(vwf.base_gs_U, ss.state, vwf.backflow)
+    if !isempty(backflow_pairs)
+        start_idx = wf_param_count + projector_param_count + 1
+        for (pair_offset, (_, derivative_orbitals)) in enumerate(backflow_pairs)
+            total_sum = zero(T)
+
+            @inbounds for elec in 1:Nelec
+                row_idx = ss.electron_locs[elec]
+                col_sum = zero(T)
+
+                @simd for orb in 1:Norb
+                    col_sum += A_inv[orb, elec] * derivative_orbitals[row_idx, orb]
+                end
+
+                total_sum += col_sum
+            end
+
+            O_vec[start_idx + pair_offset - 1] = total_sum
+        end
     end
 
     # 直接返回 buffer 引用，避免 copy

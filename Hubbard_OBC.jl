@@ -192,7 +192,9 @@ function update_ansatz!(vwf, param_names::Vector{Symbol}, params::Vector{Float64
 
     _, gs_U, dUt_params = PartonSquare.make_ansatz_and_derivs(hubbard_params; param_names=wf_param_names, target_sz=target_sz)
 
+    copyto!(vwf.base_gs_U, gs_U)
     copyto!(vwf.gs_U, gs_U)
+    copyto!(vwf.backflow_u, gs_U)
     copyto!(vwf.gs_U_t, permutedims(gs_U))
     dUt_matrix = zeros(Float64, size(gs_U, 2), size(gs_U, 1), length(wf_param_names))
     for (idx, name) in enumerate(wf_param_names)

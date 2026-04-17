@@ -138,6 +138,14 @@ function parse_commandline()
         help = "Jastrow projector parameter on next-nearest-neighbor bonds"
         arg_type = Float64
         default = 0.0
+        "--bf_epsilon"
+        help = "Eq.(4) backflow epsilon parameter"
+        arg_type = Float64
+        default = 1.0
+        "--bf_eta"
+        help = "Eq.(4) backflow eta parameter"
+        arg_type = Float64
+        default = 0.0
     end
 
     return parse_args(s)
@@ -147,13 +155,27 @@ end
 # 3. 辅助函数
 # ==============================================================================
 
-function update_ansatz!(vwf, param_names::Vector{Symbol}, params::Vector{Float64}, lx, ly, bcx, bcy, target_sz::Int; nparams_proj::Int=0)
-    # 支持输入为 wf 参数 + projector 参数的拼接向量
+function update_ansatz!(
+    vwf,
+    param_names::Vector{Symbol},
+    params::Vector{Float64},
+    lx,
+    ly,
+    bcx,
+    bcy,
+    target_sz::Int;
+    nparams_proj::Int=0,
+    nparams_backflow::Int=0,
+)
+    # 支持输入为 wf 参数 + projector 参数 + backflow 参数的拼接向量
     nparms = length(param_names)
-    wf_param_names = param_names[1:(nparms-nparams_proj)]
-    wf_param_values = params[1:(nparms-nparams_proj)]
-    projector_param_names = param_names[(nparms-nparams_proj+1):end]
-    projector_param_values = params[(nparms-nparams_proj+1):end]
+    nparams_wf = nparms - nparams_proj - nparams_backflow
+    wf_param_names = param_names[1:nparams_wf]
+    wf_param_values = params[1:nparams_wf]
+    projector_param_names = param_names[(nparams_wf + 1):(nparams_wf + nparams_proj)]
+    projector_param_values = params[(nparams_wf + 1):(nparams_wf + nparams_proj)]
+    backflow_param_names = param_names[(nparams_wf + nparams_proj + 1):end]
+    backflow_param_values = params[(nparams_wf + nparams_proj + 1):end]
     # 这里也可以把 bcx, bcy 提出来作为参数
     param_map = Dict{Symbol,Float64}(zip(wf_param_names, wf_param_values))
 
@@ -192,17 +214,22 @@ function update_ansatz!(vwf, param_names::Vector{Symbol}, params::Vector{Float64
 
     _, gs_U, dUt_params = PartonSquare.make_ansatz_and_derivs(hubbard_params; param_names=wf_param_names, target_sz=target_sz)
 
+    copyto!(vwf.base_gs_U, gs_U)
     copyto!(vwf.gs_U, gs_U)
+    copyto!(vwf.backflow_u, gs_U)
     copyto!(vwf.gs_U_t, permutedims(gs_U))
     dUt_matrix = zeros(Float64, size(gs_U, 2), size(gs_U, 1), length(wf_param_names))
     for (idx, name) in enumerate(wf_param_names)
         dUt_matrix[:, :, idx] = dUt_params[name]
     end
     update_vwf_params!(vwf, wf_param_names, dUt_matrix)
-    init_gswf!(vwf)
     if !isempty(projector_param_names)
         update_vwf_projector_params!(vwf, projector_param_names, projector_param_values)
     end
+    if !isempty(backflow_param_names)
+        update_vwf_backflow_params!(vwf, backflow_param_names, backflow_param_values)
+    end
+    init_gswf!(vwf)
 end
 
 function build_exponential_lr_func(
@@ -295,6 +322,8 @@ function main()
     g = args["g"]
     vj1 = args["vj1"]
     vj2 = args["vj2"]
+    bf_epsilon = args["bf_epsilon"]
+    bf_eta = args["bf_eta"]
     init_params_json = args["init_params_json"]
     N_sites = lx * ly
     #要优化的参数
@@ -369,18 +398,44 @@ function main()
         end
     end
 
+    backflow_source_bonds = Tuple{Int,Int}[]
+    backflow_source_amplitudes = Float64[]
+    for (site_i, site_j) in bonds1
+        push!(backflow_source_bonds, (site_i, site_j))
+        push!(backflow_source_amplitudes, t1)
+        push!(backflow_source_bonds, (site_j, site_i))
+        push!(backflow_source_amplitudes, t1)
+    end
+    for (site_i, site_j) in bonds2
+        push!(backflow_source_bonds, (site_i, site_j))
+        push!(backflow_source_amplitudes, t2)
+        push!(backflow_source_bonds, (site_j, site_i))
+        push!(backflow_source_amplitudes, t2)
+    end
+
     # Projector 定义
     projector = CompositeProjector([
         GutzwillerProjectorTerm(param_name=:g, g=g),
         JastrowProjectorTerm(param_name=:vj1, v=vj1, site_to_neighbor_sites=site_to_neighbor_sites_j1),
         JastrowProjectorTerm(param_name=:vj2, v=vj2, site_to_neighbor_sites=site_to_neighbor_sites_j2)
     ])
+    backflow = Eq4BackflowTerm(
+        param_name_epsilon=:bf_epsilon,
+        param_name_eta=:bf_eta,
+        epsilon_bf=bf_epsilon,
+        eta_bf=bf_eta,
+        source_bonds=backflow_source_bonds,
+        source_amplitudes=backflow_source_amplitudes,
+    )
     proj_param_names = projector_param_names(projector)
     proj_init_params = projector_param_values(projector)
     nparams_proj = length(proj_param_names)
+    backflow_param_name_list = backflow_param_names(backflow)
+    backflow_init_params = backflow_param_values(backflow)
+    nparams_backflow = length(backflow_param_name_list)
     # 把波函数参数和投影算符参数拼接成一个向量, 供优化器使用
-    init_params = vcat(wf_init_params, proj_init_params)
-    param_names = vcat(wf_param_names, proj_param_names)
+    init_params = vcat(wf_init_params, proj_init_params, backflow_init_params)
+    param_names = vcat(wf_param_names, proj_param_names, backflow_param_name_list)
 
     if !isempty(init_params_json)
         init_params = build_init_params_from_json(init_params_json, param_names)
@@ -415,7 +470,7 @@ function main()
     sampler = config_Hubbard(N_sites, nup, ndn; ifPH=true)
     init_config_Hubbard!(sampler)
 
-    vwf = vwf_det(zeros(Float64, 2 * N_sites, N_sites + target_sz), sampler)
+    vwf = vwf_det(zeros(Float64, 2 * N_sites, N_sites + target_sz), sampler; backflow=backflow)
     set_projector!(vwf, projector)
     kernel = HubbardKernel(conserve_sz=true)
 
@@ -423,7 +478,7 @@ function main()
     if rank == 0
         println("Initial parameters: $init_params")
     end
-    update_ansatz!(vwf, param_names, init_params, lx, ly, BCX, BCY, target_sz; nparams_proj=nparams_proj)
+    update_ansatz!(vwf, param_names, init_params, lx, ly, BCX, BCY, target_sz; nparams_proj=nparams_proj, nparams_backflow=nparams_backflow)
 
 
     # D. 运行模拟
@@ -434,7 +489,7 @@ function main()
         sr_params = SRParams(vmc_params=meas_params, n_steps=n_steps, lr=lr)
         exp_lr_func = build_exponential_lr_func(lr, lr_end, n_steps)
 
-        update_vwf_func! = (vwf, params) -> update_ansatz!(vwf, param_names, params, lx, ly, BCX, BCY, target_sz; nparams_proj=nparams_proj)
+        update_vwf_func! = (vwf, params) -> update_ansatz!(vwf, param_names, params, lx, ly, BCX, BCY, target_sz; nparams_proj=nparams_proj, nparams_backflow=nparams_backflow)
 
         run_sr_optimization(
             ham,

@@ -5,9 +5,11 @@ using OrderedCollections
 using SkewLinearAlgebra
 using ..Sampler
 using ..Projector
+using ..Backflow
 
 export vwf_det, vwf_pfa, VMCRunner, update_vwf_params!
-export set_projector!, update_vwf_projector_params!, get_vwf_projector_param_names, get_vwf_projector_param_values, get_vwf_total_param_names
+export set_projector!, set_backflow!, update_vwf_projector_params!, update_vwf_backflow_params!
+export get_vwf_projector_param_names, get_vwf_projector_param_values, get_vwf_backflow_param_names, get_vwf_backflow_param_values, get_vwf_total_param_names
 export init_gswf!, mcmc_step!, calc_ham_eng, accept_move!, rebuild_inverse!
 export measure_green, measure_SzSz, measure_SplusSminus, measure_SiSj, get_Sz, calc_ratio, compute_grad_log_psi!
 export measure_SxSx, measure_SplusSplus
@@ -225,6 +227,10 @@ function calc_ratio(vwf, p::MoveProposal)
         return one(typeof(vwf.awf_val))
     end
 
+    if hasproperty(vwf, :backflow) && Backflow.uses_backflow(getproperty(vwf, :backflow))
+        return calc_ratio_rebuild(vwf, p)
+    end
+
     # 单电子移动 (Hop, Flip, Flip-Hop) -> Rank 1
     if p.moved_electron_id_2 == 0
         return ratio_rank1(vwf, p.moved_electron_id_1, p.target_map_idx_1)
@@ -290,6 +296,13 @@ end
 
 function accept_move!(vwf, p::MoveProposal, ratio)
     vwf.current_ratio = ratio
+
+    if hasproperty(vwf, :backflow) && Backflow.uses_backflow(getproperty(vwf, :backflow))
+        commit_move!(vwf.sampler, p)
+        rebuild_slater_state!(vwf)
+        vwf.current_ratio = ratio
+        return nothing
+    end
 
     # 1. 更新 Wavefunction 矩阵
     if p.moved_electron_id_2 == 0
