@@ -8,3 +8,7 @@ others/
 __pycache__/
 reference/
 plot/defect_average_sq_maps/
+.vscode/
+docs/
+picture2_bundle/
+*.zip

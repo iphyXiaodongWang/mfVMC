@@ -161,7 +161,7 @@ for x in range(lx):
         if key in Sz:
             mz_matrix[x, y] = Sz[key]
             inverse_mz_matrix[x, y] = Sz[key] * ((-1) ** (x + y))
-plot_spin_lattice(mz_matrix, path, show_value=True)
+plot_spin_lattice(mz_matrix, path, show_value=False)
 plot_spin_lattice(
     inverse_mz_matrix,
     path,

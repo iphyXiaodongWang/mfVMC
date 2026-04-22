@@ -228,7 +228,7 @@ function calc_ratio(vwf, p::MoveProposal)
     end
 
     if hasproperty(vwf, :backflow) && Backflow.uses_backflow(getproperty(vwf, :backflow))
-        return calc_ratio_rebuild(vwf, p)
+        return calc_backflow_ratio_local_update(vwf, p)
     end
 
     # 单电子移动 (Hop, Flip, Flip-Hop) -> Rank 1
@@ -298,9 +298,7 @@ function accept_move!(vwf, p::MoveProposal, ratio)
     vwf.current_ratio = ratio
 
     if hasproperty(vwf, :backflow) && Backflow.uses_backflow(getproperty(vwf, :backflow))
-        commit_move!(vwf.sampler, p)
-        rebuild_slater_state!(vwf)
-        vwf.current_ratio = ratio
+        accept_backflow_local_update!(vwf, p, ratio)
         return nothing
     end
 

@@ -7,6 +7,7 @@ export uses_backflow
 export backflow_param_names, backflow_param_values, backflow_param_count
 export update_backflow_params!
 export compute_doublon_hole_masks, compute_recombination_mask
+export build_eq4_backflow_graph_cache
 export build_backflow_orbitals, build_eq4_backflow_orbitals
 export build_backflow_derivative_orbitals, build_eq4_backflow_derivative_orbitals
 
@@ -50,6 +51,45 @@ abstract type AbstractBackflowTerm end
 
 
 """
+用途: 保存 `Eq.(4)` backflow 的图缓存, 便于快速定位受影响站点。
+
+参数:
+- `outgoing_bond_indices_by_source::Vector{Vector{Int}}`: 按 source site 存储的 bond 索引列表。
+- `incoming_source_sites_by_target::Vector{Vector{Int}}`: 按 target site 存储的 source site 去重列表。
+
+返回:
+- `NamedTuple`: 包含上述两个缓存数组。
+"""
+function build_eq4_backflow_graph_cache(source_bonds::Vector{Tuple{Int, Int}})
+    max_site_index = 0
+    for (bond_index, (site_i, site_j)) in enumerate(source_bonds)
+        if site_i < 1 || site_j < 1
+            error("Invalid source_bonds[$bond_index] = ($(site_i), $(site_j)): site indices must be positive.")
+        end
+        max_site_index = max(max_site_index, site_i, site_j)
+    end
+
+    outgoing_bond_indices_by_source = [Int[] for _ in 1:max_site_index]
+    incoming_source_sites_by_target = [Int[] for _ in 1:max_site_index]
+
+    for (bond_index, (source_site, target_site)) in enumerate(source_bonds)
+        push!(outgoing_bond_indices_by_source[source_site], bond_index)
+        push!(incoming_source_sites_by_target[target_site], source_site)
+    end
+
+    for source_site in 1:max_site_index
+        sort!(unique!(outgoing_bond_indices_by_source[source_site]))
+        sort!(unique!(incoming_source_sites_by_target[source_site]))
+    end
+
+    return (
+        outgoing_bond_indices_by_source=outgoing_bond_indices_by_source,
+        incoming_source_sites_by_target=incoming_source_sites_by_target,
+    )
+end
+
+
+"""
 用途: 表示未启用 backflow 的空对象。
 
 参数:
@@ -69,6 +109,10 @@ end
 - `U_b = [1 + (epsilon_bf - 1) * xi_i] * U_0
    + eta_bf * sum_j[t_ij * D_i * H_j * U_0(j)]`。
 
+结构约定:
+- `source_bonds` 与 `source_amplitudes` 在构造后禁止原地修改。
+- 若需要修改 bond 拓扑或 `t_ij`, 应重新构造新的 `Eq4BackflowTerm`。
+
 参数:
 - `param_name_epsilon::Symbol`: `epsilon_bf` 的参数名。
 - `param_name_eta::Symbol`: `eta_bf` 的参数名。
@@ -87,6 +131,143 @@ mutable struct Eq4BackflowTerm <: AbstractBackflowTerm
     eta_bf::Float64
     source_bonds::Vector{Tuple{Int, Int}}
     source_amplitudes::Vector{Float64}
+    source_data_signature::UInt
+    outgoing_bond_indices_by_source::Vector{Vector{Int}}
+    incoming_source_sites_by_target::Vector{Vector{Int}}
+end
+
+
+"""
+用途: 基于 `source_bonds` 与 `source_amplitudes` 的内容生成一致性签名。
+
+参数:
+- `source_bonds::Vector{Tuple{Int, Int}}`: 有向键 `(i, j)` 列表。
+- `source_amplitudes::Vector{<:Real}`: 与有向键对齐的 `t_ij` 列表。
+
+返回:
+- `UInt`: 用于检测原地修改的内容签名。
+"""
+function compute_eq4_backflow_source_data_signature(
+    source_bonds::Vector{Tuple{Int, Int}},
+    source_amplitudes::Vector{<:Real},
+)
+    source_data_signature = hash(length(source_bonds))
+    for source_bond in source_bonds
+        source_data_signature = hash(source_bond, source_data_signature)
+    end
+
+    source_data_signature = hash(length(source_amplitudes), source_data_signature)
+    for source_amplitude in source_amplitudes
+        source_data_signature = hash(Float64(source_amplitude), source_data_signature)
+    end
+
+    return source_data_signature
+end
+
+
+"""
+用途: 校验 `Eq4BackflowTerm` 的 source 数据在构造后未被原地修改。
+
+参数:
+- `backflow_term::Eq4BackflowTerm`: 待校验的 backflow 参数对象。
+
+返回:
+- `nothing`。若检测到原地修改则抛出 error。
+"""
+function validate_eq4_backflow_source_data!(
+    backflow_term::Eq4BackflowTerm,
+)
+    current_signature = compute_eq4_backflow_source_data_signature(
+        backflow_term.source_bonds,
+        backflow_term.source_amplitudes,
+    )
+
+    if current_signature != backflow_term.source_data_signature
+        error("Eq4BackflowTerm source_bonds/source_amplitudes were mutated after construction. Please rebuild Eq4BackflowTerm instead of modifying it in place.")
+    end
+
+    return nothing
+end
+
+
+"""
+用途: 构造带图缓存的 `Eq.(4)` backflow 参数对象。
+
+参数:
+- `param_name_epsilon::Symbol`: `epsilon_bf` 的参数名。
+- `param_name_eta::Symbol`: `eta_bf` 的参数名。
+- `epsilon_bf::Real`: `Eq.(4)` 中的 `epsilon`。
+- `eta_bf::Real`: `Eq.(4)` 中的 `eta`。
+- `source_bonds::Vector{Tuple{Int, Int}}`: 有向键 `(i, j)` 列表。
+- `source_amplitudes::Vector{<:Real}`: 每条键对应的 `t_ij`。
+
+返回:
+- `Eq4BackflowTerm` 实例。
+"""
+function build_eq4_backflow_term_with_cache(
+    param_name_epsilon::Symbol,
+    param_name_eta::Symbol,
+    epsilon_bf::Real,
+    eta_bf::Real,
+    source_bonds::Vector{Tuple{Int, Int}},
+    source_amplitudes::Vector{<:Real},
+)
+    if length(source_bonds) != length(source_amplitudes)
+        error("Length mismatch: source_bonds has $(length(source_bonds)) entries, but source_amplitudes has $(length(source_amplitudes)).")
+    end
+
+    source_bonds_copy = copy(source_bonds)
+    source_amplitudes_copy = Float64.(source_amplitudes)
+    graph_cache = build_eq4_backflow_graph_cache(source_bonds_copy)
+    source_data_signature = compute_eq4_backflow_source_data_signature(
+        source_bonds_copy,
+        source_amplitudes_copy,
+    )
+
+    return Eq4BackflowTerm(
+        param_name_epsilon,
+        param_name_eta,
+        Float64(epsilon_bf),
+        Float64(eta_bf),
+        source_bonds_copy,
+        source_amplitudes_copy,
+        source_data_signature,
+        graph_cache.outgoing_bond_indices_by_source,
+        graph_cache.incoming_source_sites_by_target,
+    )
+end
+
+
+"""
+用途: 兼容旧的 positional 构造方式, 并自动补齐图缓存。
+
+参数:
+- `param_name_epsilon::Symbol`: `epsilon_bf` 的参数名。
+- `param_name_eta::Symbol`: `eta_bf` 的参数名。
+- `epsilon_bf::Real`: `Eq.(4)` 中的 `epsilon`。
+- `eta_bf::Real`: `Eq.(4)` 中的 `eta`。
+- `source_bonds::Vector{Tuple{Int, Int}}`: 有向键 `(i, j)` 列表。
+- `source_amplitudes::Vector{<:Real}`: 每条键对应的 `t_ij`, 默认全为 `1.0`。
+
+返回:
+- `Eq4BackflowTerm` 实例。
+"""
+function Eq4BackflowTerm(
+    param_name_epsilon::Symbol,
+    param_name_eta::Symbol,
+    epsilon_bf::Real,
+    eta_bf::Real,
+    source_bonds::Vector{Tuple{Int, Int}},
+    source_amplitudes::Vector{<:Real},
+)
+    return build_eq4_backflow_term_with_cache(
+        param_name_epsilon,
+        param_name_eta,
+        epsilon_bf,
+        eta_bf,
+        source_bonds,
+        source_amplitudes,
+    )
 end
 
 
@@ -112,17 +293,13 @@ function Eq4BackflowTerm(;
     source_bonds::Vector{Tuple{Int, Int}}=Tuple{Int, Int}[],
     source_amplitudes::Vector{<:Real}=ones(Float64, length(source_bonds)),
 )
-    if length(source_bonds) != length(source_amplitudes)
-        error("Length mismatch: source_bonds has $(length(source_bonds)) entries, but source_amplitudes has $(length(source_amplitudes)).")
-    end
-
-    return Eq4BackflowTerm(
+    return build_eq4_backflow_term_with_cache(
         param_name_epsilon,
         param_name_eta,
-        Float64(epsilon_bf),
-        Float64(eta_bf),
-        copy(source_bonds),
-        Float64.(source_amplitudes),
+        epsilon_bf,
+        eta_bf,
+        source_bonds,
+        source_amplitudes,
     )
 end
 
@@ -167,6 +344,236 @@ end
 backflow_param_values(::NoBackflowTerm) = Float64[]
 function backflow_param_values(backflow_term::Eq4BackflowTerm)
     return Float64[backflow_term.epsilon_bf, backflow_term.eta_bf]
+end
+
+
+"""
+用途: 收集一次 proposal 会影响到的站点索引。
+
+规则:
+- 先包含 proposal 涉及的改动站点。
+- 再包含所有其 outgoing bonds 会指向这些改动站点, 且当前构型中为 doublon 的 source site。
+- 返回结果按站点索引升序排列, 且不重复。
+
+参数:
+- `state_vector::Vector{Int8}`: 当前构型的状态数组, 用于提供站点总数并做边界检查。
+- `backflow_term::Eq4BackflowTerm`: backflow 图缓存对象。
+- `proposal::MoveProposal`: Monte Carlo proposal。
+
+返回:
+- `Vector{Int}`: 受影响的站点索引列表。
+"""
+function collect_affected_site_indices(
+    state_vector::Vector{Int8},
+    backflow_term::Eq4BackflowTerm,
+    proposal::MoveProposal,
+)
+    validate_eq4_backflow_source_data!(backflow_term)
+
+    n_sites = length(state_vector)
+    affected_site_set = Set{Int}()
+
+    if 1 <= proposal.site1 <= n_sites
+        push!(affected_site_set, proposal.site1)
+    end
+    if 1 <= proposal.site2 <= n_sites
+        push!(affected_site_set, proposal.site2)
+    end
+
+    max_target_site = min(n_sites, length(backflow_term.incoming_source_sites_by_target))
+    for target_site in (proposal.site1, proposal.site2)
+        if 1 <= target_site <= max_target_site
+            for source_site in backflow_term.incoming_source_sites_by_target[target_site]
+                if !(1 <= source_site <= n_sites)
+                    error("Backflow cache source site $source_site is out of bounds for a state vector with $n_sites sites.")
+                end
+                if source_site != proposal.site1 && source_site != proposal.site2 && state_vector[source_site] != DB
+                    continue
+                end
+                push!(affected_site_set, source_site)
+            end
+        end
+    end
+
+    return sort!(collect(affected_site_set))
+end
+
+
+"""
+用途: 返回某个站点在 proposal 提交后的状态编码。
+
+参数:
+- `state_vector::Vector{Int8}`: proposal 提交前的构型状态数组。
+- `proposal::MoveProposal`: Monte Carlo proposal。
+- `site_index::Int`: 需要查询的站点编号。
+
+返回:
+- `Int8`: proposal 提交后的站点状态编码。
+"""
+@inline function get_site_state_after_proposal(
+    state_vector::Vector{Int8},
+    proposal::MoveProposal,
+    site_index::Int,
+)
+    if site_index == proposal.site1
+        return proposal.new_state1
+    elseif site_index == proposal.site2
+        return proposal.new_state2
+    end
+
+    return state_vector[site_index]
+end
+
+
+"""
+用途: 将单个受影响站点在 proposal 提交后的局域 backflow 行块写入预分配 buffer。
+
+数学公式:
+- `U_b(a, i, k; x') = [1 + (epsilon_bf - 1) * xi_i(x')] * U_0(a, i, k)
+   + eta_bf * sum_j[t_ij * D_i(x') * H_j(x') * U_0(a, j, k)]`。
+
+参数:
+- `site_block_buffer::AbstractMatrix{T}`: 输出 buffer, 形状必须为 `2 x N_orb`。
+- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
+- `state_vector::Vector{Int8}`: proposal 提交前的构型状态数组。
+- `backflow_term::Eq4BackflowTerm`: `Eq.(4)` backflow 参数对象。
+- `proposal::MoveProposal`: Monte Carlo proposal。
+- `site_index::Int`: 待写入的站点编号。
+
+返回:
+- `nothing`。
+"""
+function fill_eq4_backflow_site_block_after_proposal!(
+    site_block_buffer::AbstractMatrix{T},
+    base_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    backflow_term::Eq4BackflowTerm,
+    proposal::MoveProposal,
+    site_index::Int,
+) where {T}
+    if size(site_block_buffer, 1) != 2 || size(site_block_buffer, 2) != size(base_orbitals, 2)
+        error("Local site block buffer must have shape (2, $(size(base_orbitals, 2))), got $(size(site_block_buffer)).")
+    end
+
+    row_up = 2 * (site_index - 1) + 1
+    row_dn_hole = 2 * (site_index - 1) + 2
+    copyto!(@view(site_block_buffer[1, :]), @view(base_orbitals[row_up, :]))
+    copyto!(@view(site_block_buffer[2, :]), @view(base_orbitals[row_dn_hole, :]))
+
+    site_state_after = get_site_state_after_proposal(state_vector, proposal, site_index)
+    is_doublon_after = site_state_after == DB
+    xi_value = false
+
+    if site_index <= length(backflow_term.outgoing_bond_indices_by_source) && is_doublon_after
+        for bond_index in backflow_term.outgoing_bond_indices_by_source[site_index]
+            (_, target_site) = backflow_term.source_bonds[bond_index]
+            if get_site_state_after_proposal(state_vector, proposal, target_site) == HOLE
+                xi_value = true
+                break
+            end
+        end
+    end
+
+    prefactor = one(T) + T(backflow_term.epsilon_bf - 1.0) * T(xi_value)
+    site_block_buffer .*= prefactor
+
+    if site_index <= length(backflow_term.outgoing_bond_indices_by_source) && is_doublon_after
+        eta_value = T(backflow_term.eta_bf)
+        for bond_index in backflow_term.outgoing_bond_indices_by_source[site_index]
+            (_, target_site) = backflow_term.source_bonds[bond_index]
+            if get_site_state_after_proposal(state_vector, proposal, target_site) != HOLE
+                continue
+            end
+
+            target_row_up = 2 * (target_site - 1) + 1
+            target_row_dn_hole = 2 * (target_site - 1) + 2
+            bond_amplitude = T(backflow_term.source_amplitudes[bond_index])
+
+            @views site_block_buffer[1, :] .+= eta_value * bond_amplitude .* base_orbitals[target_row_up, :]
+            @views site_block_buffer[2, :] .+= eta_value * bond_amplitude .* base_orbitals[target_row_dn_hole, :]
+        end
+    end
+
+    return nothing
+end
+
+
+"""
+用途: 仅为单个受影响站点构造 proposal 提交后的局域 backflow 行块。
+
+数学公式:
+- `U_b(a, i, k; x') = [1 + (epsilon_bf - 1) * xi_i(x')] * U_0(a, i, k)
+   + eta_bf * sum_j[t_ij * D_i(x') * H_j(x') * U_0(a, j, k)]`。
+
+参数:
+- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
+- `state_vector::Vector{Int8}`: proposal 提交前的构型状态数组。
+- `backflow_term::Eq4BackflowTerm`: `Eq.(4)` backflow 参数对象。
+- `proposal::MoveProposal`: Monte Carlo proposal。
+- `site_index::Int`: 待构造局域行块的站点编号。
+
+返回:
+- `Matrix{T}`: 形状为 `2 x N_orb` 的局域站点行块。
+"""
+function build_eq4_backflow_site_block_after_proposal(
+    base_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    backflow_term::Eq4BackflowTerm,
+    proposal::MoveProposal,
+    site_index::Int,
+) where {T}
+    site_block = Matrix{T}(undef, 2, size(base_orbitals, 2))
+    fill_eq4_backflow_site_block_after_proposal!(
+        site_block,
+        base_orbitals,
+        state_vector,
+        backflow_term,
+        proposal,
+        site_index,
+    )
+    return site_block
+end
+
+
+"""
+用途: 为所有受影响站点批量构造 proposal 提交后的局域 backflow 行块。
+
+参数:
+- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
+- `state_vector::Vector{Int8}`: proposal 提交前的构型状态数组。
+- `backflow_term::Eq4BackflowTerm`: `Eq.(4)` backflow 参数对象。
+- `proposal::MoveProposal`: Monte Carlo proposal。
+- `affected_sites::Vector{Int}`: 已排序的受影响站点列表。
+
+返回:
+- `Vector{Pair{Int, Matrix{T}}}`: `site_index => site_block` 的有序列表。
+"""
+function build_local_backflow_site_blocks_after_proposal(
+    base_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    backflow_term::Eq4BackflowTerm,
+    proposal::MoveProposal,
+    affected_sites::Vector{Int},
+) where {T}
+    validate_eq4_backflow_source_data!(backflow_term)
+    validate_orbital_dimensions(base_orbitals, length(state_vector))
+
+    site_blocks = Vector{Pair{Int, Matrix{T}}}(undef, length(affected_sites))
+    for (block_index, site_index) in enumerate(affected_sites)
+        if !(1 <= site_index <= length(state_vector))
+            error("Affected site $site_index is out of bounds for a state vector with $(length(state_vector)) sites.")
+        end
+
+        site_blocks[block_index] = site_index => build_eq4_backflow_site_block_after_proposal(
+            base_orbitals,
+            state_vector,
+            backflow_term,
+            proposal,
+            site_index,
+        )
+    end
+
+    return site_blocks
 end
 
 
@@ -291,6 +698,8 @@ function compute_recombination_mask(
     doublon_mask::Vector{Float64},
     hole_mask::Vector{Float64},
 )
+    validate_eq4_backflow_source_data!(backflow_term)
+
     if length(doublon_mask) != length(hole_mask)
         error("Mask length mismatch: doublon_mask has $(length(doublon_mask)) entries, but hole_mask has $(length(hole_mask)).")
     end
