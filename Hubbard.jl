@@ -126,6 +126,14 @@ function parse_commandline()
         help = "assuming length of stripe"
         arg_type = Int
         default = 4
+        "--stripe_center"
+        help = "Stripe center type, can be 'site' or 'bond'"
+        arg_type = String
+        default = "site"
+        "--stripe_mu_amp"
+        help = "Charge modulation amplitude for Stripe initial mean-field parameters"
+        arg_type = Float64
+        default = 0.0
         "--g"
         help = "Gutzwiller projector parameter"
         arg_type = Float64
@@ -155,6 +163,89 @@ end
 # 3. 辅助函数
 # ==============================================================================
 
+"""
+用途: 将 stripe 中心类型映射为论文中的 `x0` 偏移量。
+
+参数:
+- `stripe_center::AbstractString`: stripe 中心类型, 支持 `site` 或 `bond`。
+
+返回:
+- `Float64`: 论文公式中的 `x0`, `site -> 0.0`, `bond -> 0.5`。
+"""
+function get_stripe_center_offset(stripe_center::AbstractString)::Float64
+    stripe_center_lowercase = lowercase(strip(stripe_center))
+    if stripe_center_lowercase == "site"
+        return 0.0
+    elseif stripe_center_lowercase == "bond"
+        return 0.5
+    end
+    error("Unknown stripe_center: $(stripe_center). Expected 'site' or 'bond'.")
+end
+
+"""
+用途: 根据论文 `2111.04623v4` 的 Eq.(6)(7)(10) 生成 Stripe 初始 mean-field 列参数。
+
+参数:
+- `lx::Int`: 晶格在 `x` 方向的列数。
+- `lambda::Int`: stripe 电荷调制周期 `λ`。
+- `stripe_center::AbstractString`: stripe 中心类型, 支持 `site` 或 `bond`。
+- `mu_uniform::Float64`: 平均 chemical potential `μ`。
+- `stripe_mu_amp::Float64`: 电荷调制振幅 `Δc`。
+- `mz_amp::Float64`: 自旋调制振幅 `Δs`。
+- `etad1_uniform::Float64`: 当前代码中的均匀 d-wave pairing 参数。
+- `etas1_uniform::Float64`: 当前代码中的均匀 s-wave pairing 参数。
+
+返回:
+- `NamedTuple`: 包含 `etad1`, `etas1`, `mz`, `mu` 四个 `Dict{Symbol, Float64}`。
+
+公式:
+- `Q = 2π / λ`
+- `mu_x = μ + Δc * cos[Q * (x - x0)]`
+- `mz_x = Δs * sin[Q / 2 * (x - x0)]`
+- `Δx(x) = (etas1 - etad1) * |cos[Q / 2 * (x + 1/2 - x0)]|`
+- `Δy(x) = (etas1 + etad1) * |cos[Q / 2 * (x - x0)]|`
+- `etas1_x = (Δx(x) + Δy(x)) / 2`
+- `etad1_x = (Δy(x) - Δx(x)) / 2`
+"""
+function build_stripe_initial_column_params(
+    lx::Int,
+    lambda::Int,
+    stripe_center::AbstractString,
+    mu_uniform::Float64,
+    stripe_mu_amp::Float64,
+    mz_amp::Float64,
+    etad1_uniform::Float64,
+    etas1_uniform::Float64,
+)
+    if lambda <= 0
+        error("lambda must be positive.")
+    end
+
+    stripe_center_offset = get_stripe_center_offset(stripe_center)
+    stripe_wave_vector = 2.0 * pi / lambda
+    x_bond_pairing_uniform = etas1_uniform - etad1_uniform
+    y_bond_pairing_uniform = etas1_uniform + etad1_uniform
+
+    etad1_by_x = Dict{Symbol,Float64}()
+    etas1_by_x = Dict{Symbol,Float64}()
+    mz_by_x = Dict{Symbol,Float64}()
+    mu_by_x = Dict{Symbol,Float64}()
+
+    for x in 1:lx
+        x_coordinate = Float64(x)
+        mu_by_x[Symbol("mu_$(x)")] = mu_uniform + stripe_mu_amp * cos(stripe_wave_vector * (x_coordinate - stripe_center_offset))
+        mz_by_x[Symbol("mz_$(x)")] = mz_amp * sin(stripe_wave_vector / 2.0 * (x_coordinate - stripe_center_offset))
+
+        x_bond_pairing = x_bond_pairing_uniform * abs(cos(stripe_wave_vector / 2.0 * (x_coordinate + 0.5 - stripe_center_offset)))
+        y_bond_pairing = y_bond_pairing_uniform * abs(cos(stripe_wave_vector / 2.0 * (x_coordinate - stripe_center_offset)))
+
+        etas1_by_x[Symbol("etas1_$(x)")] = (x_bond_pairing + y_bond_pairing) / 2.0
+        etad1_by_x[Symbol("etad1_$(x)")] = (y_bond_pairing - x_bond_pairing) / 2.0
+    end
+
+    return (; etad1=etad1_by_x, etas1=etas1_by_x, mz=mz_by_x, mu=mu_by_x)
+end
+
 function update_ansatz!(
     vwf,
     param_names::Vector{Symbol},
@@ -172,23 +263,27 @@ function update_ansatz!(
     nparams_wf = nparms - nparams_proj - nparams_backflow
     wf_param_names = param_names[1:nparams_wf]
     wf_param_values = params[1:nparams_wf]
-    projector_param_names = param_names[(nparams_wf + 1):(nparams_wf + nparams_proj)]
-    projector_param_values = params[(nparams_wf + 1):(nparams_wf + nparams_proj)]
-    backflow_param_names = param_names[(nparams_wf + nparams_proj + 1):end]
-    backflow_param_values = params[(nparams_wf + nparams_proj + 1):end]
+    projector_param_names = param_names[(nparams_wf+1):(nparams_wf+nparams_proj)]
+    projector_param_values = params[(nparams_wf+1):(nparams_wf+nparams_proj)]
+    backflow_param_names = param_names[(nparams_wf+nparams_proj+1):end]
+    backflow_param_values = params[(nparams_wf+nparams_proj+1):end]
     # 这里也可以把 bcx, bcy 提出来作为参数
     param_map = Dict{Symbol,Float64}(zip(wf_param_names, wf_param_values))
 
-    etad1 = get(param_map, :etad1, 0.0)
-    etas1 = get(param_map, :etas1, 0.0)
     chi2 = get(param_map, :chi2, 0.0)
 
+    etad1 = Dict{Symbol,Float64}()
+    etas1 = Dict{Symbol,Float64}()
     mz = Dict{Symbol,Float64}()
     mu = Dict{Symbol,Float64}()
 
     for (name, value) in param_map
         name_str = String(name)
-        if startswith(name_str, "mz_")
+        if startswith(name_str, "etad1_")
+            etad1[name] = value
+        elseif startswith(name_str, "etas1_")
+            etas1[name] = value
+        elseif startswith(name_str, "mz_")
             mz[name] = value
         elseif startswith(name_str, "mu_")
             mu[name] = value
@@ -196,6 +291,23 @@ function update_ansatz!(
             continue
         else
             error("Unknown parameter name: $name")
+        end
+    end
+
+    if haskey(param_map, :etad1)
+        if !isempty(etad1)
+            error("Found both uniform etad1 and x-dependent etad1_* parameters.")
+        end
+        for x in 1:lx
+            etad1[Symbol("etad1_$(x)")] = param_map[:etad1]
+        end
+    end
+    if haskey(param_map, :etas1)
+        if !isempty(etas1)
+            error("Found both uniform etas1 and x-dependent etas1_* parameters.")
+        end
+        for x in 1:lx
+            etas1[Symbol("etas1_$(x)")] = param_map[:etas1]
         end
     end
 
@@ -296,6 +408,8 @@ function main()
     target_sz = args["target_sz"]
     doping = args["doping"]
     lambda = args["lambda"]
+    stripe_center = args["stripe_center"]
+    stripe_mu_amp = args["stripe_mu_amp"]
     # if mod(lx, 4) == 0
     #     BCX = -1
     # end
@@ -327,28 +441,38 @@ function main()
     init_params_json = args["init_params_json"]
     N_sites = lx * ly
     #要优化的参数
-    wf_param_names = [:etad1, :etas1, :chi2]
-    wf_init_params = [args["etad1"], args["etas1"], args["chi2"]]
+    wf_param_names = [:chi2]
+    wf_init_params = [args["chi2"]]
     #对每一列的mz，构建mean field参数mz_i,i为第几列
     if ansatz == "Stripe"
+        stripe_column_params = build_stripe_initial_column_params(
+            lx,
+            lambda,
+            stripe_center,
+            args["mu"],
+            stripe_mu_amp,
+            args["mz"],
+            args["etad1"],
+            args["etas1"],
+        )
         for i in 1:lx
-            istripe = div(i - 1, lambda)
-            Q = (-1)^istripe
+            push!(wf_param_names, Symbol("etad1_$i"))
+            push!(wf_param_names, Symbol("etas1_$i"))
             push!(wf_param_names, Symbol("mz_$i"))
             push!(wf_param_names, Symbol("mu_$i"))
-            if i % lambda == 1 || i % lambda == 0
-                #stripe的边界mz设成0,内部mz每隔一个stripe反号一次
-                push!(wf_init_params, 0.0)
-                push!(wf_init_params, args["mu"])
-            else
-                push!(wf_init_params, args["mz"] * Q)
-                push!(wf_init_params, args["mu"])
-            end
+            push!(wf_init_params, stripe_column_params.etad1[Symbol("etad1_$i")])
+            push!(wf_init_params, stripe_column_params.etas1[Symbol("etas1_$i")])
+            push!(wf_init_params, stripe_column_params.mz[Symbol("mz_$i")])
+            push!(wf_init_params, stripe_column_params.mu[Symbol("mu_$i")])
         end
     elseif ansatz == "AFM"
         for i in 1:lx
+            push!(wf_param_names, Symbol("etad1_$i"))
+            push!(wf_param_names, Symbol("etas1_$i"))
             push!(wf_param_names, Symbol("mz_$i"))
             push!(wf_param_names, Symbol("mu_$i"))
+            push!(wf_init_params, args["etad1"])
+            push!(wf_init_params, args["etas1"])
             push!(wf_init_params, args["mz"])
             push!(wf_init_params, args["mu"])
         end
@@ -419,14 +543,15 @@ function main()
         JastrowProjectorTerm(param_name=:vj1, v=vj1, site_to_neighbor_sites=site_to_neighbor_sites_j1),
         JastrowProjectorTerm(param_name=:vj2, v=vj2, site_to_neighbor_sites=site_to_neighbor_sites_j2)
     ])
-    backflow = Eq4BackflowTerm(
+    #= backflow = Eq4BackflowTerm(
         param_name_epsilon=:bf_epsilon,
         param_name_eta=:bf_eta,
         epsilon_bf=bf_epsilon,
         eta_bf=bf_eta,
         source_bonds=backflow_source_bonds,
         source_amplitudes=backflow_source_amplitudes,
-    )
+    ) =#
+    backflow = NoBackflowTerm()
     proj_param_names = projector_param_names(projector)
     proj_init_params = projector_param_values(projector)
     nparams_proj = length(proj_param_names)
@@ -563,4 +688,6 @@ function main()
     end
 end
 
-main()
+if abspath(PROGRAM_FILE) == @__FILE__
+    main()
+end

@@ -709,25 +709,59 @@ struct HubbardParams
 	bcx::Float64
 	bcy::Float64
 	chi1::Float64
-	etad1::Float64
-	etas1::Float64
+	etad1::Dict{Symbol, Float64}
+	etas1::Dict{Symbol, Float64}
 	chi2::Float64
 	mu::Dict{Symbol, Float64}
 	mz::Dict{Symbol, Float64}
 end
+
+"""
+	normalize_hubbard_x_column_parameter(
+		param_name::Symbol,
+		param_value::Union{Float64, Dict{Symbol, Float64}},
+		lx::Int
+	) -> Dict{Symbol, Float64}
+
+用途: 将 Hubbard 最近邻配对参数统一转换为按 `x` 列存储的 `Dict` 形式。
+
+参数:
+- `param_name::Symbol`: 参数前缀, 当前支持 `:etad1` 或 `:etas1`。
+- `param_value::Union{Float64, Dict{Symbol, Float64}}`: 标量均匀参数或按列参数字典。
+- `lx::Int`: 晶格在 `x` 方向的列数。
+
+返回:
+- `Dict{Symbol, Float64}`: 形如 `param_name_x` 的按列参数字典。
+"""
+function normalize_hubbard_x_column_parameter(
+	param_name::Symbol,
+	param_value::Union{Float64, Dict{Symbol, Float64}},
+	lx::Int
+)::Dict{Symbol, Float64}
+	if param_value isa Dict{Symbol, Float64}
+		return Dict{Symbol, Float64}(param_value)
+	end
+	return Dict(
+		Symbol("$(param_name)_$(x)") => Float64(param_value)
+		for x in 1:lx
+	)
+end
+
 function HubbardParams(;
 	Lx::Int,
 	Ly::Int,
 	bcx::Float64 = 1.0,
 	bcy::Float64 = 1.0,
 	chi1::Float64 = 0.0,
-	etad1::Float64 = 0.0,
-	etas1::Float64 = 0.0,
+	etad1::Union{Float64, Dict{Symbol, Float64}} = 0.0,
+	etas1::Union{Float64, Dict{Symbol, Float64}} = 0.0,
 	chi2::Float64 =0.0,
 	mu::Dict{Symbol, Float64} = Dict{Symbol, Float64}(),
 	mz::Dict{Symbol, Float64} = Dict{Symbol, Float64}()
 )
-	return HubbardParams(Lx, Ly, bcx, bcy, chi1, etad1, etas1, chi2, mu, mz)
+	etad1_by_x = normalize_hubbard_x_column_parameter(:etad1, etad1, Lx)
+	etas1_by_x = normalize_hubbard_x_column_parameter(:etas1, etas1, Lx)
+	return HubbardParams(Lx, Ly, bcx, bcy, chi1, etad1_by_x, etas1_by_x, chi2, mu, mz)
 end
 function build_ham_PH(p::HubbardParams)
 	Lx, Ly = p.Lx, p.Ly
@@ -740,6 +774,8 @@ function build_ham_PH(p::HubbardParams)
 	mu = p.mu
 	H = zeros(Float64, 2 * Nlat, 2 * Nlat)
 	for x in 1:Lx
+		etad10 = get(etad1, Symbol("etad1_$(x)"), 0.0)
+		etas10 = get(etas1, Symbol("etas1_$(x)"), 0.0)
 		mz0 = get(mz, Symbol("mz_$(x)"), 0.0)
 		mu0 = get(mu, Symbol("mu_$(x)"), 0.0)
 		for y in 1:Ly
@@ -756,8 +792,8 @@ function build_ham_PH(p::HubbardParams)
 			idmp = xy_to_idx((x == 1) ? Lx : x - 1, (y == Ly) ? 1 : y + 1, Ly)
 			bc_pp = ((x == Lx) ? p.bcx : 1.0) * ((y == Ly) ? p.bcy : 1.0)
 			bc_mp = ((x == 1) ? p.bcx : 1.0) * ((y == Ly) ? p.bcy : 1.0)
-			add_term_ij_PH(H, id0, idx, chi1 * bc_x, (+etas1 - etad1) * bc_x)
-			add_term_ij_PH(H, id0, idy, chi1 * bc_y, (etas1 + etad1) * bc_y)
+			add_term_ij_PH(H, id0, idx, chi1 * bc_x, (+etas10 - etad10) * bc_x)
+			add_term_ij_PH(H, id0, idy, chi1 * bc_y, (etas10 + etad10) * bc_y)
 			add_term_ij_PH(H, id0, idpp, chi2 * bc_pp, 0.0)
 			add_term_ij_PH(H, id0, idmp, chi2 * bc_mp, 0.0)
 			H[2*(id0-1)+1, 2*(id0-1)+1] += Q * mz0 / 2 + mu0 / 2
@@ -812,5 +848,23 @@ function make_ansatz_and_derivs(p::HubbardParams; param_names::Vector{Symbol} = 
 	dUt_occ = OrderedDict(alpha => permutedims(real.(dU_dict[alpha][:, 1:n_occ])) for alpha in param_names)
 	return ε, U_occ, dUt_occ
 end
+# ======================================================================
+# Restricted Heisenberg (PH, determinant)
+# ======================================================================
+struct RestrictedHubbardParams
+	Lx::Int
+	Ly::Int
+	bcx::Float64
+	bcy::Float64
+	chi1::Float64
+	chi2::Float64
+	etax::Float64
+	etay::Float64
+	mu::Float64
+	Delta_AF::Float64
+	Delta_c::Float64
+	Delta_s::Float64
+end
+
 end
 # module

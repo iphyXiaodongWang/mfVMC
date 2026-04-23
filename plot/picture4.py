@@ -4,14 +4,14 @@
 """用途: 组装 picture4 的四个子图 (a)(b)(c)(d).
 
 子图说明:
-- top-left panel: 直接引用 PTMC 输出目录中的 Spin Glass order vs temperature 预览图.
-- top-right panel: 读取指定 target_sz_4/Sz.json, 使用统一箭头图逻辑绘制.
-- bottom-left panel: 读取 DMRG txt 数据, 重建二维 <Sz> 后使用统一箭头图逻辑绘制.
+- top-left panel: 直接根据 PTMC 原始 csv 数据重绘 Spin Glass order vs temperature.
+- bottom-left panel: 读取指定 target_sz_4/Sz.json, 使用统一箭头图逻辑绘制.
+- top-right panel: 读取 DMRG txt 数据, 重建二维 <Sz> 后使用统一箭头图逻辑绘制.
 - bottom-right panel: 读取指定 Sz.json, 使用统一箭头图逻辑绘制.
 
 最终排版:
-- 第一行放 top-left 与 top-right panel, 编号为 (a)(b).
-- 第二行左侧放 DMRG panel, 编号为 (c).
+- 第一行放 top-left 与 top-right panel, 编号为 (a)(c).
+- 第二行左侧放 panel (b).
 - 第二行右侧放 VMC panel, 编号为 (d).
 
 输出:
@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 import matplotlib
 import numpy as np
@@ -39,6 +40,9 @@ from plot_domain_sz_arrow import (
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PANEL_A_DATA_DIR = Path(
+    r"D:\study\研究生\科研\VMC\spin_model\classical_MC\PTMC\results\large_size\J2_0.25_J3_1.25\doping0.080\data"
+)
 PANEL_B_SOURCE_DIR = (
     PROJECT_ROOT
     / "results/L_20/defect_average/hole/Ndefect54/logs/defect_seed_3/target_sz_4"
@@ -73,12 +77,24 @@ PANEL_B_DMRG_DEFECT_LOCATIONS = [
 ]
 PANEL_C_SOURCE_DIR = PROJECT_ROOT / "results/benchmark_domain/auto_submit/Ndefect15"
 PANEL_C_LATTICE_SIZE = 12
-PANEL_A_PREVIEW_PATH = Path(
-    r"D:\study\研究生\科研\VMC\spin_model\classical_MC\PTMC\results\large_size\J2_0.25_J3_1.25\doping0.080\data\preview_sg_q2_0_mean_vs_T_doping0.080.png"
-)
 OUTPUT_DIR = PROJECT_ROOT / "results"
 OUTPUT_PNG_PATH = OUTPUT_DIR / "picture4.png"
 OUTPUT_PDF_PATH = OUTPUT_DIR / "picture4.pdf"
+PANEL_A_TITLE = "doping = 0.080: sg_q2_0_mean vs T"
+PANEL_A_XLABEL = "T"
+PANEL_A_YLABEL = "sg_q2_0_mean"
+PANEL_A_SAMPLING_FILENAME = "sampling_results.csv"
+PANEL_A_OBSERVABLE_COLUMN = "sg_q2_0_mean"
+PANEL_A_SIZE_DIR_PATTERN = re.compile(r"^Lx(\d+)_Ly(\d+)_Lz(\d+)_Ndefect\d+$")
+PANEL_A_LINE_MARKER = "o"
+PANEL_A_LINE_MARKER_SIZE = 2.7
+PANEL_A_LINE_WIDTH = 1.15
+PANEL_A_LEGEND_FONTSIZE = 8.8
+PANEL_A_LABEL_FONTSIZE = 9.0
+PANEL_A_TITLE_FONTSIZE = 10.4
+PANEL_A_TICK_FONTSIZE = 8.6
+PANEL_A_GRID_ALPHA = 0.20
+PANEL_A_GRID_LINEWIDTH = 0.60
 PANEL_LABEL_COLOR = "#C62828"
 PANEL_LABEL_FONTSIZE = 15.0
 PANEL_LABEL_X = 0.015
@@ -91,10 +107,11 @@ APS_SERIF_FONT_FAMILY = [
 ]
 GRID_WSPACE = 0.00
 GRID_HSPACE = 0.00
-TOP_PANEL_GAP_WIDTH_RATIO = 0.05
-BOTTOM_PANEL_GAP_WIDTH_RATIO = 0.05
+TOP_PANEL_GAP_WIDTH_RATIO = 0.030
+BOTTOM_PANEL_GAP_WIDTH_RATIO = 0.030
 BOTTOM_ROW_HEIGHT_RATIO = 1.00
-BOTTOM_PANEL_TARGET_GAP = 0.010
+PANEL_ROW_GAP_RATIO = 0.035
+PANEL_A_HEIGHT_SCALE = 1.28
 FIGURE_BASE_WIDTH = 10.6
 FIGURE_MIN_HEIGHT = 7.2
 FIGURE_MAX_HEIGHT = 9.4
@@ -264,6 +281,70 @@ def load_image_array(image_path: Path):
     return mpimg.imread(image_path)
 
 
+def load_panel_a_series(data_dir: Path) -> list[dict[str, object]]:
+    """用途: 从 PTMC 多个尺寸目录读取 a 图所需的 sg_q2_0_mean vs T 曲线.
+
+    参数:
+    - data_dir: Path, 包含多个 Lx*_Ly*_Lz*_Ndefect* 子目录的数据根目录.
+
+    返回:
+    - list[dict[str, object]], 每个元素包含:
+      - label: str, 图例标签, 例如 "L=8".
+      - size: int, 线性尺寸 L.
+      - temperature_values: np.ndarray, 温度数组.
+      - observable_values: np.ndarray, sg_q2_0_mean 数组.
+    """
+    if not data_dir.is_dir():
+        raise NotADirectoryError(f"子图 (a) 数据目录不存在: {data_dir}")
+
+    panel_a_series: list[dict[str, object]] = []
+    for one_size_dir in sorted(data_dir.iterdir()):
+        if not one_size_dir.is_dir():
+            continue
+        matched = PANEL_A_SIZE_DIR_PATTERN.match(one_size_dir.name)
+        if matched is None:
+            continue
+
+        sampling_results_path = one_size_dir / PANEL_A_SAMPLING_FILENAME
+        if not sampling_results_path.is_file():
+            continue
+
+        sampling_table = np.genfromtxt(
+            sampling_results_path,
+            names=True,
+            delimiter=",",
+            dtype=None,
+            encoding="utf-8-sig",
+        )
+        sampling_table = np.atleast_1d(sampling_table)
+        if sampling_table.size == 0:
+            raise ValueError(f"sampling_results.csv 为空: {sampling_results_path}")
+
+        size_value = int(matched.group(1))
+        temperature_values = np.asarray(sampling_table["T"], dtype=float)
+        observable_values = np.asarray(
+            sampling_table[PANEL_A_OBSERVABLE_COLUMN],
+            dtype=float,
+        )
+        sort_indices = np.argsort(temperature_values)
+        panel_a_series.append(
+            {
+                "label": f"L={size_value}",
+                "size": size_value,
+                "temperature_values": temperature_values[sort_indices],
+                "observable_values": observable_values[sort_indices],
+            }
+        )
+
+    if len(panel_a_series) == 0:
+        raise FileNotFoundError(
+            f"未在子图 (a) 数据目录下找到有效的 {PANEL_A_SAMPLING_FILENAME}: {data_dir}"
+        )
+
+    panel_a_series.sort(key=lambda one_series: int(one_series["size"]))
+    return panel_a_series
+
+
 def trim_image_whitespace(panel_image: np.ndarray) -> np.ndarray:
     """用途: 裁掉位图四周近似纯白的边缘, 减少无效留白.
 
@@ -352,6 +433,40 @@ def compute_figure_size(
     return figure_width, figure_height
 
 
+def compute_square_panel_positions() -> dict[str, list[float]]:
+    """用途: 计算四个正方形子图在 figure 中的最终位置.
+
+    参数:
+    - 无.
+
+    返回:
+    - dict[str, list[float]], 四个子图的 [x0, y0, width, height] 位置字典.
+    """
+    available_width = float(FIGURE_RIGHT_MARGIN - FIGURE_LEFT_MARGIN)
+    available_height = float(FIGURE_TOP_MARGIN - FIGURE_BOTTOM_MARGIN)
+    column_gap = max(
+        float(TOP_PANEL_GAP_WIDTH_RATIO),
+        float(BOTTOM_PANEL_GAP_WIDTH_RATIO),
+    )
+    row_gap = float(PANEL_ROW_GAP_RATIO)
+    square_side = min(
+        (available_width - column_gap) / 2.0,
+        (available_height - row_gap) / 2.0,
+    )
+    total_width = 2.0 * square_side + column_gap
+    total_height = 2.0 * square_side + row_gap
+    left_start = float(FIGURE_LEFT_MARGIN) + 0.5 * (available_width - total_width)
+    bottom_start = float(FIGURE_BOTTOM_MARGIN) + 0.5 * (available_height - total_height)
+    top_row_y = bottom_start + square_side + row_gap
+    right_column_x = left_start + square_side + column_gap
+    return {
+        "panel_a": [left_start, top_row_y, square_side, square_side],
+        "panel_b": [left_start, bottom_start, square_side, square_side],
+        "panel_c": [right_column_x, top_row_y, square_side, square_side],
+        "panel_d": [right_column_x, bottom_start, square_side, square_side],
+    }
+
+
 def add_panel_label(axis, panel_label: str) -> None:
     """用途: 在指定坐标轴左上角添加子图编号.
 
@@ -375,39 +490,77 @@ def add_panel_label(axis, panel_label: str) -> None:
     )
 
 
-def draw_image_panel(
+def draw_panel_a_series(
     axis,
-    panel_image,
+    panel_a_series: list[dict[str, object]],
     panel_label: str,
 ) -> None:
-    """用途: 在指定坐标轴中绘制位图子图并添加编号.
+    """用途: 在指定坐标轴中绘制 a 图的 sg_q2_0_mean vs T 多尺寸折线图.
 
     参数:
     - axis: matplotlib.axes.Axes, 目标坐标轴对象.
-    - panel_image: np.ndarray, 要显示的图像数组.
+    - panel_a_series: list[dict[str, object]], a 图曲线数据列表.
     - panel_label: str, 子图编号字符串, 例如 '(a)'.
+
     返回:
     - None.
     """
-    axis.imshow(panel_image)
-    axis.set_aspect("equal", adjustable="box")
-    axis.axis("off")
+    axis.set_box_aspect(1.0)
+    axis.set_aspect("auto")
+    axis.set_title(PANEL_A_TITLE, fontsize=PANEL_A_TITLE_FONTSIZE, pad=6.0)
+    axis.set_xlabel(PANEL_A_XLABEL, fontsize=PANEL_A_LABEL_FONTSIZE)
+    axis.set_ylabel(PANEL_A_YLABEL, fontsize=PANEL_A_LABEL_FONTSIZE)
+    axis.tick_params(labelsize=PANEL_A_TICK_FONTSIZE)
+    axis.grid(alpha=PANEL_A_GRID_ALPHA, linewidth=PANEL_A_GRID_LINEWIDTH)
+
+    for one_series in panel_a_series:
+        axis.plot(
+            np.asarray(one_series["temperature_values"], dtype=float),
+            np.asarray(one_series["observable_values"], dtype=float),
+            marker=PANEL_A_LINE_MARKER,
+            markersize=PANEL_A_LINE_MARKER_SIZE,
+            linewidth=PANEL_A_LINE_WIDTH,
+            label=str(one_series["label"]),
+        )
+
+    axis.margins(x=0.03, y=0.05)
+    axis.legend(loc="upper right", frameon=True, fontsize=PANEL_A_LEGEND_FONTSIZE)
     add_panel_label(axis, panel_label)
 
 
+def hide_lattice_ticks(axis) -> None:
+    """用途: 隐藏晶格图的坐标刻度标签和刻度线, 保留已有网格.
+
+    参数:
+    - axis: matplotlib.axes.Axes, 目标晶格图坐标轴对象.
+
+    返回:
+    - None.
+    """
+    axis.tick_params(
+        axis="both",
+        which="both",
+        length=0.0,
+        labelbottom=False,
+        labelleft=False,
+        labeltop=False,
+        labelright=False,
+    )
+
+
 def build_picture4_figure(
-    top_panel_image,
-    top_right_panel_sz_matrix,
-    bottom_left_panel_sz_matrix,
-    bottom_right_panel_sz_matrix,
+    top_panel_series,
+    panel_b_sz_matrix,
+    panel_c_sz_matrix,
+    panel_d_sz_matrix,
 ):
     """用途: 构建 picture4 的 figure 与四个子图坐标轴.
 
     参数:
-    - top_panel_image: np.ndarray, 第一行子图, 即编号 (a) 的图像数组.
-    - top_right_panel_sz_matrix: np.ndarray, 第一行右侧子图, 即编号 (b) 的 <Sz> 矩阵.
-    - bottom_left_panel_sz_matrix: np.ndarray, 第二行左侧子图, 即编号 (c) 的 <Sz> 矩阵.
-    - bottom_right_panel_sz_matrix: np.ndarray, 第二行右侧子图, 即编号 (d) 的 <Sz> 矩阵.
+    - top_panel_series: list[dict[str, object]], 第一行子图, 即编号 (a) 的多尺寸曲线数据.
+    - panel_b_sz_matrix: np.ndarray, 编号 (b) 的 <Sz> 矩阵, 显示在左下角.
+    - panel_c_sz_matrix: np.ndarray, 编号 (c) 的 <Sz> 矩阵, 显示在右上角.
+    - panel_d_sz_matrix: np.ndarray, 编号 (d) 的 <Sz> 矩阵, 显示在右下角.
 
     返回:
     - tuple[matplotlib.figure.Figure, list[matplotlib.axes.Axes], dict[str, object]]
@@ -417,27 +570,27 @@ def build_picture4_figure(
     """
     configure_aps_style()
 
-    top_width_ratios = compute_panel_width_ratios(
-        [top_panel_image, top_right_panel_sz_matrix]
-    )
-    bottom_width_ratios = compute_panel_width_ratios(
-        [bottom_left_panel_sz_matrix, bottom_right_panel_sz_matrix]
-    )
     row_height_ratios = compute_row_height_ratios(
-        top_panel_image,
-        [top_right_panel_sz_matrix, bottom_left_panel_sz_matrix, bottom_right_panel_sz_matrix],
+        top_panel_series,
+        [
+            panel_b_sz_matrix,
+            panel_c_sz_matrix,
+            panel_d_sz_matrix,
+        ],
     )
     figure_size = compute_figure_size(
         [
-            top_width_ratios[0] + TOP_PANEL_GAP_WIDTH_RATIO + top_width_ratios[1],
-            bottom_width_ratios[0]
-            + BOTTOM_PANEL_GAP_WIDTH_RATIO
-            + bottom_width_ratios[1],
+            2.0 + max(TOP_PANEL_GAP_WIDTH_RATIO, BOTTOM_PANEL_GAP_WIDTH_RATIO),
+            2.0 + max(TOP_PANEL_GAP_WIDTH_RATIO, BOTTOM_PANEL_GAP_WIDTH_RATIO),
         ],
         row_height_ratios,
     )
     shared_norm = build_shared_domain_norm(
-        [top_right_panel_sz_matrix, bottom_left_panel_sz_matrix, bottom_right_panel_sz_matrix]
+        [
+            panel_b_sz_matrix,
+            panel_c_sz_matrix,
+            panel_d_sz_matrix,
+        ]
     )
 
     figure = plt.figure(figsize=figure_size, constrained_layout=False)
@@ -453,111 +606,65 @@ def build_picture4_figure(
         bottom=FIGURE_BOTTOM_MARGIN,
         top=FIGURE_TOP_MARGIN,
     )
-    top_grid_spec = outer_grid_spec[0, 0].subgridspec(
-        nrows=1,
-        ncols=3,
-        width_ratios=[
-            top_width_ratios[0],
-            TOP_PANEL_GAP_WIDTH_RATIO,
-            top_width_ratios[1],
-        ],
-        wspace=0.0,
-    )
-    bottom_grid_spec = outer_grid_spec[1, 0].subgridspec(
-        nrows=1,
-        ncols=3,
-        width_ratios=[
-            bottom_width_ratios[0],
-            BOTTOM_PANEL_GAP_WIDTH_RATIO,
-            bottom_width_ratios[1],
-        ],
-        wspace=0.0,
-    )
+    axis_panel_a = figure.add_subplot(outer_grid_spec[0, 0])
+    axis_panel_b = figure.add_subplot(outer_grid_spec[1, 0])
+    axis_panel_c = figure.add_subplot(outer_grid_spec[0, 0])
+    axis_panel_d = figure.add_subplot(outer_grid_spec[1, 0])
 
-    axis_top_left = figure.add_subplot(top_grid_spec[0, 0])
-    axis_top_right = figure.add_subplot(top_grid_spec[0, 2])
-    axis_bottom_left = figure.add_subplot(bottom_grid_spec[0, 0])
-    axis_bottom_right = figure.add_subplot(bottom_grid_spec[0, 2])
-
-    draw_image_panel(axis_top_left, top_panel_image, "(a)")
-    top_right_artist = draw_domain_sz_panel(
-        axis_top_right,
-        top_right_panel_sz_matrix,
+    draw_panel_a_series(axis_panel_a, top_panel_series, "(a)")
+    panel_b_artist = draw_domain_sz_panel(
+        axis_panel_b,
+        panel_b_sz_matrix,
         norm=shared_norm,
     )
-    bottom_left_artist = draw_domain_sz_panel(
-        axis_bottom_left,
-        bottom_left_panel_sz_matrix,
+    panel_c_artist = draw_domain_sz_panel(
+        axis_panel_c,
+        panel_c_sz_matrix,
         norm=shared_norm,
     )
-    bottom_right_artist = draw_domain_sz_panel(
-        axis_bottom_right,
-        bottom_right_panel_sz_matrix,
+    panel_d_artist = draw_domain_sz_panel(
+        axis_panel_d,
+        panel_d_sz_matrix,
         norm=shared_norm,
     )
-    add_panel_label(axis_top_right, "(b)")
-    add_panel_label(axis_bottom_left, "(c)")
-    add_panel_label(axis_bottom_right, "(d)")
-    figure.canvas.draw()
-    bottom_left_axis_position = axis_bottom_left.get_position()
-    bottom_right_axis_position = axis_bottom_right.get_position()
-    combined_center_x = 0.5 * (
-        float(bottom_left_axis_position.x0) + float(bottom_right_axis_position.x1)
-    )
-    combined_total_width = (
-        float(bottom_left_axis_position.width)
-        + float(bottom_right_axis_position.width)
-        + BOTTOM_PANEL_TARGET_GAP
-    )
-    bottom_left_new_x0 = combined_center_x - 0.5 * combined_total_width
-    bottom_right_new_x0 = (
-        bottom_left_new_x0
-        + float(bottom_left_axis_position.width)
-        + BOTTOM_PANEL_TARGET_GAP
-    )
-    axis_bottom_left.set_position(
-        [
-            bottom_left_new_x0,
-            float(bottom_left_axis_position.y0),
-            float(bottom_left_axis_position.width),
-            float(bottom_left_axis_position.height),
-        ]
-    )
-    axis_bottom_right.set_position(
-        [
-            bottom_right_new_x0,
-            float(bottom_right_axis_position.y0),
-            float(bottom_right_axis_position.width),
-            float(bottom_right_axis_position.height),
-        ]
-    )
+    hide_lattice_ticks(axis_panel_b)
+    hide_lattice_ticks(axis_panel_c)
+    hide_lattice_ticks(axis_panel_d)
+    add_panel_label(axis_panel_b, "(b)")
+    add_panel_label(axis_panel_c, "(c)")
+    add_panel_label(axis_panel_d, "(d)")
+    square_panel_positions = compute_square_panel_positions()
+    axis_panel_a.set_position(square_panel_positions["panel_a"])
+    axis_panel_b.set_position(square_panel_positions["panel_b"])
+    axis_panel_c.set_position(square_panel_positions["panel_c"])
+    axis_panel_d.set_position(square_panel_positions["panel_d"])
     artist_dict = {
-        "top_right": top_right_artist,
-        "bottom_left": bottom_left_artist,
-        "bottom_right": bottom_right_artist,
+        "panel_b": panel_b_artist,
+        "panel_c": panel_c_artist,
+        "panel_d": panel_d_artist,
         "colorbar": None,
         "shared_norm": shared_norm,
     }
     return (
         figure,
-        [axis_top_left, axis_top_right, axis_bottom_left, axis_bottom_right],
+        [axis_panel_a, axis_panel_b, axis_panel_c, axis_panel_d],
         artist_dict,
     )
 
 
 def draw_picture4(
-    top_panel_image,
-    top_right_panel_sz_matrix,
-    bottom_left_panel_sz_matrix,
-    bottom_right_panel_sz_matrix,
+    top_panel_series,
+    panel_b_sz_matrix,
+    panel_c_sz_matrix,
+    panel_d_sz_matrix,
 ) -> None:
     """用途: 将三个子图排版为 picture4 并保存.
 
     参数:
-    - top_panel_image: np.ndarray, 第一行子图, 即编号 (a) 的图像数组.
-    - top_right_panel_sz_matrix: np.ndarray, 第一行右侧子图, 即编号 (b) 的 <Sz> 矩阵.
-    - bottom_left_panel_sz_matrix: np.ndarray, 第二行左侧子图, 即编号 (c) 的 <Sz> 矩阵.
-    - bottom_right_panel_sz_matrix: np.ndarray, 第二行右侧子图, 即编号 (d) 的 <Sz> 矩阵.
+    - top_panel_series: list[dict[str, object]], 第一行子图, 即编号 (a) 的多尺寸曲线数据.
+    - panel_b_sz_matrix: np.ndarray, 编号 (b) 的 <Sz> 矩阵.
+    - panel_c_sz_matrix: np.ndarray, 编号 (c) 的 <Sz> 矩阵.
+    - panel_d_sz_matrix: np.ndarray, 编号 (d) 的 <Sz> 矩阵.
 
     返回:
     - None.
@@ -565,10 +672,10 @@ def draw_picture4(
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     figure, _, _ = build_picture4_figure(
-        top_panel_image=top_panel_image,
-        top_right_panel_sz_matrix=top_right_panel_sz_matrix,
-        bottom_left_panel_sz_matrix=bottom_left_panel_sz_matrix,
-        bottom_right_panel_sz_matrix=bottom_right_panel_sz_matrix,
+        top_panel_series=top_panel_series,
+        panel_b_sz_matrix=panel_b_sz_matrix,
+        panel_c_sz_matrix=panel_c_sz_matrix,
+        panel_d_sz_matrix=panel_d_sz_matrix,
     )
     figure.savefig(OUTPUT_PNG_PATH, dpi=260, bbox_inches="tight")
     figure.savefig(OUTPUT_PDF_PATH, dpi=260, bbox_inches="tight")
@@ -584,28 +691,28 @@ def main() -> None:
     返回:
     - None.
     """
-    top_panel_image = trim_image_whitespace(load_image_array(PANEL_A_PREVIEW_PATH))
-    top_right_panel_sz_matrix = load_panel_b_sz_matrix(
+    top_panel_series = load_panel_a_series(PANEL_A_DATA_DIR)
+    panel_b_sz_matrix = load_panel_b_sz_matrix(
         PANEL_B_SOURCE_DIR,
         PANEL_B_LATTICE_SIZE,
     )
-    bottom_left_panel_sz_matrix = load_panel_c_sz_matrix(PANEL_B_DMRG_TXT_PATH)
-    bottom_right_panel_target_dir = resolve_panel_c_target_dir(PANEL_C_SOURCE_DIR)
-    bottom_right_panel_sz_matrix = load_panel_d_sz_matrix(
-        bottom_right_panel_target_dir, PANEL_C_LATTICE_SIZE
+    panel_c_sz_matrix = load_panel_c_sz_matrix(PANEL_B_DMRG_TXT_PATH)
+    panel_d_target_dir = resolve_panel_c_target_dir(PANEL_C_SOURCE_DIR)
+    panel_d_sz_matrix = load_panel_d_sz_matrix(
+        panel_d_target_dir, PANEL_C_LATTICE_SIZE
     )
     draw_picture4(
-        top_panel_image=top_panel_image,
-        top_right_panel_sz_matrix=top_right_panel_sz_matrix,
-        bottom_left_panel_sz_matrix=bottom_left_panel_sz_matrix,
-        bottom_right_panel_sz_matrix=bottom_right_panel_sz_matrix,
+        top_panel_series=top_panel_series,
+        panel_b_sz_matrix=panel_b_sz_matrix,
+        panel_c_sz_matrix=panel_c_sz_matrix,
+        panel_d_sz_matrix=panel_d_sz_matrix,
     )
 
-    print(f"[OK] panel_a preview: {PANEL_A_PREVIEW_PATH}")
+    print(f"[OK] panel_a data: {PANEL_A_DATA_DIR}")
     print(f"[OK] panel_b source: {PANEL_B_SOURCE_DIR}")
     print(f"[OK] panel_c dmrg txt: {PANEL_B_DMRG_TXT_PATH}")
     print(f"[OK] panel_d source: {PANEL_C_SOURCE_DIR}")
-    print(f"[OK] panel_d target: {bottom_right_panel_target_dir}")
+    print(f"[OK] panel_d target: {panel_d_target_dir}")
     print(f"[OK] output png: {OUTPUT_PNG_PATH}")
     print(f"[OK] output pdf: {OUTPUT_PDF_PATH}")
 
