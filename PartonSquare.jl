@@ -849,7 +849,7 @@ function make_ansatz_and_derivs(p::HubbardParams; param_names::Vector{Symbol} = 
 	return ε, U_occ, dUt_occ
 end
 # ======================================================================
-# Restricted Heisenberg (PH, determinant)
+# Restricted Hubbard (PH, determinant)
 # ======================================================================
 struct RestrictedHubbardParams
 	Lx::Int
@@ -864,6 +864,100 @@ struct RestrictedHubbardParams
 	Delta_AF::Float64
 	Delta_c::Float64
 	Delta_s::Float64
+	Q::Float64
+	x0::Float64
+end
+function RestrictedHubbardParams(;
+	Lx::Int,
+	Ly::Int,
+	bcx::Float64 = 1.0,
+	bcy::Float64 = 1.0,
+	chi1::Float64 = 0.0,
+	chi2::Float64 =0.0,
+	etax::Float64= 0.0,
+	etay::Float64 = 0.0,
+	mu::Float64 = 0.0,
+	Delta_AF::Float64 = 0.0,
+	Delta_c::Float64 = 0.0,
+	Delta_s::Float64 = 0.0,
+	Q::Float64 = 0.0,
+	x0::Float64 = 0.0
+)
+	return RestrictedHubbardParams(Lx, Ly, bcx, bcy, chi1, chi2, etax, etay, mu, Delta_AF, Delta_c, Delta_s, Q, x0)
+end
+function build_ham_PH(p::RestrictedHubbardParams)
+	Lx, Ly = p.Lx, p.Ly
+	Nlat = Lx * Ly
+	chi1,chi2 = p.chi1,p.chi2
+	etax,etay = p.etax,p.etay
+	mu = p.mu
+	Delta_AF, Delta_c, Delta_s = p.Delta_AF, p.Delta_c, p.Delta_s
+	Q, x0 = p.Q, p.x0
+	H = zeros(Float64, 2 * Nlat, 2 * Nlat)
+	for x in 1:Lx
+		mu0=mu+Delta_c*cos(Q*(x-x0))
+		mz0=Delta_AF+Delta_s*sin(Q/2*(x-x0))
+		etax0=etax*abs(cos(Q/2*(x+0.5-x0)))
+		etay0=-etay*abs(cos(Q/2*(x-x0)))
+		for y in 1:Ly
+			id0 = xy_to_idx(x, y, Ly)
+			sign = (-1)^(x + y)
+			# --- Y 方向 ---
+			idy = (y == Ly) ? xy_to_idx(x, 1, Ly) : xy_to_idx(x, y + 1, Ly)
+			bc_y = (y == Ly) ? p.bcy : 1.0
+			# --- X 方向 ---
+			idx = (x == Lx) ? xy_to_idx(1, y, Ly) : xy_to_idx(x + 1, y, Ly)
+			bc_x = (x == Lx) ? p.bcx : 1.0
+			# --- 次近邻对角方向 ---
+			idpp = xy_to_idx((x == Lx) ? 1 : x + 1, (y == Ly) ? 1 : y + 1, Ly)
+			idmp = xy_to_idx((x == 1) ? Lx : x - 1, (y == Ly) ? 1 : y + 1, Ly)
+			bc_pp = ((x == Lx) ? p.bcx : 1.0) * ((y == Ly) ? p.bcy : 1.0)
+			bc_mp = ((x == 1) ? p.bcx : 1.0) * ((y == Ly) ? p.bcy : 1.0)
+			add_term_ij_PH(H, id0, idx, chi1 * bc_x, etax0 * bc_x)
+			add_term_ij_PH(H, id0, idy, chi1 * bc_y, etay0 * bc_y)
+			add_term_ij_PH(H, id0, idpp, chi2 * bc_pp, 0.0)
+			add_term_ij_PH(H, id0, idmp, chi2 * bc_mp, 0.0)
+			H[2*(id0-1)+1, 2*(id0-1)+1] += sign * mz0 / 2 + mu0 / 2
+			H[2*(id0-1)+2, 2*(id0-1)+2] += sign * mz0 / 2 - mu0 / 2
+		end
+	end
+	H = Hermitian(H + H')
+	return H
+end
+function make_ansatz_and_derivs(p::RestrictedHubbardParams; param_names::Vector{Symbol} = [], target_sz::Int = 0,Q::Float64=0.0,x0::Float64=0.0)
+	H = build_ham_PH(p)
+
+	H_alphas = OrderedDict{Symbol, Matrix{Float64}}()
+	for name in param_names
+		p_alpha = RestrictedHubbardParams(;
+			(; :Lx => p.Lx,
+					:Ly => p.Ly,
+					:bcx => p.bcx,
+					:bcy => p.bcy,
+					name => 1.0,
+					:Q => Q,
+					:x0 => x0
+					)...,
+		)
+		H_alphas[name] = build_ham_PH(p_alpha)
+	end
+
+	# 2. 对角化并计算导数 (Utils)
+	ε, U_full, dE, dU_dict = Utils.compute_eig_and_dU_reg1(H, H_alphas)
+	eig_eq_error = norm(Matrix(H) * U_full - U_full * Diagonal(ε))
+	if is_root_rank()
+		println("Eigen equation error (HU - Uε): ", eig_eq_error)
+	end
+	#做了PH变换后粒子数不再守恒，守恒的只有total Sz，根据输入的target_sz截取
+	# 3. 截取占据态并封装
+	Nlat = p.Lx * p.Ly
+	n_occ = Nlat + target_sz
+	if is_root_rank()
+		println("ε is", ε[(n_occ-4):(n_occ+4)])
+	end
+	U_occ = U_full[:, 1:n_occ]
+	dUt_occ = OrderedDict(alpha => permutedims(real.(dU_dict[alpha][:, 1:n_occ])) for alpha in param_names)
+	return ε, U_occ, dUt_occ
 end
 
 end
