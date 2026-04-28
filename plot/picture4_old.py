@@ -1,14 +1,18 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-"""用途: 组装 picture4 的两个子图 (a)(b).
+"""用途: 组装 picture4 的四个子图 (a)(b)(c)(d).
 
 子图说明:
-- panel (a): 直接根据 PTMC 原始 csv 数据重绘 Spin Glass order vs temperature.
-- panel (b): 读取指定 target_sz_4/Sz.json, 使用统一箭头图逻辑绘制.
+- top-left panel: 直接根据 PTMC 原始 csv 数据重绘 Spin Glass order vs temperature.
+- bottom-left panel: 读取指定 target_sz_4/Sz.json, 使用统一箭头图逻辑绘制.
+- top-right panel: 读取 DMRG txt 数据, 重建二维 <Sz> 后使用统一箭头图逻辑绘制.
+- bottom-right panel: 读取指定 Sz.json, 使用统一箭头图逻辑绘制.
 
 最终排版:
-- 单行左右排布, 左侧为 (a), 右侧为 (b).
+- 第一行放 top-left 与 top-right panel, 编号为 (a)(c).
+- 第二行左侧放 panel (b).
+- 第二行右侧放 VMC panel, 编号为 (d).
 
 输出:
 - results/picture4.png
@@ -28,7 +32,6 @@ import matplotlib.image as mpimg
 import matplotlib.pyplot as plt
 
 from plot_domain_sz_arrow import (
-    build_diverging_colormap,
     build_shared_domain_norm,
     draw_domain_sz_panel,
     load_dmrg_txt_matrix,
@@ -78,78 +81,34 @@ OUTPUT_DIR = PROJECT_ROOT / "results"
 OUTPUT_PNG_PATH = OUTPUT_DIR / "picture4.png"
 OUTPUT_PDF_PATH = OUTPUT_DIR / "picture4.pdf"
 PANEL_A_TITLE = ""
-PANEL_A_XLABEL = "$T$"
+PANEL_A_XLABEL = "T"
 PANEL_A_YLABEL = "$q_{SG}^{(2)}$"
 PANEL_A_SAMPLING_FILENAME = "sampling_results.csv"
-PANEL_A_REPLICA_SAMPLING_GLOB = "sampling_results_seed*_ladder*_replica*.csv"
 PANEL_A_OBSERVABLE_COLUMN = "sg_q2_0_mean"
-PANEL_A_OBSERVABLE_ERROR_COLUMN = "sg_q2_0_err"
-PANEL_A_REPLICA_TEMPERATURE_ATOL = 1.0e-12
 PANEL_A_SIZE_DIR_PATTERN = re.compile(r"^Lx(\d+)_Ly(\d+)_Lz(\d+)_Ndefect\d+$")
 PANEL_A_LINE_MARKER = "o"
 PANEL_A_LINE_MARKER_SIZE = 2.7
 PANEL_A_LINE_WIDTH = 1.15
-PANEL_A_LEGEND_FONTSIZE = 22
-PANEL_A_LEGEND_LOC = "upper right"
-PANEL_A_LEGEND_BBOX_TO_ANCHOR = (0.99, 0.50)
-PANEL_A_LABEL_FONTSIZE = 24
-PANEL_A_TITLE_FONTSIZE = 22
-PANEL_A_TICK_FONTSIZE = 22
+PANEL_A_LEGEND_FONTSIZE = 16
+PANEL_A_LABEL_FONTSIZE = 16
+PANEL_A_TITLE_FONTSIZE = 16
+PANEL_A_TICK_FONTSIZE = 16
 PANEL_A_GRID_ALPHA = 0.20
 PANEL_A_GRID_LINEWIDTH = 0.60
 PANEL_A_XLIM = [0.1, 0.9]
-PANEL_A_YLIM = [0.0, 0.18]
+PANEL_A_YLIM = [0.0, 0.2]
 PANEL_A_XTICKS = [0.2, 0.4, 0.6, 0.8]
-PANEL_A_YTICKS = [0.0, 0.06, 0.12, 0.18]
+PANEL_A_YTICKS = [0.0, 0.1, 0.2]
 PANEL_A_XMINOR_TICKS = [0.1, 0.3, 0.5, 0.7, 0.9]
-PANEL_A_YMINOR_TICKS = [0.03, 0.09, 0.15]
+PANEL_A_YMINOR_TICKS = [0.05, 0.15]
 PANEL_A_XLABEL_X = 0.50
 PANEL_A_XLABEL_Y = -0.03
-PANEL_A_YLABEL_X = -0.03
-PANEL_A_YLABEL_Y = 0.50
-PANEL_A_INSET_ENABLED = True
-PANEL_A_INSET_TARGET_TEMPERATURE = 0.1
-PANEL_A_INSET_BOUNDS = [0.35, 0.58, 0.60, 0.39]
-PANEL_A_INSET_XLABEL = r"$1/L$"
-PANEL_A_INSET_YLABEL = "$q_{SG}^{(2)}$"
-PANEL_A_INSET_XLABEL_X = 0.45
-PANEL_A_INSET_XLABEL_Y = -0.06
-PANEL_A_INSET_YLABEL_X = -0.08
-PANEL_A_INSET_YLABEL_Y = 0.50
-PANEL_A_INSET_XLIM = [0.00, 0.13]
-PANEL_A_INSET_YLIM = [0.07, 0.20]
-PANEL_A_INSET_XTICKS = [0.00, 0.10]
-PANEL_A_INSET_YTICKS = [0.08, 0.18]
-PANEL_A_INSET_XMINOR_TICKS = [0.05, 0.15]
-PANEL_A_INSET_YMINOR_TICKS = [0.13]
-PANEL_A_INSET_LABEL_FONTSIZE = 24
-PANEL_A_INSET_TICK_FONTSIZE = 22
-PANEL_A_INSET_MINOR_TICK_LENGTH = 2.0
-PANEL_A_INSET_MINOR_TICK_WIDTH = 0.6
-PANEL_A_INSET_MARKER_SIZE = 18.0
-PANEL_A_INSET_MARKER_COLOR = "black"
-PANEL_A_INSET_ERRORBAR_ENABLED = True
-PANEL_A_INSET_ERRORBAR_COLOR = "black"
-PANEL_A_INSET_ERRORBAR_ALPHA = 1.0
-PANEL_A_INSET_ERRORBAR_LINEWIDTH = 0.8
-PANEL_A_INSET_ERRORBAR_CAPSIZE = 2.0
-PANEL_A_INSET_ERRORBAR_CAPTHICK = 0.8
-PANEL_A_INSET_ERRORBAR_ZORDER = 2.5
-PANEL_A_INSET_FIT_LINEWIDTH = 1.0
-PANEL_A_INSET_FIT_COLOR = "black"
-PANEL_A_INSET_BORDER_LINEWIDTH = 0.8
 PANEL_A_MINOR_TICK_LENGTH = 2.0
 PANEL_A_MINOR_TICK_WIDTH = 0.6
 PANEL_LABEL_COLOR = "black"
-PANEL_LABEL_FONTSIZE = 24.0
-PANEL_LABEL_HORIZONTAL_ALIGNMENT = "left"
-PANEL_LABEL_VERTICAL_ALIGNMENT = "bottom"
-PANEL_LABEL_DEFAULT_X = 0.015
-PANEL_LABEL_DEFAULT_Y = 1.005
-PANEL_A_LABEL_X = 0.015
-PANEL_A_LABEL_Y = 1.005
-PANEL_B_LABEL_X = 0.015
-PANEL_B_LABEL_Y = 1.005
+PANEL_LABEL_FONTSIZE = 18.0
+PANEL_LABEL_X = 0.015
+PANEL_LABEL_Y = 0.985
 APS_SERIF_FONT_FAMILY = [
     "Times New Roman",
     "Times",
@@ -166,26 +125,6 @@ PANEL_DOMAIN_ARROW_HEADWIDTH = 3.0
 PANEL_DOMAIN_ARROW_HEADLENGTH = 5.0
 PANEL_DOMAIN_ARROW_HEADAXISLENGTH = 4.5
 PANEL_DOMAIN_ARROW_MINLENGTH = 1.0
-PANEL_DOMAIN_ARROW_ZORDER = 5.0
-PANEL_DOMAIN_COLORMAP_NAME = "PuOr"  # "BrBG"
-PANEL_DOMAIN_NEGATIVE_COLOR = "#F2B134"
-PANEL_DOMAIN_ZERO_COLOR = "#F7F7F7"
-PANEL_DOMAIN_POSITIVE_COLOR = "#2B7BFF"
-PANEL_DOMAIN_SITE_MARKER_SIZE = 10.0
-PANEL_DOMAIN_SITE_MARKER_FACE_COLOR = "none"
-PANEL_DOMAIN_SITE_MARKER_EDGE_COLOR = "black"
-PANEL_DOMAIN_SITE_MARKER_ALPHA = 0.8
-PANEL_DOMAIN_SITE_MARKER_LINEWIDTH = 1.3
-PANEL_DOMAIN_DEFECT_MARKER_SIZE = PANEL_DOMAIN_SITE_MARKER_SIZE + 15.0
-PANEL_DOMAIN_DEFECT_MARKER_FACE_COLOR = "none"
-PANEL_DOMAIN_DEFECT_MARKER_EDGE_COLOR = "#ff0000"
-PANEL_DOMAIN_DEFECT_MARKER_ALPHA = 0.7
-PANEL_DOMAIN_DEFECT_MARKER_LINEWIDTH = 1.3
-PANEL_DOMAIN_GRID_COLOR = "black"
-PANEL_DOMAIN_GRID_ALPHA = 0.5
-PANEL_DOMAIN_GRID_LINEWIDTH = 1.2
-PANEL_DOMAIN_SHOW_PERIODIC_BOUNDARY_BONDS = True
-PANEL_DOMAIN_PERIODIC_BOUNDARY_STUB_LENGTH = 0.75
 PANEL_DOMAIN_SHOW_COLORBAR = False
 PANEL_DOMAIN_COLORBAR_LABEL = "domain = (-1)^(x+y) * <Sz>"
 PANEL_DOMAIN_COLORBAR_WIDTH_RATIO = 0.040
@@ -198,8 +137,8 @@ TOP_PANEL_GAP_WIDTH_RATIO = 0.025
 BOTTOM_PANEL_GAP_WIDTH_RATIO = 0.05
 BOTTOM_ROW_HEIGHT_RATIO = 1.00
 PANEL_ROW_GAP_RATIO = 0.1
-PANEL_A_WIDTH_RATIO = 1.3
-PANEL_A_HEIGHT_RATIO = 1.3
+PANEL_A_WIDTH_RATIO = 1.2
+PANEL_A_HEIGHT_RATIO = 0.7
 PANEL_B_SIDE_RATIO = 1.3
 FIGURE_BASE_WIDTH = 10.6
 FIGURE_MIN_HEIGHT = 7.2
@@ -383,7 +322,6 @@ def load_panel_a_series(data_dir: Path) -> list[dict[str, object]]:
       - size: int, 线性尺寸 L.
       - temperature_values: np.ndarray, 温度数组.
       - observable_values: np.ndarray, sg_q2_0_mean 数组.
-      - observable_error_values: np.ndarray, sg_q2_0_err 数组.
     """
     if not data_dir.is_dir():
         raise NotADirectoryError(f"子图 (a) 数据目录不存在: {data_dir}")
@@ -400,49 +338,30 @@ def load_panel_a_series(data_dir: Path) -> list[dict[str, object]]:
         if not sampling_results_path.is_file():
             continue
 
-        size_value = int(matched.group(1))
-        replica_statistics = load_panel_a_replica_statistics(one_size_dir)
-        if replica_statistics is None:
-            sampling_table = np.genfromtxt(
-                sampling_results_path,
-                names=True,
-                delimiter=",",
-                dtype=None,
-                encoding="utf-8-sig",
-            )
-            sampling_table = np.atleast_1d(sampling_table)
-            if sampling_table.size == 0:
-                raise ValueError(f"sampling_results.csv 为空: {sampling_results_path}")
+        sampling_table = np.genfromtxt(
+            sampling_results_path,
+            names=True,
+            delimiter=",",
+            dtype=None,
+            encoding="utf-8-sig",
+        )
+        sampling_table = np.atleast_1d(sampling_table)
+        if sampling_table.size == 0:
+            raise ValueError(f"sampling_results.csv 为空: {sampling_results_path}")
 
-            temperature_values = np.asarray(sampling_table["T"], dtype=float)
-            observable_values = np.asarray(
-                sampling_table[PANEL_A_OBSERVABLE_COLUMN],
-                dtype=float,
-            )
-            if PANEL_A_OBSERVABLE_ERROR_COLUMN in sampling_table.dtype.names:
-                observable_error_values = np.asarray(
-                    sampling_table[PANEL_A_OBSERVABLE_ERROR_COLUMN],
-                    dtype=float,
-                )
-            else:
-                observable_error_values = np.zeros_like(observable_values, dtype=float)
-            sort_indices = np.argsort(temperature_values)
-            temperature_values = temperature_values[sort_indices]
-            observable_values = observable_values[sort_indices]
-            observable_error_values = observable_error_values[sort_indices]
-        else:
-            (
-                temperature_values,
-                observable_values,
-                observable_error_values,
-            ) = replica_statistics
+        size_value = int(matched.group(1))
+        temperature_values = np.asarray(sampling_table["T"], dtype=float)
+        observable_values = np.asarray(
+            sampling_table[PANEL_A_OBSERVABLE_COLUMN],
+            dtype=float,
+        )
+        sort_indices = np.argsort(temperature_values)
         panel_a_series.append(
             {
-                "label": f"$L={size_value}$",
+                "label": f"L={size_value}",
                 "size": size_value,
-                "temperature_values": temperature_values,
-                "observable_values": observable_values,
-                "observable_error_values": observable_error_values,
+                "temperature_values": temperature_values[sort_indices],
+                "observable_values": observable_values[sort_indices],
             }
         )
 
@@ -453,273 +372,6 @@ def load_panel_a_series(data_dir: Path) -> list[dict[str, object]]:
 
     panel_a_series.sort(key=lambda one_series: int(one_series["size"]))
     return panel_a_series
-
-
-def load_panel_a_replica_statistics(
-    one_size_dir: Path,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
-    """用途: 从单个尺寸目录的 replica csv 重构 disorder average 与标准误.
-
-    参数:
-    - one_size_dir: Path, 单个系统尺寸目录, 其中可包含多个
-      `sampling_results_seed*_ladder*_replica*.csv`.
-
-    返回:
-    - tuple[np.ndarray, np.ndarray, np.ndarray] | None:
-      - 若存在 replica 文件, 返回
-        (temperature_values, observable_mean_values, observable_standard_error_values).
-      - 若不存在 replica 文件, 返回 None.
-    """
-    replica_csv_paths = sorted(one_size_dir.glob(PANEL_A_REPLICA_SAMPLING_GLOB))
-    if len(replica_csv_paths) == 0:
-        return None
-
-    reference_temperature_values = None
-    replica_observable_rows = []
-
-    for replica_csv_path in replica_csv_paths:
-        replica_table = np.genfromtxt(
-            replica_csv_path,
-            names=True,
-            delimiter=",",
-            dtype=None,
-            encoding="utf-8-sig",
-        )
-        replica_table = np.atleast_1d(replica_table)
-        if replica_table.size == 0:
-            raise ValueError(f"replica sampling csv 为空: {replica_csv_path}")
-        if PANEL_A_OBSERVABLE_COLUMN not in replica_table.dtype.names:
-            raise KeyError(
-                f"replica sampling csv 缺少列 {PANEL_A_OBSERVABLE_COLUMN}: {replica_csv_path}"
-            )
-
-        temperature_values = np.asarray(replica_table["T"], dtype=float)
-        observable_values = np.asarray(
-            replica_table[PANEL_A_OBSERVABLE_COLUMN],
-            dtype=float,
-        )
-        sort_indices = np.argsort(temperature_values)
-        temperature_values = temperature_values[sort_indices]
-        observable_values = observable_values[sort_indices]
-
-        if reference_temperature_values is None:
-            reference_temperature_values = temperature_values
-        else:
-            if (
-                reference_temperature_values.shape != temperature_values.shape
-                or not np.allclose(
-                    reference_temperature_values,
-                    temperature_values,
-                    rtol=0.0,
-                    atol=PANEL_A_REPLICA_TEMPERATURE_ATOL,
-                )
-            ):
-                raise ValueError(
-                    "replica sampling csv 的温度网格不一致, 无法直接做 disorder average: "
-                    f"{replica_csv_path}"
-                )
-        replica_observable_rows.append(observable_values)
-
-    observable_matrix = np.asarray(replica_observable_rows, dtype=float)
-    observable_mean_values = np.mean(observable_matrix, axis=0)
-    if observable_matrix.shape[0] >= 2:
-        observable_standard_error_values = np.std(
-            observable_matrix,
-            axis=0,
-            ddof=1,
-        ) / np.sqrt(float(observable_matrix.shape[0]))
-    else:
-        observable_standard_error_values = np.zeros_like(
-            observable_mean_values,
-            dtype=float,
-        )
-
-    return (
-        np.asarray(reference_temperature_values, dtype=float),
-        np.asarray(observable_mean_values, dtype=float),
-        np.asarray(observable_standard_error_values, dtype=float),
-    )
-
-
-def build_panel_a_inset_data(
-    panel_a_series: list[dict[str, object]],
-    target_temperature: float,
-) -> dict[str, np.ndarray | float]:
-    """用途: 提取 a 图 inset 所需的 1/L 外推数据并执行线性拟合.
-
-    参数:
-    - panel_a_series: list[dict[str, object]], a 图多尺寸曲线数据列表.
-    - target_temperature: float, 目标温度 T. 程序对每个尺寸选择最接近该温度的数据点.
-
-    返回:
-    - dict[str, np.ndarray | float], 包含:
-      - inverse_size_values: np.ndarray, 横坐标 1/L 数组.
-      - order_values: np.ndarray, 纵坐标 spin glass order 数组.
-      - order_error_values: np.ndarray, 纵向误差棒所需的误差数组.
-      - nearest_temperature_values: np.ndarray, 每个尺寸实际选中的最近温度.
-      - fit_slope: float, 线性拟合斜率.
-      - fit_intercept: float, 线性拟合在 x=0 处的截距.
-      - fit_x_values: np.ndarray, 拟合直线绘图用横坐标数组.
-      - fit_y_values: np.ndarray, 拟合直线绘图用纵坐标数组.
-    """
-    if len(panel_a_series) < 2:
-        raise ValueError("a 图 inset 至少需要两个系统尺寸才能做线性拟合.")
-
-    inverse_size_values = []
-    order_values = []
-    order_error_values = []
-    nearest_temperature_values = []
-
-    for one_series in panel_a_series:
-        temperature_values = np.asarray(one_series["temperature_values"], dtype=float)
-        observable_values = np.asarray(one_series["observable_values"], dtype=float)
-        observable_error_values = np.asarray(
-            one_series.get(
-                "observable_error_values",
-                np.zeros_like(observable_values, dtype=float),
-            ),
-            dtype=float,
-        )
-        if temperature_values.size == 0 or observable_values.size == 0:
-            raise ValueError("a 图曲线数据为空, 无法构造 inset.")
-
-        nearest_index = int(np.argmin(np.abs(temperature_values - target_temperature)))
-        if "size" in one_series:
-            size_value = int(one_series["size"])
-        else:
-            label_text = str(one_series.get("label", ""))
-            matched = re.search(r"L\s*=\s*(\d+)", label_text)
-            if matched is None:
-                raise KeyError("a 图曲线数据缺少 size 字段, 且 label 中无法解析 L.")
-            size_value = int(matched.group(1))
-        inverse_size_values.append(1.0 / float(size_value))
-        order_values.append(float(observable_values[nearest_index]))
-        order_error_values.append(float(observable_error_values[nearest_index]))
-        nearest_temperature_values.append(float(temperature_values[nearest_index]))
-
-    inverse_size_array = np.asarray(inverse_size_values, dtype=float)
-    order_array = np.asarray(order_values, dtype=float)
-    order_error_array = np.asarray(order_error_values, dtype=float)
-    nearest_temperature_array = np.asarray(nearest_temperature_values, dtype=float)
-    sort_indices = np.argsort(inverse_size_array)
-    inverse_size_array = inverse_size_array[sort_indices]
-    order_array = order_array[sort_indices]
-    order_error_array = order_error_array[sort_indices]
-    nearest_temperature_array = nearest_temperature_array[sort_indices]
-
-    fit_slope, fit_intercept = np.polyfit(inverse_size_array, order_array, deg=1)
-    fit_x_max = float(np.max(inverse_size_array)) * 1.05
-    fit_x_values = np.array([0.0, fit_x_max], dtype=float)
-    fit_y_values = fit_slope * fit_x_values + fit_intercept
-    return {
-        "inverse_size_values": inverse_size_array,
-        "order_values": order_array,
-        "order_error_values": order_error_array,
-        "nearest_temperature_values": nearest_temperature_array,
-        "fit_slope": float(fit_slope),
-        "fit_intercept": float(fit_intercept),
-        "fit_x_values": fit_x_values,
-        "fit_y_values": fit_y_values,
-    }
-
-
-def draw_panel_a_inset(
-    parent_axis,
-    panel_a_series: list[dict[str, object]],
-) -> dict[str, object] | None:
-    """用途: 在 a 图中绘制 1/L 外推 inset.
-
-    参数:
-    - parent_axis: matplotlib.axes.Axes, a 图主坐标轴对象.
-    - panel_a_series: list[dict[str, object]], a 图多尺寸曲线数据列表.
-
-    返回:
-    - dict[str, object] | None:
-      - 若启用 inset, 返回包含 inset 轴对象, error bar 和拟合结果的字典.
-      - 若未启用 inset, 返回 None.
-    """
-    if not PANEL_A_INSET_ENABLED:
-        return None
-
-    inset_data = build_panel_a_inset_data(
-        panel_a_series,
-        target_temperature=PANEL_A_INSET_TARGET_TEMPERATURE,
-    )
-    inset_axis = parent_axis.inset_axes(PANEL_A_INSET_BOUNDS)
-    errorbar_container = None
-    if PANEL_A_INSET_ERRORBAR_ENABLED:
-        errorbar_container = inset_axis.errorbar(
-            inset_data["inverse_size_values"],
-            inset_data["order_values"],
-            yerr=inset_data["order_error_values"],
-            fmt="none",
-            ecolor=PANEL_A_INSET_ERRORBAR_COLOR,
-            elinewidth=PANEL_A_INSET_ERRORBAR_LINEWIDTH,
-            capsize=PANEL_A_INSET_ERRORBAR_CAPSIZE,
-            capthick=PANEL_A_INSET_ERRORBAR_CAPTHICK,
-            alpha=PANEL_A_INSET_ERRORBAR_ALPHA,
-            zorder=PANEL_A_INSET_ERRORBAR_ZORDER,
-        )
-    inset_axis.scatter(
-        inset_data["inverse_size_values"],
-        inset_data["order_values"],
-        s=PANEL_A_INSET_MARKER_SIZE,
-        c=PANEL_A_INSET_MARKER_COLOR,
-        zorder=3,
-    )
-    inset_axis.plot(
-        inset_data["fit_x_values"],
-        inset_data["fit_y_values"],
-        color=PANEL_A_INSET_FIT_COLOR,
-        linewidth=PANEL_A_INSET_FIT_LINEWIDTH,
-        zorder=2,
-    )
-    inset_axis.set_xlabel(PANEL_A_INSET_XLABEL, fontsize=PANEL_A_INSET_LABEL_FONTSIZE)
-    inset_axis.set_ylabel(PANEL_A_INSET_YLABEL, fontsize=PANEL_A_INSET_LABEL_FONTSIZE)
-    inset_axis.xaxis.set_label_coords(PANEL_A_INSET_XLABEL_X, PANEL_A_INSET_XLABEL_Y)
-    inset_axis.yaxis.set_label_coords(PANEL_A_INSET_YLABEL_X, PANEL_A_INSET_YLABEL_Y)
-    inset_axis.tick_params(labelsize=PANEL_A_INSET_TICK_FONTSIZE)
-
-    x_max = float(np.max(inset_data["fit_x_values"]))
-    y_min = min(
-        float(np.min(inset_data["order_values"])),
-        float(np.min(inset_data["fit_y_values"])),
-    )
-    y_max = max(
-        float(np.max(inset_data["order_values"])),
-        float(np.max(inset_data["fit_y_values"])),
-    )
-    y_padding = 0.08 * max(1e-6, y_max - y_min)
-    if PANEL_A_INSET_XLIM is not None:
-        inset_axis.set_xlim(PANEL_A_INSET_XLIM)
-    else:
-        inset_axis.set_xlim(0.0, x_max)
-    if PANEL_A_INSET_YLIM is not None:
-        inset_axis.set_ylim(PANEL_A_INSET_YLIM)
-    else:
-        inset_axis.set_ylim(y_min - y_padding, y_max + y_padding)
-    if PANEL_A_INSET_XTICKS is not None:
-        inset_axis.set_xticks(PANEL_A_INSET_XTICKS)
-    if PANEL_A_INSET_YTICKS is not None:
-        inset_axis.set_yticks(PANEL_A_INSET_YTICKS)
-    if PANEL_A_INSET_XMINOR_TICKS is not None:
-        inset_axis.set_xticks(PANEL_A_INSET_XMINOR_TICKS, minor=True)
-    if PANEL_A_INSET_YMINOR_TICKS is not None:
-        inset_axis.set_yticks(PANEL_A_INSET_YMINOR_TICKS, minor=True)
-    inset_axis.tick_params(
-        axis="both",
-        which="minor",
-        length=PANEL_A_INSET_MINOR_TICK_LENGTH,
-        width=PANEL_A_INSET_MINOR_TICK_WIDTH,
-    )
-    for one_spine in inset_axis.spines.values():
-        one_spine.set_linewidth(PANEL_A_INSET_BORDER_LINEWIDTH)
-
-    return {
-        "axis": inset_axis,
-        "errorbar_container": errorbar_container,
-        **inset_data,
-    }
 
 
 def trim_image_whitespace(panel_image: np.ndarray) -> np.ndarray:
@@ -811,19 +463,23 @@ def compute_figure_size(
 
 
 def compute_square_panel_positions() -> dict[str, list[float]]:
-    """用途: 计算当前 a/b 两个子图在 figure 中的最终位置.
+    """用途: 计算当前四个子图在 figure 中的最终位置.
 
     参数:
     - 无.
 
     返回:
-    - dict[str, list[float]], 两个子图的 [x0, y0, width, height] 位置字典.
+    - dict[str, list[float]], 四个子图的 [x0, y0, width, height] 位置字典.
     """
     panel_side_inch = float(BASE_SQUARE_PANEL_SIDE_INCH)
     panel_a_width_inch = max(1e-6, float(PANEL_A_WIDTH_RATIO) * panel_side_inch)
     panel_a_height_inch = max(1e-6, float(PANEL_A_HEIGHT_RATIO) * panel_side_inch)
     panel_b_side_inch = max(1e-6, float(PANEL_B_SIDE_RATIO) * panel_side_inch)
-    column_gap_inch = float(TOP_PANEL_GAP_WIDTH_RATIO) * panel_side_inch
+    column_gap_inch = (
+        max(float(TOP_PANEL_GAP_WIDTH_RATIO), float(BOTTOM_PANEL_GAP_WIDTH_RATIO))
+        * panel_side_inch
+    )
+    row_gap_inch = float(PANEL_ROW_GAP_RATIO) * panel_side_inch
     if PANEL_DOMAIN_SHOW_COLORBAR:
         colorbar_pad_inch = float(PANEL_DOMAIN_COLORBAR_PAD_RATIO) * panel_side_inch
         colorbar_width_inch = float(PANEL_DOMAIN_COLORBAR_WIDTH_RATIO) * panel_side_inch
@@ -835,69 +491,102 @@ def compute_square_panel_positions() -> dict[str, list[float]]:
     bottom_margin_inch = float(FIGURE_MAX_HEIGHT) * float(FIGURE_BOTTOM_MARGIN)
     top_margin_inch = float(FIGURE_MAX_HEIGHT) * float(1.0 - FIGURE_TOP_MARGIN)
 
-    content_height_inch = max(panel_a_height_inch, panel_b_side_inch)
+    left_column_width_inch = max(panel_a_width_inch, panel_b_side_inch)
+    left_column_height_inch = panel_b_side_inch + row_gap_inch + panel_a_height_inch
+    right_column_width_inch = panel_side_inch
+    right_column_height_inch = 2.0 * panel_side_inch + row_gap_inch
     content_width_inch = (
-        panel_a_width_inch
+        left_column_width_inch
         + column_gap_inch
-        + panel_b_side_inch
+        + right_column_width_inch
         + colorbar_pad_inch
         + colorbar_width_inch
     )
+    content_height_inch = max(left_column_height_inch, right_column_height_inch)
     figure_width_inch = left_margin_inch + content_width_inch + right_margin_inch
     figure_height_inch = bottom_margin_inch + content_height_inch + top_margin_inch
 
-    panel_a_x_inch = left_margin_inch
-    panel_b_x_inch = panel_a_x_inch + panel_a_width_inch + column_gap_inch
-    panel_a_y_inch = bottom_margin_inch + 0.5 * (
-        content_height_inch - panel_a_height_inch
+    left_column_center_x_inch = left_margin_inch + 0.5 * left_column_width_inch
+    left_column_bottom_inch = bottom_margin_inch + 0.5 * (
+        content_height_inch - left_column_height_inch
     )
-    panel_b_y_inch = bottom_margin_inch + 0.5 * (
-        content_height_inch - panel_b_side_inch
+    right_column_left_inch = left_margin_inch + left_column_width_inch + column_gap_inch
+    right_column_bottom_inch = bottom_margin_inch + 0.5 * (
+        content_height_inch - right_column_height_inch
     )
-    colorbar_x_inch = panel_b_x_inch + panel_b_side_inch + colorbar_pad_inch
+    colorbar_x_inch = (
+        right_column_left_inch + right_column_width_inch + colorbar_pad_inch
+    )
+
+    panel_a_x = left_column_center_x_inch - 0.5 * panel_a_width_inch
+    panel_b_x = left_column_center_x_inch - 0.5 * panel_b_side_inch
+    panel_b_y = left_column_bottom_inch
+    panel_a_y = panel_b_y + panel_b_side_inch + row_gap_inch
+    panel_c_y = right_column_bottom_inch + panel_side_inch + row_gap_inch
     layout_dict = {
         "figure_size": [figure_width_inch, figure_height_inch],
         "panel_a": [
-            panel_a_x_inch / figure_width_inch,
-            panel_a_y_inch / figure_height_inch,
+            panel_a_x / figure_width_inch,
+            panel_a_y / figure_height_inch,
             panel_a_width_inch / figure_width_inch,
             panel_a_height_inch / figure_height_inch,
         ],
         "panel_b": [
-            panel_b_x_inch / figure_width_inch,
-            panel_b_y_inch / figure_height_inch,
+            panel_b_x / figure_width_inch,
+            panel_b_y / figure_height_inch,
             panel_b_side_inch / figure_width_inch,
             panel_b_side_inch / figure_height_inch,
+        ],
+        "panel_c": [
+            right_column_left_inch / figure_width_inch,
+            panel_c_y / figure_height_inch,
+            panel_side_inch / figure_width_inch,
+            panel_side_inch / figure_height_inch,
+        ],
+        "panel_d": [
+            right_column_left_inch / figure_width_inch,
+            right_column_bottom_inch / figure_height_inch,
+            panel_side_inch / figure_width_inch,
+            panel_side_inch / figure_height_inch,
         ],
     }
     if PANEL_DOMAIN_SHOW_COLORBAR:
         layout_dict["colorbar"] = [
             colorbar_x_inch / figure_width_inch,
-            panel_b_y_inch / figure_height_inch,
+            right_column_bottom_inch / figure_height_inch,
             colorbar_width_inch / figure_width_inch,
-            panel_b_side_inch / figure_height_inch,
+            right_column_height_inch / figure_height_inch,
         ]
     return layout_dict
 
 
-def compute_panel_b_arrow_spacing_scale(
+def compute_panel_arrow_spacing_scale(
     square_panel_positions: dict[str, list[float]],
+    panel_key: str,
     panel_shape: tuple[int, int],
+    reference_panel_key: str,
+    reference_panel_shape: tuple[int, int],
 ) -> float:
-    """用途: 按相邻 site 的显示间距计算 b 图箭头尺寸缩放比例.
+    """用途: 按相邻 site 的显示间距计算箭头尺寸缩放比例.
 
     参数:
     - square_panel_positions: dict[str, list[float]], compute_square_panel_positions() 返回的布局字典.
-    - panel_shape: tuple[int, int], b 图矩阵形状, 格式为 (Lx, Ly).
+    - panel_key: str, 待缩放子图在布局字典中的 key, 例如 "panel_b".
+    - panel_shape: tuple[int, int], 待缩放子图的矩阵形状, 格式为 (Lx, Ly).
+    - reference_panel_key: str, 参考子图在布局字典中的 key, 例如 "panel_d".
+    - reference_panel_shape: tuple[int, int], 参考子图的矩阵形状, 格式为 (Lx, Ly).
 
     返回:
-    - float, b 图相邻 site 显示间距相对于参考 12x12 方图的比值.
+    - float, 两张图相邻 site 显示间距的比值.
     """
     figure_width_inch = float(square_panel_positions["figure_size"][0])
-    panel_width_inch = float(square_panel_positions["panel_b"][2]) * figure_width_inch
+    panel_width_inch = float(square_panel_positions[panel_key][2]) * figure_width_inch
+    reference_panel_width_inch = (
+        float(square_panel_positions[reference_panel_key][2]) * figure_width_inch
+    )
     panel_site_spacing_inch = panel_width_inch / (float(panel_shape[0]) + 0.2)
-    reference_panel_site_spacing_inch = float(BASE_SQUARE_PANEL_SIDE_INCH) / (
-        float(PANEL_C_LATTICE_SIZE) + 0.2
+    reference_panel_site_spacing_inch = reference_panel_width_inch / (
+        float(reference_panel_shape[0]) + 0.2
     )
     return max(1e-6, panel_site_spacing_inch / reference_panel_site_spacing_inch)
 
@@ -912,27 +601,16 @@ def add_panel_label(axis, panel_label: str) -> None:
     返回:
     - None.
     """
-    if panel_label == "(a)":
-        label_x = PANEL_A_LABEL_X
-        label_y = PANEL_A_LABEL_Y
-    elif panel_label == "(b)":
-        label_x = PANEL_B_LABEL_X
-        label_y = PANEL_B_LABEL_Y
-    else:
-        label_x = PANEL_LABEL_DEFAULT_X
-        label_y = PANEL_LABEL_DEFAULT_Y
-
     axis.text(
-        label_x,
-        label_y,
+        PANEL_LABEL_X,
+        PANEL_LABEL_Y,
         panel_label,
         transform=axis.transAxes,
-        ha=PANEL_LABEL_HORIZONTAL_ALIGNMENT,
-        va=PANEL_LABEL_VERTICAL_ALIGNMENT,
+        ha="left",
+        va="top",
         fontsize=PANEL_LABEL_FONTSIZE,
         fontweight="normal",
         color=PANEL_LABEL_COLOR,
-        clip_on=False,
     )
 
 
@@ -940,7 +618,7 @@ def draw_panel_a_series(
     axis,
     panel_a_series: list[dict[str, object]],
     panel_label: str,
-) -> dict[str, object] | None:
+) -> None:
     """用途: 在指定坐标轴中绘制 a 图的 sg_q2_0_mean vs T 多尺寸折线图.
 
     参数:
@@ -949,17 +627,15 @@ def draw_panel_a_series(
     - panel_label: str, 子图编号字符串, 例如 '(a)'.
 
     返回:
-    - dict[str, object] | None:
-      - 若启用 inset, 返回 inset 对应的 artist 与拟合结果字典.
-      - 若未启用 inset, 返回 None.
+    - None.
     """
     axis.set_aspect("auto")
     axis.set_title(PANEL_A_TITLE, fontsize=PANEL_A_TITLE_FONTSIZE, pad=6.0)
     axis.set_xlabel(PANEL_A_XLABEL, fontsize=PANEL_A_LABEL_FONTSIZE)
     axis.xaxis.set_label_coords(PANEL_A_XLABEL_X, PANEL_A_XLABEL_Y)
     axis.set_ylabel(PANEL_A_YLABEL, fontsize=PANEL_A_LABEL_FONTSIZE)
-    axis.yaxis.set_label_coords(PANEL_A_YLABEL_X, PANEL_A_YLABEL_Y)
     axis.tick_params(labelsize=PANEL_A_TICK_FONTSIZE)
+    axis.grid(alpha=PANEL_A_GRID_ALPHA, linewidth=PANEL_A_GRID_LINEWIDTH)
 
     for one_series in panel_a_series:
         axis.plot(
@@ -990,14 +666,8 @@ def draw_panel_a_series(
         length=PANEL_A_MINOR_TICK_LENGTH,
         width=PANEL_A_MINOR_TICK_WIDTH,
     )
-    axis.legend(
-        loc=PANEL_A_LEGEND_LOC,
-        bbox_to_anchor=PANEL_A_LEGEND_BBOX_TO_ANCHOR,
-        frameon=True,
-        fontsize=PANEL_A_LEGEND_FONTSIZE,
-    )
+    axis.legend(loc="upper right", frameon=True, fontsize=PANEL_A_LEGEND_FONTSIZE)
     add_panel_label(axis, panel_label)
-    return draw_panel_a_inset(axis, panel_a_series)
 
 
 def hide_lattice_ticks(axis) -> None:
@@ -1023,66 +693,73 @@ def hide_lattice_ticks(axis) -> None:
 def build_picture4_figure(
     top_panel_series,
     panel_b_sz_matrix,
+    panel_c_sz_matrix,
+    panel_d_sz_matrix,
 ):
-    """用途: 构建仅含 a/b 两图的 picture4 figure.
+    """用途: 构建 picture4 的 figure 与四个子图坐标轴.
 
     参数:
-    - top_panel_series: list[dict[str, object]], 编号 (a) 的多尺寸曲线数据.
-    - panel_b_sz_matrix: np.ndarray, 编号 (b) 的 <Sz> 矩阵, 显示在右侧.
+    - top_panel_series: list[dict[str, object]], 第一行子图, 即编号 (a) 的多尺寸曲线数据.
+    - panel_b_sz_matrix: np.ndarray, 编号 (b) 的 <Sz> 矩阵, 显示在左下角.
+    - panel_c_sz_matrix: np.ndarray, 编号 (c) 的 <Sz> 矩阵, 显示在右上角.
+    - panel_d_sz_matrix: np.ndarray, 编号 (d) 的 <Sz> 矩阵, 显示在右下角.
 
     返回:
     - tuple[matplotlib.figure.Figure, list[matplotlib.axes.Axes], dict[str, object]]
       - figure: figure 对象.
-      - panel_axes: [axis_panel_a, axis_panel_b].
-      - artist_dict: 关键 artist 字典, 包含 b 图与共享 norm.
+      - panel_axes: [axis_top_left, axis_top_right, axis_bottom_left, axis_bottom_right].
+      - artist_dict: 关键 artist 字典, 包含三张箭头图和共享 norm.
     """
     configure_aps_style()
 
+    row_height_ratios = compute_row_height_ratios(
+        top_panel_series,
+        [
+            panel_b_sz_matrix,
+            panel_c_sz_matrix,
+            panel_d_sz_matrix,
+        ],
+    )
     square_panel_positions = compute_square_panel_positions()
-    panel_b_arrow_size_scale = compute_panel_b_arrow_spacing_scale(
+    panel_b_arrow_size_scale = compute_panel_arrow_spacing_scale(
         square_panel_positions=square_panel_positions,
+        panel_key="panel_b",
         panel_shape=panel_b_sz_matrix.shape,
+        reference_panel_key="panel_d",
+        reference_panel_shape=panel_d_sz_matrix.shape,
     )
     figure_size = tuple(square_panel_positions["figure_size"])
-    shared_norm = build_shared_domain_norm([panel_b_sz_matrix])
-    panel_b_colormap = build_diverging_colormap(
-        negative_color=PANEL_DOMAIN_NEGATIVE_COLOR,
-        positive_color=PANEL_DOMAIN_POSITIVE_COLOR,
-        neutral_color=PANEL_DOMAIN_ZERO_COLOR,
-        colormap_name=PANEL_DOMAIN_COLORMAP_NAME,
+    shared_norm = build_shared_domain_norm(
+        [
+            panel_b_sz_matrix,
+            panel_c_sz_matrix,
+            panel_d_sz_matrix,
+        ]
     )
 
     figure = plt.figure(figsize=figure_size, constrained_layout=False)
+    outer_grid_spec = figure.add_gridspec(
+        nrows=2,
+        ncols=1,
+        height_ratios=row_height_ratios,
+        hspace=GRID_HSPACE,
+    )
     figure.subplots_adjust(
         left=FIGURE_LEFT_MARGIN,
         right=FIGURE_RIGHT_MARGIN,
         bottom=FIGURE_BOTTOM_MARGIN,
         top=FIGURE_TOP_MARGIN,
     )
-    axis_panel_a = figure.add_subplot(1, 2, 1)
-    axis_panel_b = figure.add_subplot(1, 2, 2)
+    axis_panel_a = figure.add_subplot(outer_grid_spec[0, 0])
+    axis_panel_b = figure.add_subplot(outer_grid_spec[1, 0])
+    axis_panel_c = figure.add_subplot(outer_grid_spec[0, 0])
+    axis_panel_d = figure.add_subplot(outer_grid_spec[1, 0])
 
-    panel_a_inset_artist = draw_panel_a_series(axis_panel_a, top_panel_series, "(a)")
+    draw_panel_a_series(axis_panel_a, top_panel_series, "(a)")
     panel_b_artist = draw_domain_sz_panel(
         axis_panel_b,
         panel_b_sz_matrix,
         norm=shared_norm,
-        colormap=panel_b_colormap,
-        site_marker_size=PANEL_DOMAIN_SITE_MARKER_SIZE,
-        site_marker_face_color=PANEL_DOMAIN_SITE_MARKER_FACE_COLOR,
-        site_marker_edge_color=PANEL_DOMAIN_SITE_MARKER_EDGE_COLOR,
-        site_marker_alpha=PANEL_DOMAIN_SITE_MARKER_ALPHA,
-        site_marker_linewidth=PANEL_DOMAIN_SITE_MARKER_LINEWIDTH,
-        defect_marker_size=PANEL_DOMAIN_DEFECT_MARKER_SIZE,
-        defect_marker_face_color=PANEL_DOMAIN_DEFECT_MARKER_FACE_COLOR,
-        defect_marker_edge_color=PANEL_DOMAIN_DEFECT_MARKER_EDGE_COLOR,
-        defect_marker_alpha=PANEL_DOMAIN_DEFECT_MARKER_ALPHA,
-        defect_marker_linewidth=PANEL_DOMAIN_DEFECT_MARKER_LINEWIDTH,
-        grid_color=PANEL_DOMAIN_GRID_COLOR,
-        grid_alpha=PANEL_DOMAIN_GRID_ALPHA,
-        grid_linewidth=PANEL_DOMAIN_GRID_LINEWIDTH,
-        show_periodic_boundary_bonds=PANEL_DOMAIN_SHOW_PERIODIC_BOUNDARY_BONDS,
-        periodic_boundary_stub_length=PANEL_DOMAIN_PERIODIC_BOUNDARY_STUB_LENGTH,
         quiver_scale=PANEL_DOMAIN_ARROW_SCALE
         / panel_b_arrow_size_scale
         * PANEL_B_ARROW_LENGTH_SHRINK_FACTOR,
@@ -1095,19 +772,50 @@ def build_picture4_figure(
         quiver_headaxislength=PANEL_DOMAIN_ARROW_HEADAXISLENGTH
         * panel_b_arrow_size_scale,
         quiver_minlength=PANEL_DOMAIN_ARROW_MINLENGTH * panel_b_arrow_size_scale,
-        colormap_name=PANEL_DOMAIN_COLORMAP_NAME,
     )
-    if hasattr(panel_b_artist["quiver"], "set_zorder"):
-        panel_b_artist["quiver"].set_zorder(PANEL_DOMAIN_ARROW_ZORDER)
+    panel_c_artist = draw_domain_sz_panel(
+        axis_panel_c,
+        panel_c_sz_matrix,
+        norm=shared_norm,
+        quiver_scale=PANEL_DOMAIN_ARROW_SCALE,
+        quiver_width=PANEL_DOMAIN_ARROW_WIDTH,
+        quiver_alpha=PANEL_DOMAIN_ARROW_ALPHA,
+        quiver_angles=PANEL_DOMAIN_ARROW_ANGLES,
+        quiver_scale_units=PANEL_DOMAIN_ARROW_SCALE_UNITS,
+        quiver_headwidth=PANEL_DOMAIN_ARROW_HEADWIDTH,
+        quiver_headlength=PANEL_DOMAIN_ARROW_HEADLENGTH,
+        quiver_headaxislength=PANEL_DOMAIN_ARROW_HEADAXISLENGTH,
+        quiver_minlength=PANEL_DOMAIN_ARROW_MINLENGTH,
+    )
+    panel_d_artist = draw_domain_sz_panel(
+        axis_panel_d,
+        panel_d_sz_matrix,
+        norm=shared_norm,
+        quiver_scale=PANEL_DOMAIN_ARROW_SCALE,
+        quiver_width=PANEL_DOMAIN_ARROW_WIDTH,
+        quiver_alpha=PANEL_DOMAIN_ARROW_ALPHA,
+        quiver_angles=PANEL_DOMAIN_ARROW_ANGLES,
+        quiver_scale_units=PANEL_DOMAIN_ARROW_SCALE_UNITS,
+        quiver_headwidth=PANEL_DOMAIN_ARROW_HEADWIDTH,
+        quiver_headlength=PANEL_DOMAIN_ARROW_HEADLENGTH,
+        quiver_headaxislength=PANEL_DOMAIN_ARROW_HEADAXISLENGTH,
+        quiver_minlength=PANEL_DOMAIN_ARROW_MINLENGTH,
+    )
     hide_lattice_ticks(axis_panel_b)
+    hide_lattice_ticks(axis_panel_c)
+    hide_lattice_ticks(axis_panel_d)
     add_panel_label(axis_panel_b, "(b)")
+    add_panel_label(axis_panel_c, "(c)")
+    add_panel_label(axis_panel_d, "(d)")
     axis_panel_a.set_position(square_panel_positions["panel_a"])
     axis_panel_b.set_position(square_panel_positions["panel_b"])
+    axis_panel_c.set_position(square_panel_positions["panel_c"])
+    axis_panel_d.set_position(square_panel_positions["panel_d"])
     shared_colorbar = None
     if PANEL_DOMAIN_SHOW_COLORBAR:
         colorbar_axis = figure.add_axes(square_panel_positions["colorbar"])
         shared_colorbar = figure.colorbar(
-            panel_b_artist["quiver"],
+            panel_d_artist["quiver"],
             cax=colorbar_axis,
         )
         shared_colorbar.set_label(
@@ -1116,14 +824,15 @@ def build_picture4_figure(
         )
         shared_colorbar.ax.tick_params(labelsize=PANEL_DOMAIN_COLORBAR_TICK_FONTSIZE)
     artist_dict = {
-        "panel_a_inset": panel_a_inset_artist,
         "panel_b": panel_b_artist,
+        "panel_c": panel_c_artist,
+        "panel_d": panel_d_artist,
         "colorbar": shared_colorbar,
         "shared_norm": shared_norm,
     }
     return (
         figure,
-        [axis_panel_a, axis_panel_b],
+        [axis_panel_a, axis_panel_b, axis_panel_c, axis_panel_d],
         artist_dict,
     )
 
@@ -1131,12 +840,16 @@ def build_picture4_figure(
 def draw_picture4(
     top_panel_series,
     panel_b_sz_matrix,
+    panel_c_sz_matrix,
+    panel_d_sz_matrix,
 ) -> None:
-    """用途: 将 a/b 两个子图排版为 picture4 并保存.
+    """用途: 将三个子图排版为 picture4 并保存.
 
     参数:
-    - top_panel_series: list[dict[str, object]], 编号 (a) 的多尺寸曲线数据.
+    - top_panel_series: list[dict[str, object]], 第一行子图, 即编号 (a) 的多尺寸曲线数据.
     - panel_b_sz_matrix: np.ndarray, 编号 (b) 的 <Sz> 矩阵.
+    - panel_c_sz_matrix: np.ndarray, 编号 (c) 的 <Sz> 矩阵.
+    - panel_d_sz_matrix: np.ndarray, 编号 (d) 的 <Sz> 矩阵.
 
     返回:
     - None.
@@ -1146,6 +859,8 @@ def draw_picture4(
     figure, _, _ = build_picture4_figure(
         top_panel_series=top_panel_series,
         panel_b_sz_matrix=panel_b_sz_matrix,
+        panel_c_sz_matrix=panel_c_sz_matrix,
+        panel_d_sz_matrix=panel_d_sz_matrix,
     )
     figure.savefig(OUTPUT_PNG_PATH, dpi=260, bbox_inches="tight")
     figure.savefig(OUTPUT_PDF_PATH, dpi=260, bbox_inches="tight")
@@ -1166,13 +881,21 @@ def main() -> None:
         PANEL_B_SOURCE_DIR,
         PANEL_B_LATTICE_SIZE,
     )
+    panel_c_sz_matrix = load_panel_c_sz_matrix(PANEL_B_DMRG_TXT_PATH)
+    panel_d_target_dir = resolve_panel_c_target_dir(PANEL_C_SOURCE_DIR)
+    panel_d_sz_matrix = load_panel_d_sz_matrix(panel_d_target_dir, PANEL_C_LATTICE_SIZE)
     draw_picture4(
         top_panel_series=top_panel_series,
         panel_b_sz_matrix=panel_b_sz_matrix,
+        panel_c_sz_matrix=panel_c_sz_matrix,
+        panel_d_sz_matrix=panel_d_sz_matrix,
     )
 
     print(f"[OK] panel_a data: {PANEL_A_DATA_DIR}")
     print(f"[OK] panel_b source: {PANEL_B_SOURCE_DIR}")
+    print(f"[OK] panel_c dmrg txt: {PANEL_B_DMRG_TXT_PATH}")
+    print(f"[OK] panel_d source: {PANEL_C_SOURCE_DIR}")
+    print(f"[OK] panel_d target: {panel_d_target_dir}")
     print(f"[OK] output png: {OUTPUT_PNG_PATH}")
     print(f"[OK] output pdf: {OUTPUT_PDF_PATH}")
 

@@ -248,6 +248,52 @@ def apply_pi_ticks(axis_obj, max_k: float, show_y_ticklabels: bool) -> None:
         axis_obj.set_yticklabels(tick_labels)
 
 
+def convert_s_pi_pi_to_sqrt_observable(
+    s_pi_pi_mean_values: np.ndarray,
+    s_pi_pi_se_values: np.ndarray | None = None,
+) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
+    """
+    用途: 将 S(pi,pi) 口径转换为 sqrt(S(pi,pi)) 主图口径。
+
+    参数:
+    - s_pi_pi_mean_values: np.ndarray, S(pi,pi) 的均值数组。
+    - s_pi_pi_se_values: np.ndarray | None, S(pi,pi) 的标准误差数组; 若为 None, 仅返回均值变换结果。
+
+    返回:
+    - np.ndarray | tuple[np.ndarray, np.ndarray]
+      - 当 s_pi_pi_se_values 为 None 时, 返回 sqrt(S(pi,pi)) 数组。
+      - 否则返回 (sqrt_mean_array, sqrt_se_array)。
+
+    公式:
+    - 主图纵轴定义为 `y = sqrt(S(pi,pi))`。
+    - 若已知 `S(pi,pi)` 的标准误差 `sigma_S`, 则使用一阶误差传播:
+      `sigma_y ~= sigma_S / (2 * sqrt(S(pi,pi)))`。
+
+    说明:
+    - 若 S(pi,pi) 因数值噪声出现微小负值, 会先截断到 0 再开方, 避免出现 NaN。
+    """
+    s_pi_pi_mean_array = np.asarray(s_pi_pi_mean_values, dtype=float)
+    clipped_s_pi_pi_mean_array = np.clip(s_pi_pi_mean_array, a_min=0.0, a_max=None)
+    sqrt_mean_array = np.sqrt(clipped_s_pi_pi_mean_array)
+
+    if s_pi_pi_se_values is None:
+        return sqrt_mean_array
+
+    s_pi_pi_se_array = np.asarray(s_pi_pi_se_values, dtype=float)
+    sqrt_se_array = np.full_like(sqrt_mean_array, np.nan, dtype=float)
+    positive_mask = clipped_s_pi_pi_mean_array > 0.0
+    sqrt_se_array[positive_mask] = (
+        s_pi_pi_se_array[positive_mask] / (2.0 * sqrt_mean_array[positive_mask])
+    )
+    zero_with_zero_error_mask = (
+        np.isclose(clipped_s_pi_pi_mean_array, 0.0)
+        & np.isfinite(s_pi_pi_se_array)
+        & np.isclose(s_pi_pi_se_array, 0.0)
+    )
+    sqrt_se_array[zero_with_zero_error_mask] = 0.0
+    return sqrt_mean_array, sqrt_se_array
+
+
 print(f"python = {sys.executable}")
 print(f"cwd    = {Path.cwd().resolve()}")
 
@@ -277,11 +323,15 @@ benchmark_vmc_12_obc_electron_csv_path = (
 benchmark_dmrg_12_obc_path = (
     project_root / "results/benchmark_domain/DMRG.txt"
 ).resolve()
+benchmark_dmrg_12_obc_hole_s_pi_pi_path = (
+    project_root / "results/benchmark_domain/DMRG/data/Spipi.txt"
+).resolve()
 benchmark_dmrg_12_obc_electron_path = (
     project_root / "results/benchmark_domain/DMRG_electron.txt"
 ).resolve()
 benchmark_dmrg_lattice_size = 12
 benchmark_dmrg_mz_col = "mz"
+benchmark_dmrg_hole_s_pi_pi_col = "Spipi"
 hole_series_inputs = []
 electron_series_inputs = []
 # 四张下排S(q)配置: 依次对应左到右子图
@@ -348,7 +398,7 @@ output_png = project_root / "results/picture2.png"
 # 数据列配置
 doping_col = "doping"
 ndefect_col = "Ndefect"
-mz_col = "staggered_mz"
+main_observable_col = "S_pi_pi"
 summary_name = "summary_min_sector_staggered_mz_S_pi_pi.csv"
 # S(q)计算参数
 sq_chunk_size = 32
@@ -507,9 +557,18 @@ if len(hole_series_inputs) + len(electron_series_inputs) > 0:
         electron_series_inputs=electron_series_inputs,
         doping_col=doping_col,
         ndefect_col=ndefect_col,
-        staggered_mz_col=mz_col,
+        staggered_mz_col=main_observable_col,
         summary_name=summary_name,
     )
+    all_series = [
+        (
+            series_label,
+            doping_type,
+            x_values,
+            convert_s_pi_pi_to_sqrt_observable(y_values),
+        )
+        for series_label, doping_type, x_values, y_values in all_series
+    ]
 else:
     all_series = []
 # 接入 L=20 defect_average 数据(替换原 auto_submit), 并在主图中绘制 error bar
@@ -529,19 +588,25 @@ l20_defect_average_phase = np.asarray(l20_defect_average_array["phase"]).astype(
 l20_defect_average_doping = np.asarray(
     l20_defect_average_array["signed_doping"], dtype=float
 )
-l20_defect_average_mz = np.asarray(
-    l20_defect_average_array["abs_staggered_mz_mean"], dtype=float
+l20_defect_average_s_pi_pi_mean = np.asarray(
+    l20_defect_average_array["S_pi_pi_mean"], dtype=float
 )
-l20_defect_average_mz_se = np.asarray(
-    l20_defect_average_array["abs_staggered_mz_se"], dtype=float
+l20_defect_average_s_pi_pi_se = np.asarray(
+    l20_defect_average_array["S_pi_pi_se"], dtype=float
+)
+l20_defect_average_observable, l20_defect_average_observable_se = (
+    convert_s_pi_pi_to_sqrt_observable(
+        l20_defect_average_s_pi_pi_mean,
+        l20_defect_average_s_pi_pi_se,
+    )
 )
 
 
 def build_l20_defect_average_series(phase_name):
     phase_mask = l20_defect_average_phase == phase_name
     phase_x = l20_defect_average_doping[phase_mask]
-    phase_y = l20_defect_average_mz[phase_mask]
-    phase_yerr = l20_defect_average_mz_se[phase_mask]
+    phase_y = l20_defect_average_observable[phase_mask]
+    phase_yerr = l20_defect_average_observable_se[phase_mask]
     valid_mask = np.isfinite(phase_x) & np.isfinite(phase_y)
     phase_x = phase_x[valid_mask]
     phase_y = phase_y[valid_mask]
@@ -584,9 +649,12 @@ benchmark_vmc_12_obc_hole_x, benchmark_vmc_12_obc_hole_y = load_one_series(
     lattice_size=None,
     doping_col=doping_col,
     ndefect_col=ndefect_col,
-    staggered_mz_col=mz_col,
+    staggered_mz_col=main_observable_col,
     doping_type="hole",
     summary_name=summary_name,
+)
+benchmark_vmc_12_obc_hole_y = convert_s_pi_pi_to_sqrt_observable(
+    benchmark_vmc_12_obc_hole_y
 )
 all_series.append(
     ("VMC 12 OBC", "hole", benchmark_vmc_12_obc_hole_x, benchmark_vmc_12_obc_hole_y)
@@ -597,9 +665,12 @@ benchmark_vmc_12_obc_electron_x, benchmark_vmc_12_obc_electron_y = load_one_seri
     lattice_size=None,
     doping_col=doping_col,
     ndefect_col=ndefect_col,
-    staggered_mz_col=mz_col,
+    staggered_mz_col=main_observable_col,
     doping_type="electron",
     summary_name=summary_name,
+)
+benchmark_vmc_12_obc_electron_y = convert_s_pi_pi_to_sqrt_observable(
+    benchmark_vmc_12_obc_electron_y
 )
 all_series.append(
     (
@@ -611,18 +682,22 @@ all_series.append(
 )
 # DMRG benchmark 为tab分隔文本, 这里分别解析 hole 与 electron 两半区数据
 benchmark_dmrg_hole_array = np.genfromtxt(
-    Path(benchmark_dmrg_12_obc_path).resolve(),
+    Path(benchmark_dmrg_12_obc_hole_s_pi_pi_path).resolve(),
     names=True,
     delimiter="	",
     dtype=float,
     encoding="utf-8-sig",
 )
 benchmark_dmrg_hole_ndefect = np.atleast_1d(benchmark_dmrg_hole_array[ndefect_col])
-benchmark_dmrg_hole_mz = np.atleast_1d(benchmark_dmrg_hole_array[benchmark_dmrg_mz_col])
+benchmark_dmrg_hole_s_pi_pi = np.atleast_1d(
+    benchmark_dmrg_hole_array[benchmark_dmrg_hole_s_pi_pi_col]
+)
 benchmark_dmrg_12_obc_hole_x = np.abs(benchmark_dmrg_hole_ndefect) / float(
     int(benchmark_dmrg_lattice_size) ** 2
 )
-benchmark_dmrg_12_obc_hole_y = np.abs(benchmark_dmrg_hole_mz)
+benchmark_dmrg_12_obc_hole_y = convert_s_pi_pi_to_sqrt_observable(
+    benchmark_dmrg_hole_s_pi_pi
+)
 benchmark_dmrg_hole_sort_index = np.argsort(benchmark_dmrg_12_obc_hole_x)
 benchmark_dmrg_12_obc_hole_x = benchmark_dmrg_12_obc_hole_x[
     benchmark_dmrg_hole_sort_index
@@ -1091,7 +1166,7 @@ axis_main.tick_params(
 )
 for one_spine in axis_main.spines.values():
     one_spine.set_linewidth(main_spine_linewidth)
-axis_main.set_ylabel(r"$M_z$", fontsize=main_label_fontsize)
+axis_main.set_ylabel(r"$\sqrt{S(\pi,\pi)}$", fontsize=main_label_fontsize)
 axis_main.set_xlabel(
     "doping $\delta$($+$:hole, $-$:electron)",
     fontsize=main_label_fontsize,

@@ -142,14 +142,6 @@ function parse_commandline()
         help = "Gutzwiller projector parameter"
         arg_type = Float64
         default = 1.0
-        "--vj1"
-        help = "Jastrow projector parameter on nearest-neighbor bonds"
-        arg_type = Float64
-        default = 0.0
-        "--vj2"
-        help = "Jastrow projector parameter on next-nearest-neighbor bonds"
-        arg_type = Float64
-        default = 0.0
         "--bf_epsilon"
         help = "Eq.(4) backflow epsilon parameter"
         arg_type = Float64
@@ -166,6 +158,249 @@ end
 # ==============================================================================
 # 3. 辅助函数
 # ==============================================================================
+
+"""
+用途: 枚举全位移 Jastrow 参数的合法最短镜像位移标签。
+
+参数:
+- `lx::Int`: 晶格在 `x` 方向的长度。
+- `ly::Int`: 晶格在 `y` 方向的长度。
+
+返回:
+- `Vector{Tuple{Int, Int}}`: 按稳定顺序排列的 `(dx, dy)` 标签列表, 其中
+  `0 <= dx <= floor(lx / 2)`, `0 <= dy <= floor(ly / 2)`, 且排除 `(0, 0)`。
+
+说明:
+- 为了去除 `g` 与全位移 Jastrow 参数共同构成的一维冗余自由度, 这里统一移除
+  稳定排序后的最后一个位移标签。
+"""
+function build_jastrow_displacement_labels(
+    lx::Int,
+    ly::Int,
+)::Vector{Tuple{Int,Int}}
+    if lx <= 0 || ly <= 0
+        error("lx and ly must be positive, got lx=$(lx), ly=$(ly).")
+    end
+
+    displacement_labels = Tuple{Int,Int}[]
+    max_dx = fld(lx, 2)
+    max_dy = fld(ly, 2)
+    for dx in 0:max_dx
+        for dy in 0:max_dy
+            if dx == 0 && dy == 0
+                continue
+            end
+            push!(displacement_labels, (dx, dy))
+        end
+    end
+    if !isempty(displacement_labels)
+        pop!(displacement_labels)
+    end
+    return displacement_labels
+end
+
+"""
+用途: 根据 Jastrow 位移标签构造参数名。
+
+参数:
+- `dx::Int`: 最短镜像后的 `x` 方向绝对位移。
+- `dy::Int`: 最短镜像后的 `y` 方向绝对位移。
+
+返回:
+- `Symbol`: 形如 `:vj_dx_dy` 的参数名, 例如 `:vj_1_2`。
+"""
+function build_jastrow_param_name(
+    dx::Int,
+    dy::Int,
+)::Symbol
+    if dx < 0 || dy < 0
+        error("dx and dy must be non-negative, got dx=$(dx), dy=$(dy).")
+    end
+    return Symbol("vj_$(dx)_$(dy)")
+end
+
+"""
+用途: 为给定的 Jastrow 位移类生成去重后的有向 PBC offset 列表。
+
+参数:
+- `lx::Int`: 晶格在 `x` 方向的长度。
+- `ly::Int`: 晶格在 `y` 方向的长度。
+- `dx::Int`: `x` 方向绝对位移。
+- `dy::Int`: `y` 方向绝对位移。
+
+返回:
+- `Vector{Tuple{Int, Int}}`: 在模 `lx`、`ly` 意义下去重后的 offset 列表。
+
+说明:
+- 当 `dx = 0` 或 `dy = 0` 时, 对应方向不会重复枚举正负号。
+- 当 `dx = lx / 2` 或 `dy = ly / 2` 时, 通过模运算后会自动去重。
+"""
+function build_jastrow_wrapped_offsets_for_displacement(
+    lx::Int,
+    ly::Int,
+    dx::Int,
+    dy::Int,
+)::Vector{Tuple{Int,Int}}
+    if lx <= 0 || ly <= 0
+        error("lx and ly must be positive, got lx=$(lx), ly=$(ly).")
+    end
+    if dx < 0 || dy < 0
+        error("dx and dy must be non-negative, got dx=$(dx), dy=$(dy).")
+    end
+    if dx == 0 && dy == 0
+        error("Displacement (0, 0) is not allowed for Jastrow terms.")
+    end
+    if dx > fld(lx, 2) || dy > fld(ly, 2)
+        error("Displacement exceeds shortest-image range: dx=$(dx), dy=$(dy), lx=$(lx), ly=$(ly).")
+    end
+
+    sign_choices_x = dx == 0 ? [1] : [1, -1]
+    sign_choices_y = dy == 0 ? [1] : [1, -1]
+    wrapped_offset_set = Set{Tuple{Int,Int}}()
+    for sign_x in sign_choices_x
+        for sign_y in sign_choices_y
+            push!(wrapped_offset_set, (mod(sign_x * dx, lx), mod(sign_y * dy, ly)))
+        end
+    end
+    return sort!(collect(wrapped_offset_set))
+end
+
+"""
+用途: 为给定的 Jastrow 位移类构造唯一无序 pair 集合。
+
+参数:
+- `lx::Int`: 晶格在 `x` 方向的长度。
+- `ly::Int`: 晶格在 `y` 方向的长度。
+- `dx::Int`: `x` 方向绝对位移。
+- `dy::Int`: `y` 方向绝对位移。
+
+返回:
+- `Vector{Tuple{Int, Int}}`: 经 `i < j` 规范化并按字典序排序后的唯一 pair 列表。
+"""
+function build_jastrow_pair_set_for_displacement(
+    lx::Int,
+    ly::Int,
+    dx::Int,
+    dy::Int,
+)::Vector{Tuple{Int,Int}}
+    wrapped_offsets = build_jastrow_wrapped_offsets_for_displacement(lx, ly, dx, dy)
+    unique_pairs = Set{Tuple{Int,Int}}()
+    for x in 1:lx
+        for y in 1:ly
+            site_index = (x - 1) * ly + y
+            for (offset_x, offset_y) in wrapped_offsets
+                neighbor_x = mod(x - 1 + offset_x, lx) + 1
+                neighbor_y = mod(y - 1 + offset_y, ly) + 1
+                neighbor_index = (neighbor_x - 1) * ly + neighbor_y
+                if neighbor_index == site_index
+                    continue
+                end
+                push!(unique_pairs, (min(site_index, neighbor_index), max(site_index, neighbor_index)))
+            end
+        end
+    end
+    return sort!(collect(unique_pairs))
+end
+
+"""
+用途: 为给定的 Jastrow 位移类构造对称邻接表。
+
+参数:
+- `lx::Int`: 晶格在 `x` 方向的长度。
+- `ly::Int`: 晶格在 `y` 方向的长度。
+- `dx::Int`: `x` 方向绝对位移。
+- `dy::Int`: `y` 方向绝对位移。
+
+返回:
+- `Vector{Vector{Int}}`: 满足无自环、无重复、对称的邻接表。
+"""
+function build_jastrow_neighbor_table_for_displacement(
+    lx::Int,
+    ly::Int,
+    dx::Int,
+    dy::Int,
+)::Vector{Vector{Int}}
+    unique_pairs = build_jastrow_pair_set_for_displacement(lx, ly, dx, dy)
+    neighbor_table = [Int[] for _ in 1:(lx*ly)]
+    for (site_i, site_j) in unique_pairs
+        push!(neighbor_table[site_i], site_j)
+        push!(neighbor_table[site_j], site_i)
+    end
+    for neighbors in neighbor_table
+        sort!(neighbors)
+    end
+    return neighbor_table
+end
+
+"""
+用途: 根据全位移分类批量构造 Jastrow terms、参数名与默认初值。
+
+参数:
+- `lx::Int`: 晶格在 `x` 方向的长度。
+- `ly::Int`: 晶格在 `y` 方向的长度。
+- `default_value::Float64`: 每个 `vj_dx_dy` 的默认初值。
+
+返回:
+- `Tuple{Vector{JastrowProjectorTerm{Float64}}, Vector{Symbol}, Vector{Float64}}`:
+  `(jastrow_terms, param_names, init_params)`。
+"""
+function build_full_displacement_jastrow_terms(
+    lx::Int,
+    ly::Int;
+    default_value::Float64=0.0,
+)::Tuple{Vector{JastrowProjectorTerm{Float64}},Vector{Symbol},Vector{Float64}}
+    displacement_labels = build_jastrow_displacement_labels(lx, ly)
+    jastrow_terms = JastrowProjectorTerm{Float64}[]
+    param_names = Symbol[]
+    init_params = Float64[]
+
+    for (dx, dy) in displacement_labels
+        param_name = build_jastrow_param_name(dx, dy)
+        neighbor_table = build_jastrow_neighbor_table_for_displacement(lx, ly, dx, dy)
+        push!(
+            jastrow_terms,
+            JastrowProjectorTerm(
+                param_name=param_name,
+                v=default_value,
+                site_to_neighbor_sites=neighbor_table,
+            ),
+        )
+        push!(param_names, param_name)
+        push!(init_params, default_value)
+    end
+
+    return jastrow_terms, param_names, init_params
+end
+
+"""
+用途: 构造受约束 Hubbard 主程序使用的 projector。
+
+参数:
+- `lx::Int`: 晶格在 `x` 方向的长度。
+- `ly::Int`: 晶格在 `y` 方向的长度。
+- `g::Float64`: Gutzwiller projector 参数。
+- `jastrow_default_value::Float64`: 全位移 Jastrow 参数的默认初值。
+
+返回:
+- `CompositeProjector`: 由一个 Gutzwiller term 和全部 `vj_dx_dy` Jastrow terms 组成的 projector。
+"""
+function build_restricted_projector(
+    lx::Int,
+    ly::Int,
+    g::Float64;
+    jastrow_default_value::Float64=0.0,
+)::CompositeProjector
+    jastrow_terms, _, _ = build_full_displacement_jastrow_terms(
+        lx,
+        ly;
+        default_value=jastrow_default_value,
+    )
+    projector_terms = AbstractProjectorTerm[
+        GutzwillerProjectorTerm(param_name=:g, g=g),
+    ]
+    append!(projector_terms, jastrow_terms)
+    return CompositeProjector(projector_terms)
+end
 
 function update_ansatz!(
     vwf,
@@ -321,8 +556,6 @@ function main()
     job = args["job"]
     ansatz = args["ansatz"]
     g = args["g"]
-    vj1 = args["vj1"]
-    vj2 = args["vj2"]
     bf_epsilon = args["bf_epsilon"]
     bf_eta = args["bf_eta"]
     init_params_json = args["init_params_json"]
@@ -370,26 +603,6 @@ function main()
         push!(bonds2, (u, idx(x - 1, y + 1)))
     end
 
-    site_to_neighbor_sites_j1 = [Int[] for _ in 1:N_sites]
-    for (site_i, site_j) in bonds1
-        if !(site_j in site_to_neighbor_sites_j1[site_i])
-            push!(site_to_neighbor_sites_j1[site_i], site_j)
-        end
-        if !(site_i in site_to_neighbor_sites_j1[site_j])
-            push!(site_to_neighbor_sites_j1[site_j], site_i)
-        end
-    end
-
-    site_to_neighbor_sites_j2 = [Int[] for _ in 1:N_sites]
-    for (site_i, site_j) in bonds2
-        if !(site_j in site_to_neighbor_sites_j2[site_i])
-            push!(site_to_neighbor_sites_j2[site_i], site_j)
-        end
-        if !(site_i in site_to_neighbor_sites_j2[site_j])
-            push!(site_to_neighbor_sites_j2[site_j], site_i)
-        end
-    end
-
     backflow_source_bonds = Tuple{Int,Int}[]
     backflow_source_amplitudes = Float64[]
     for (site_i, site_j) in bonds1
@@ -406,20 +619,16 @@ function main()
     end
 
     # Projector 定义
-    projector = CompositeProjector([
-        GutzwillerProjectorTerm(param_name=:g, g=g),
-        JastrowProjectorTerm(param_name=:vj1, v=vj1, site_to_neighbor_sites=site_to_neighbor_sites_j1),
-        JastrowProjectorTerm(param_name=:vj2, v=vj2, site_to_neighbor_sites=site_to_neighbor_sites_j2)
-    ])
-    #= backflow = Eq4BackflowTerm(
+    projector = build_restricted_projector(lx, ly, g)
+    backflow = Eq4BackflowTerm(
         param_name_epsilon=:bf_epsilon,
         param_name_eta=:bf_eta,
         epsilon_bf=bf_epsilon,
         eta_bf=bf_eta,
         source_bonds=backflow_source_bonds,
         source_amplitudes=backflow_source_amplitudes,
-    ) =#
-    backflow = NoBackflowTerm()
+    )
+    #backflow = NoBackflowTerm()
     proj_param_names = projector_param_names(projector)
     proj_init_params = projector_param_values(projector)
     nparams_proj = length(proj_param_names)
