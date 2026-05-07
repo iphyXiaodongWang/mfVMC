@@ -160,17 +160,39 @@ end
 # ==============================================================================
 
 """
-用途: 枚举全位移 Jastrow 参数的合法最短镜像位移标签。
+用途: 将 Jastrow 位移标签规范化为只依赖距离的参数标签。
+
+参数:
+- `dx::Int`: 某个轴向最短镜像位移的 `x` 分量绝对值。
+- `dy::Int`: 某个轴向最短镜像位移的 `y` 分量绝对值。
+
+返回:
+- `Tuple{Int, Int}`: 排序后的 `(min(dx, dy), max(dx, dy))` 标签, 使 `J_x_y = J_y_x`。
+"""
+function build_jastrow_canonical_displacement_label(
+    dx::Int,
+    dy::Int,
+)::Tuple{Int,Int}
+    if dx < 0 || dy < 0
+        error("dx and dy must be non-negative, got dx=$(dx), dy=$(dy).")
+    end
+    return (min(dx, dy), max(dx, dy))
+end
+
+"""
+用途: 枚举全位移 Jastrow 参数的合法距离标签。
 
 参数:
 - `lx::Int`: 晶格在 `x` 方向的长度。
 - `ly::Int`: 晶格在 `y` 方向的长度。
 
 返回:
-- `Vector{Tuple{Int, Int}}`: 按稳定顺序排列的 `(dx, dy)` 标签列表, 其中
-  `0 <= dx <= floor(lx / 2)`, `0 <= dy <= floor(ly / 2)`, 且排除 `(0, 0)`。
+- `Vector{Tuple{Int, Int}}`: 按稳定顺序排列的规范化距离标签列表, 其中
+  `(dx, dy)` 表示 `min(|Delta x|, |Delta y|)` 与 `max(|Delta x|, |Delta y|)`,
+  且排除 `(0, 0)`。
 
 说明:
+- 这里将 `(dx, dy)` 与 `(dy, dx)` 合并到同一个标签, 因此满足 `J_x_y = J_y_x`。
 - 为了去除 `g` 与全位移 Jastrow 参数共同构成的一维冗余自由度, 这里统一移除
   稳定排序后的最后一个位移标签。
 """
@@ -182,7 +204,7 @@ function build_jastrow_displacement_labels(
         error("lx and ly must be positive, got lx=$(lx), ly=$(ly).")
     end
 
-    displacement_labels = Tuple{Int,Int}[]
+    displacement_label_set = Set{Tuple{Int,Int}}()
     max_dx = fld(lx, 2)
     max_dy = fld(ly, 2)
     for dx in 0:max_dx
@@ -190,9 +212,10 @@ function build_jastrow_displacement_labels(
             if dx == 0 && dy == 0
                 continue
             end
-            push!(displacement_labels, (dx, dy))
+            push!(displacement_label_set, build_jastrow_canonical_displacement_label(dx, dy))
         end
     end
+    displacement_labels = sort!(collect(displacement_label_set))
     if !isempty(displacement_labels)
         pop!(displacement_labels)
     end
@@ -200,11 +223,11 @@ function build_jastrow_displacement_labels(
 end
 
 """
-用途: 根据 Jastrow 位移标签构造参数名。
+用途: 根据 Jastrow 位移标签构造规范化参数名。
 
 参数:
-- `dx::Int`: 最短镜像后的 `x` 方向绝对位移。
-- `dy::Int`: 最短镜像后的 `y` 方向绝对位移。
+- `dx::Int`: 位移标签的第一个分量, 可以是轴向 `x` 分量或未排序距离分量。
+- `dy::Int`: 位移标签的第二个分量, 可以是轴向 `y` 分量或未排序距离分量。
 
 返回:
 - `Symbol`: 形如 `:vj_dx_dy` 的参数名, 例如 `:vj_1_2`。
@@ -216,26 +239,27 @@ function build_jastrow_param_name(
     if dx < 0 || dy < 0
         error("dx and dy must be non-negative, got dx=$(dx), dy=$(dy).")
     end
-    return Symbol("vj_$(dx)_$(dy)")
+    canonical_dx, canonical_dy = build_jastrow_canonical_displacement_label(dx, dy)
+    return Symbol("vj_$(canonical_dx)_$(canonical_dy)")
 end
 
 """
-用途: 为给定的 Jastrow 位移类生成去重后的有向 PBC offset 列表。
+用途: 枚举某个规范化 Jastrow 距离标签对应的合法轴向位移。
 
 参数:
 - `lx::Int`: 晶格在 `x` 方向的长度。
 - `ly::Int`: 晶格在 `y` 方向的长度。
-- `dx::Int`: `x` 方向绝对位移。
-- `dy::Int`: `y` 方向绝对位移。
+- `dx::Int`: 位移标签的第一个分量, 可以是轴向 `x` 分量或未排序距离分量。
+- `dy::Int`: 位移标签的第二个分量, 可以是轴向 `y` 分量或未排序距离分量。
 
 返回:
-- `Vector{Tuple{Int, Int}}`: 在模 `lx`、`ly` 意义下去重后的 offset 列表。
+- `Vector{Tuple{Int, Int}}`: 合法轴向位移列表, 每个元素为 `(axis_dx, axis_dy)`。
 
 说明:
-- 当 `dx = 0` 或 `dy = 0` 时, 对应方向不会重复枚举正负号。
-- 当 `dx = lx / 2` 或 `dy = ly / 2` 时, 通过模运算后会自动去重。
+- 例如方形晶格上的标签 `(1, 2)` 会返回 `(1, 2)` 与 `(2, 1)`。
+- 对长方形晶格, 若交换后的轴向位移超出某个方向的最短镜像范围, 会自动跳过。
 """
-function build_jastrow_wrapped_offsets_for_displacement(
+function build_jastrow_axis_displacement_variants(
     lx::Int,
     ly::Int,
     dx::Int,
@@ -247,32 +271,116 @@ function build_jastrow_wrapped_offsets_for_displacement(
     if dx < 0 || dy < 0
         error("dx and dy must be non-negative, got dx=$(dx), dy=$(dy).")
     end
-    if dx == 0 && dy == 0
+    canonical_dx, canonical_dy = build_jastrow_canonical_displacement_label(dx, dy)
+    if canonical_dx == 0 && canonical_dy == 0
         error("Displacement (0, 0) is not allowed for Jastrow terms.")
     end
-    if dx > fld(lx, 2) || dy > fld(ly, 2)
-        error("Displacement exceeds shortest-image range: dx=$(dx), dy=$(dy), lx=$(lx), ly=$(ly).")
+
+    candidate_set = Set{Tuple{Int,Int}}([
+        (canonical_dx, canonical_dy),
+        (canonical_dy, canonical_dx),
+    ])
+    axis_displacements = Tuple{Int,Int}[]
+    max_dx = fld(lx, 2)
+    max_dy = fld(ly, 2)
+    for (axis_dx, axis_dy) in sort!(collect(candidate_set))
+        if axis_dx <= max_dx && axis_dy <= max_dy
+            push!(axis_displacements, (axis_dx, axis_dy))
+        end
+    end
+    if isempty(axis_displacements)
+        error("No valid axis displacement for canonical Jastrow label ($(canonical_dx), $(canonical_dy)) on lx=$(lx), ly=$(ly).")
+    end
+    return axis_displacements
+end
+
+"""
+用途: 为给定的轴向 Jastrow 位移生成去重后的有向 PBC offset 列表。
+
+参数:
+- `lx::Int`: 晶格在 `x` 方向的长度。
+- `ly::Int`: 晶格在 `y` 方向的长度。
+- `axis_dx::Int`: `x` 方向绝对位移, 必须位于最短镜像范围内。
+- `axis_dy::Int`: `y` 方向绝对位移, 必须位于最短镜像范围内。
+
+返回:
+- `Vector{Tuple{Int, Int}}`: 在模 `lx`、`ly` 意义下去重后的 offset 列表。
+
+说明:
+- 当 `axis_dx = 0` 或 `axis_dy = 0` 时, 对应方向不会重复枚举正负号。
+- 当 `axis_dx = lx / 2` 或 `axis_dy = ly / 2` 时, 通过模运算后会自动去重。
+"""
+function build_jastrow_wrapped_offsets_for_axis_displacement(
+    lx::Int,
+    ly::Int,
+    axis_dx::Int,
+    axis_dy::Int,
+)::Vector{Tuple{Int,Int}}
+    if lx <= 0 || ly <= 0
+        error("lx and ly must be positive, got lx=$(lx), ly=$(ly).")
+    end
+    if axis_dx < 0 || axis_dy < 0
+        error("axis_dx and axis_dy must be non-negative, got axis_dx=$(axis_dx), axis_dy=$(axis_dy).")
+    end
+    if axis_dx == 0 && axis_dy == 0
+        error("Displacement (0, 0) is not allowed for Jastrow terms.")
+    end
+    if axis_dx > fld(lx, 2) || axis_dy > fld(ly, 2)
+        error("Axis displacement exceeds shortest-image range: axis_dx=$(axis_dx), axis_dy=$(axis_dy), lx=$(lx), ly=$(ly).")
     end
 
-    sign_choices_x = dx == 0 ? [1] : [1, -1]
-    sign_choices_y = dy == 0 ? [1] : [1, -1]
+    sign_choices_x = axis_dx == 0 ? [1] : [1, -1]
+    sign_choices_y = axis_dy == 0 ? [1] : [1, -1]
     wrapped_offset_set = Set{Tuple{Int,Int}}()
     for sign_x in sign_choices_x
         for sign_y in sign_choices_y
-            push!(wrapped_offset_set, (mod(sign_x * dx, lx), mod(sign_y * dy, ly)))
+            push!(wrapped_offset_set, (mod(sign_x * axis_dx, lx), mod(sign_y * axis_dy, ly)))
         end
     end
     return sort!(collect(wrapped_offset_set))
 end
 
 """
-用途: 为给定的 Jastrow 位移类构造唯一无序 pair 集合。
+用途: 为给定的 Jastrow 距离标签生成去重后的有向 PBC offset 列表。
 
 参数:
 - `lx::Int`: 晶格在 `x` 方向的长度。
 - `ly::Int`: 晶格在 `y` 方向的长度。
-- `dx::Int`: `x` 方向绝对位移。
-- `dy::Int`: `y` 方向绝对位移。
+- `dx::Int`: 位移标签的第一个分量, 可以是轴向 `x` 分量或未排序距离分量。
+- `dy::Int`: 位移标签的第二个分量, 可以是轴向 `y` 分量或未排序距离分量。
+
+返回:
+- `Vector{Tuple{Int, Int}}`: 合并 `(dx, dy)` 与 `(dy, dx)` 后, 在模 `lx`、`ly`
+  意义下去重后的 offset 列表。
+"""
+function build_jastrow_wrapped_offsets_for_displacement(
+    lx::Int,
+    ly::Int,
+    dx::Int,
+    dy::Int,
+)::Vector{Tuple{Int,Int}}
+    wrapped_offset_set = Set{Tuple{Int,Int}}()
+    axis_displacements = build_jastrow_axis_displacement_variants(lx, ly, dx, dy)
+    for (axis_dx, axis_dy) in axis_displacements
+        axis_offsets = build_jastrow_wrapped_offsets_for_axis_displacement(
+            lx,
+            ly,
+            axis_dx,
+            axis_dy,
+        )
+        union!(wrapped_offset_set, axis_offsets)
+    end
+    return sort!(collect(wrapped_offset_set))
+end
+
+"""
+用途: 为给定的 Jastrow 距离标签构造唯一无序 pair 集合。
+
+参数:
+- `lx::Int`: 晶格在 `x` 方向的长度。
+- `ly::Int`: 晶格在 `y` 方向的长度。
+- `dx::Int`: 位移标签的第一个分量, 可以是轴向 `x` 分量或未排序距离分量。
+- `dy::Int`: 位移标签的第二个分量, 可以是轴向 `y` 分量或未排序距离分量。
 
 返回:
 - `Vector{Tuple{Int, Int}}`: 经 `i < j` 规范化并按字典序排序后的唯一 pair 列表。
@@ -303,13 +411,13 @@ function build_jastrow_pair_set_for_displacement(
 end
 
 """
-用途: 为给定的 Jastrow 位移类构造对称邻接表。
+用途: 为给定的 Jastrow 距离标签构造对称邻接表。
 
 参数:
 - `lx::Int`: 晶格在 `x` 方向的长度。
 - `ly::Int`: 晶格在 `y` 方向的长度。
-- `dx::Int`: `x` 方向绝对位移。
-- `dy::Int`: `y` 方向绝对位移。
+- `dx::Int`: 位移标签的第一个分量, 可以是轴向 `x` 分量或未排序距离分量。
+- `dy::Int`: 位移标签的第二个分量, 可以是轴向 `y` 分量或未排序距离分量。
 
 返回:
 - `Vector{Vector{Int}}`: 满足无自环、无重复、对称的邻接表。
@@ -620,15 +728,15 @@ function main()
 
     # Projector 定义
     projector = build_restricted_projector(lx, ly, g)
-    backflow = Eq4BackflowTerm(
+    #= backflow = Eq4BackflowTerm(
         param_name_epsilon=:bf_epsilon,
         param_name_eta=:bf_eta,
         epsilon_bf=bf_epsilon,
         eta_bf=bf_eta,
         source_bonds=backflow_source_bonds,
         source_amplitudes=backflow_source_amplitudes,
-    )
-    #backflow = NoBackflowTerm()
+    ) =#
+    backflow = NoBackflowTerm()
     proj_param_names = projector_param_names(projector)
     proj_init_params = projector_param_values(projector)
     nparams_proj = length(proj_param_names)

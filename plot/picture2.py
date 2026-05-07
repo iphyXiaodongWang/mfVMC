@@ -320,18 +320,15 @@ benchmark_vmc_12_obc_electron_csv_path = (
     project_root
     / "results/benchmark_domain/auto_submit_electron/best_sector_observables_vs_doping.csv"
 ).resolve()
-benchmark_dmrg_12_obc_path = (
-    project_root / "results/benchmark_domain/DMRG.txt"
-).resolve()
 benchmark_dmrg_12_obc_hole_s_pi_pi_path = (
     project_root / "results/benchmark_domain/DMRG/data/Spipi.txt"
 ).resolve()
-benchmark_dmrg_12_obc_electron_path = (
-    project_root / "results/benchmark_domain/DMRG_electron.txt"
+benchmark_dmrg_12_obc_electron_s_pi_pi_path = (
+    project_root / "results/benchmark_domain/DMRG/data_electron/Spipi.txt"
 ).resolve()
 benchmark_dmrg_lattice_size = 12
-benchmark_dmrg_mz_col = "mz"
 benchmark_dmrg_hole_s_pi_pi_col = "Spipi"
+benchmark_dmrg_electron_s_pi_pi_col = "Spipi"
 hole_series_inputs = []
 electron_series_inputs = []
 # 四张下排S(q)配置: 依次对应左到右子图
@@ -680,7 +677,7 @@ all_series.append(
         benchmark_vmc_12_obc_electron_y,
     )
 )
-# DMRG benchmark 为tab分隔文本, 这里分别解析 hole 与 electron 两半区数据
+# DMRG benchmark 读取预整理的 S(pi,pi) 汇总表, 并统一转换为 sqrt(S(pi,pi))
 benchmark_dmrg_hole_array = np.genfromtxt(
     Path(benchmark_dmrg_12_obc_hole_s_pi_pi_path).resolve(),
     names=True,
@@ -709,7 +706,7 @@ all_series.append(
     ("DMRG 12 OBC", "hole", benchmark_dmrg_12_obc_hole_x, benchmark_dmrg_12_obc_hole_y)
 )
 benchmark_dmrg_electron_array = np.genfromtxt(
-    Path(benchmark_dmrg_12_obc_electron_path).resolve(),
+    Path(benchmark_dmrg_12_obc_electron_s_pi_pi_path).resolve(),
     names=True,
     delimiter="	",
     dtype=float,
@@ -718,13 +715,15 @@ benchmark_dmrg_electron_array = np.genfromtxt(
 benchmark_dmrg_electron_ndefect = np.atleast_1d(
     benchmark_dmrg_electron_array[ndefect_col]
 )
-benchmark_dmrg_electron_mz = np.atleast_1d(
-    benchmark_dmrg_electron_array[benchmark_dmrg_mz_col]
+benchmark_dmrg_electron_s_pi_pi = np.atleast_1d(
+    benchmark_dmrg_electron_array[benchmark_dmrg_electron_s_pi_pi_col]
 )
 benchmark_dmrg_12_obc_electron_x = -np.abs(benchmark_dmrg_electron_ndefect) / float(
     int(benchmark_dmrg_lattice_size) ** 2
 )
-benchmark_dmrg_12_obc_electron_y = np.abs(benchmark_dmrg_electron_mz)
+benchmark_dmrg_12_obc_electron_y = convert_s_pi_pi_to_sqrt_observable(
+    benchmark_dmrg_electron_s_pi_pi
+)
 benchmark_dmrg_electron_sort_index = np.argsort(benchmark_dmrg_12_obc_electron_x)
 benchmark_dmrg_12_obc_electron_x = benchmark_dmrg_12_obc_electron_x[
     benchmark_dmrg_electron_sort_index
