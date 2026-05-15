@@ -14,8 +14,10 @@ mutable struct R1R2WS{T}
 
     has_cached_rankk_update::Bool
     cached_changed_count::Int
+    cached_affected_count::Int
     cached_changed_electron_ids::Vector{Int}
     cached_changed_row_indices::Vector{Int}
+    cached_affected_site_indices::Vector{Int}
     cached_sorted_electron_ids::Vector{Int}
     cached_sorted_row_indices::Vector{Int}
     cached_permutation::Vector{Int}
@@ -24,7 +26,9 @@ mutable struct R1R2WS{T}
     cached_small_k_matrix::Matrix{T}
     cached_small_k_inverse::Matrix{T}
     cached_site_block_buffer::Matrix{T}
+    cached_affected_site_blocks::Matrix{T}
 
+    backflow_chain_rule_buffer::Matrix{T}
     grad_buffer::Vector{T}
 end
 
@@ -109,11 +113,15 @@ function vwf_det(
         T[],
         false,
         0,
+        0,
         Int[],
         Int[],
         Int[],
         Int[],
         Int[],
+        Int[],
+        Matrix{T}(undef, 0, 0),
+        Matrix{T}(undef, 0, 0),
         Matrix{T}(undef, 0, 0),
         Matrix{T}(undef, 0, 0),
         Matrix{T}(undef, 0, 0),
@@ -164,11 +172,13 @@ end
 function reset_cached_rankk_update!(ws::R1R2WS)
     ws.has_cached_rankk_update = false
     ws.cached_changed_count = 0
+    ws.cached_affected_count = 0
     return nothing
 end
 
 function ensure_ws!(v::vwf_det{T,S}) where {T,S}
     N = size(v.awf_mat_t, 1)
+    n_sites = div(size(v.base_gs_U, 1), 2)
     ws = v.ws
     if ws.N != N
         ws = R1R2WS{T}(
@@ -179,8 +189,10 @@ function ensure_ws!(v::vwf_det{T,S}) where {T,S}
             Vector{T}(undef, N), Vector{T}(undef, N),
             false,
             0,
+            0,
             Vector{Int}(undef, N),
             Vector{Int}(undef, N),
+            Vector{Int}(undef, n_sites),
             Vector{Int}(undef, N),
             Vector{Int}(undef, N),
             Vector{Int}(undef, N),
@@ -189,10 +201,16 @@ function ensure_ws!(v::vwf_det{T,S}) where {T,S}
             Matrix{T}(undef, N, N),
             Matrix{T}(undef, N, N),
             Matrix{T}(undef, 2, N),
+            Matrix{T}(undef, 2 * n_sites, N),
+            Matrix{T}(undef, 2 * n_sites, N),
             T[]
         )
         reset_cached_rankk_update!(ws)
         v.ws = ws
+    end
+
+    if size(ws.backflow_chain_rule_buffer) != size(v.base_gs_U)
+        ws.backflow_chain_rule_buffer = Matrix{T}(undef, size(v.base_gs_U))
     end
 
     n_params = length(v.param_keys) + Projector.projector_param_count(v.projector) + Backflow.backflow_param_count(v.backflow)
@@ -669,14 +687,10 @@ function collect_backflow_local_column_updates(
     proposal::MoveProposal,
 ) where {T}
     backflow_term = vwf.backflow
-    if !(backflow_term isa Backflow.Eq4BackflowTerm)
-        error("Backflow local column updates currently only support Eq4BackflowTerm, got $(typeof(backflow_term)).")
-    end
-    eq4_backflow = backflow_term::Backflow.Eq4BackflowTerm
 
     affected_sites = Backflow.collect_affected_site_indices(
         vwf.sampler.state,
-        eq4_backflow,
+        backflow_term,
         proposal,
     )
 
@@ -693,11 +707,11 @@ function collect_backflow_local_column_updates(
     changed_count = 0
 
     for site_index in affected_sites
-        Backflow.fill_eq4_backflow_site_block_after_proposal!(
+        Backflow.fill_backflow_site_block_after_proposal!(
             site_block_buffer,
             vwf.base_gs_U,
             vwf.sampler.state,
-            eq4_backflow,
+            backflow_term,
             proposal,
             site_index,
         )
@@ -884,29 +898,37 @@ function collect_backflow_local_column_updates_into_cache!(
 ) where {T}
     ws = ensure_ws!(vwf)
     backflow_term = vwf.backflow
-    if !(backflow_term isa Backflow.Eq4BackflowTerm)
-        error("Backflow local column cache currently only supports Eq4BackflowTerm, got $(typeof(backflow_term)).")
-    end
-    eq4_backflow = backflow_term::Backflow.Eq4BackflowTerm
 
     affected_sites = Backflow.collect_affected_site_indices(
         vwf.sampler.state,
-        eq4_backflow,
+        backflow_term,
         proposal,
     )
 
+    ws.cached_affected_count = length(affected_sites)
     changed_count = 0
     site_block_buffer = ws.cached_site_block_buffer
 
-    for site_index in affected_sites
-        Backflow.fill_eq4_backflow_site_block_after_proposal!(
+    for (affected_offset, site_index) in enumerate(affected_sites)
+        ws.cached_affected_site_indices[affected_offset] = site_index
+        Backflow.fill_backflow_site_block_after_proposal!(
             site_block_buffer,
             vwf.base_gs_U,
             vwf.sampler.state,
-            eq4_backflow,
+            backflow_term,
             proposal,
             site_index,
         )
+        cached_block_row = 2 * (affected_offset - 1) + 1
+        copyto!(
+            @view(ws.cached_affected_site_blocks[cached_block_row, :]),
+            @view(site_block_buffer[1, :]),
+        )
+        copyto!(
+            @view(ws.cached_affected_site_blocks[cached_block_row + 1, :]),
+            @view(site_block_buffer[2, :]),
+        )
+
         for local_row_offset in 1:2
             row_index = 2 * (site_index - 1) + local_row_offset
             electron_id = get_postproposal_electron_id(vwf.sampler, proposal, row_index)
@@ -1057,6 +1079,59 @@ end
 
 
 """
+用途: 使用当前 rank-k cache 中保存的 proposal 后局域 backflow 行块刷新全局轨道矩阵。
+
+数学公式:
+- 对每个缓存站点 `i`, 将 `U_b(i, sigma; x')` 写回 `backflow_u`, `gs_U` 和转置缓存 `gs_U_t`。
+
+参数:
+- `vwf::vwf_det{T}`: determinant 波函数对象, 必须已经通过 `calc_backflow_ratio_local_update` 建立 cache。
+
+返回:
+- `nothing`。
+"""
+function apply_cached_backflow_orbital_rows!(vwf::vwf_det{T}) where {T}
+    ws = ensure_ws!(vwf)
+    if !ws.has_cached_rankk_update
+        error("Backflow rank-k cache is invalid. Call calc_backflow_ratio_local_update(vwf, proposal) before apply_cached_backflow_orbital_rows!(vwf).")
+    end
+
+    for affected_offset in 1:ws.cached_affected_count
+        site_index = ws.cached_affected_site_indices[affected_offset]
+        orbital_row = 2 * (site_index - 1) + 1
+        cached_block_row = 2 * (affected_offset - 1) + 1
+
+        copyto!(
+            @view(vwf.backflow_u[orbital_row, :]),
+            @view(ws.cached_affected_site_blocks[cached_block_row, :]),
+        )
+        copyto!(
+            @view(vwf.backflow_u[orbital_row + 1, :]),
+            @view(ws.cached_affected_site_blocks[cached_block_row + 1, :]),
+        )
+        copyto!(
+            @view(vwf.gs_U[orbital_row, :]),
+            @view(ws.cached_affected_site_blocks[cached_block_row, :]),
+        )
+        copyto!(
+            @view(vwf.gs_U[orbital_row + 1, :]),
+            @view(ws.cached_affected_site_blocks[cached_block_row + 1, :]),
+        )
+        copyto!(
+            @view(vwf.gs_U_t[:, orbital_row]),
+            @view(ws.cached_affected_site_blocks[cached_block_row, :]),
+        )
+        copyto!(
+            @view(vwf.gs_U_t[:, orbital_row + 1]),
+            @view(ws.cached_affected_site_blocks[cached_block_row + 1, :]),
+        )
+    end
+
+    return nothing
+end
+
+
+"""
 用途: 使用 workspace 中缓存的通用 rank-k 中间量执行 determinant 更新。
 
 数学公式:
@@ -1168,7 +1243,7 @@ function accept_backflow_local_update!(vwf::vwf_det{T}, proposal::MoveProposal, 
 
     update_rankk_from_cache!(vwf, ratio)
     commit_move!(vwf.sampler, proposal)
-    refresh_backflow_orbitals!(vwf)
+    apply_cached_backflow_orbital_rows!(vwf)
     reset_cached_rankk_update!(ws)
 
     if vwf.backflow_debug_verify
@@ -1283,8 +1358,22 @@ function compute_grad_log_psi!(vwf::vwf_det{T}) where T
 
     # 3. 先计算波函数参数梯度部分
     wf_param_count = length(vwf.param_keys)
+    has_active_backflow = Backflow.uses_backflow(vwf.backflow)
     for idx in 1:wf_param_count
         dU_t = @view vwf.dUt_matrix[:, :, idx]
+        derivative_orbitals = if has_active_backflow
+            # backflow 打开时 determinant 使用 U_b = B_x[U_0],
+            # 因此 mean-field 参数导数必须使用 dU_b/dp = B_x[dU_0/dp]。
+            Backflow.fill_backflow_chain_rule_orbitals!(
+                ws.backflow_chain_rule_buffer,
+                transpose(dU_t),
+                ss.state,
+                vwf.backflow,
+            )
+            ws.backflow_chain_rule_buffer
+        else
+            nothing
+        end
         total_sum = zero(T)
 
         # 顺序：外层电子(elec)，内层轨道(orb)
@@ -1295,8 +1384,14 @@ function compute_grad_log_psi!(vwf::vwf_det{T}) where T
             col_sum = zero(T)
 
             # SIMD 内积
-            @simd for orb in 1:Norb
-                col_sum += A_inv[orb, elec] * dU_t[orb, r]
+            if has_active_backflow
+                @simd for orb in 1:Norb
+                    col_sum += A_inv[orb, elec] * derivative_orbitals[r, orb]
+                end
+            else
+                @simd for orb in 1:Norb
+                    col_sum += A_inv[orb, elec] * dU_t[orb, r]
+                end
             end
 
             total_sum += col_sum

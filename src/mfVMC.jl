@@ -32,12 +32,16 @@ export update_projector_params!, check_projector_consistency
 # ------------------
 include("Backflow.jl")
 using .Backflow
-export AbstractBackflowTerm, NoBackflowTerm, Eq4BackflowTerm
+export AbstractBackflowTerm, AbstractBackflowCorrectionTerm
+export NoBackflowTerm, Eq4BackflowTerm, CompositeBackflowTerm
+export BackflowEpsilonTerm, BackflowEta1DoublonHoleTerm
+export BackflowEta2SpinExchangeTerm, BackflowEta3MixedVirtualHopTerm
 export uses_backflow
 export backflow_param_names, backflow_param_values, backflow_param_count
 export update_backflow_params!
 export compute_doublon_hole_masks, compute_recombination_mask
 export build_backflow_orbitals, build_eq4_backflow_orbitals
+export fill_backflow_chain_rule_orbitals!
 
 # ------------------
 include("Utils.jl")

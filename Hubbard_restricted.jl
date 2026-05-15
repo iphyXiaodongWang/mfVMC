@@ -143,11 +143,19 @@ function parse_commandline()
         arg_type = Float64
         default = 1.0
         "--bf_epsilon"
-        help = "Eq.(4) backflow epsilon parameter"
+        help = "Eq.(5) backflow epsilon parameter"
         arg_type = Float64
         default = 1.0
-        "--bf_eta"
-        help = "Eq.(4) backflow eta parameter"
+        "--bf_eta1"
+        help = "Eq.(5) backflow eta1 doublon-hole hopping parameter"
+        arg_type = Float64
+        default = 0.0
+        "--bf_eta2"
+        help = "Eq.(5) backflow eta2 spin-exchange hopping parameter, currently ignored by eta1-only restricted backflow"
+        arg_type = Float64
+        default = 0.0
+        "--bf_eta3"
+        help = "Eq.(5) backflow eta3 mixed virtual hopping parameter, currently ignored by eta1-only restricted backflow"
         arg_type = Float64
         default = 0.0
     end
@@ -510,6 +518,49 @@ function build_restricted_projector(
     return CompositeProjector(projector_terms)
 end
 
+"""
+用途: 构造受约束 Hubbard 主程序当前用于测试的 eta1-only composite backflow。
+
+数学公式:
+- `U_b = U_0 + delta U_epsilon + delta U_eta1`。
+- `delta U_epsilon(i, sigma) = (bf_epsilon - 1) * xi_i * U_0(i, sigma)`。
+- `delta U_eta1(i, sigma) = bf_eta1 * sum_j t_ij * D_i * H_j * U_0(j, sigma)`。
+
+参数:
+- `source_bonds::Vector{Tuple{Int, Int}}`: 有向键 `(i, j)` 列表。
+- `source_amplitudes::Vector{<:Real}`: 与有向键对齐的 hopping 振幅 `t_ij`。
+- `bf_epsilon::Float64`: `epsilon` backflow 参数, 退化值为 `1.0`。
+- `bf_eta1::Float64`: `eta1` backflow 参数, 退化值为 `0.0`。
+- `bf_eta2::Float64`: 兼容旧命令行的占位参数, 当前不参与构造。
+- `bf_eta3::Float64`: 兼容旧命令行的占位参数, 当前不参与构造。
+
+返回:
+- `CompositeBackflowTerm`: 按 `bf_epsilon, bf_eta1` 顺序排列的 backflow。
+"""
+function build_restricted_composite_backflow(
+    source_bonds::Vector{Tuple{Int,Int}},
+    source_amplitudes::Vector{<:Real},
+    bf_epsilon::Float64,
+    bf_eta1::Float64,
+    bf_eta2::Float64,
+    bf_eta3::Float64,
+)::CompositeBackflowTerm
+    return CompositeBackflowTerm([
+        BackflowEpsilonTerm(
+            param_name=:bf_epsilon,
+            epsilon_bf=bf_epsilon,
+            source_bonds=source_bonds,
+            source_amplitudes=source_amplitudes,
+        ),
+        BackflowEta1DoublonHoleTerm(
+            param_name=:bf_eta1,
+            eta1_bf=bf_eta1,
+            source_bonds=source_bonds,
+            source_amplitudes=source_amplitudes,
+        ),
+    ])
+end
+
 function update_ansatz!(
     vwf,
     param_names::Vector{Symbol},
@@ -665,7 +716,9 @@ function main()
     ansatz = args["ansatz"]
     g = args["g"]
     bf_epsilon = args["bf_epsilon"]
-    bf_eta = args["bf_eta"]
+    bf_eta1 = args["bf_eta1"]
+    bf_eta2 = args["bf_eta2"]
+    bf_eta3 = args["bf_eta3"]
     init_params_json = args["init_params_json"]
     N_sites = lx * ly
     #要优化的参数
@@ -728,15 +781,14 @@ function main()
 
     # Projector 定义
     projector = build_restricted_projector(lx, ly, g)
-    #= backflow = Eq4BackflowTerm(
-        param_name_epsilon=:bf_epsilon,
-        param_name_eta=:bf_eta,
-        epsilon_bf=bf_epsilon,
-        eta_bf=bf_eta,
-        source_bonds=backflow_source_bonds,
-        source_amplitudes=backflow_source_amplitudes,
-    ) =#
-    backflow = NoBackflowTerm()
+    backflow = build_restricted_composite_backflow(
+        backflow_source_bonds,
+        backflow_source_amplitudes,
+        bf_epsilon,
+        bf_eta1,
+        bf_eta2,
+        bf_eta3,
+    )
     proj_param_names = projector_param_names(projector)
     proj_init_params = projector_param_values(projector)
     nparams_proj = length(proj_param_names)
