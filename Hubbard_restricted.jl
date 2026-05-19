@@ -118,6 +118,18 @@ function parse_commandline()
         help = "Path to json file that provides initial parameters"
         arg_type = String
         default = ""
+        "--fixed_params"
+        help = "Comma-separated fixed parameter assignments, e.g. 'mu=0.1,bf_epsilon=1.0'"
+        arg_type = String
+        default = ""
+        "--active_params"
+        help = "Comma-separated parameter names optimized by SR. Empty means all non-fixed parameters."
+        arg_type = String
+        default = ""
+        "--enable_backflow"
+        help = "Whether to enable backflow terms. Accepts true/false, 1/0, yes/no. Default is true."
+        arg_type = String
+        default = "true"
         "--job"
         help = "Job to be done. Can be SR and measure"
         arg_type = String
@@ -161,6 +173,223 @@ function parse_commandline()
     end
 
     return parse_args(s)
+end
+
+const ACTIVE_PROJECTOR_DERIVATIVE_PARAM_NAMES = Ref{Union{Nothing,Vector{Symbol}}}(nothing)
+const ACTIVE_BACKFLOW_DERIVATIVE_PARAM_NAMES = Ref{Union{Nothing,Vector{Symbol}}}(nothing)
+
+"""
+用途: 检查一组 active derivative 参数名是否属于给定参数组。
+
+参数:
+- `available_param_names::Vector{Symbol}`: 当前参数组的完整参数名。
+- `active_param_names::Union{Nothing, Vector{Symbol}}`: 需要参与 SR 求导的参数名; `nothing` 表示全部参与。
+- `param_group_name::AbstractString`: 参数组名称, 用于错误信息。
+
+返回:
+- `nothing`。若 active 参数名重复或不存在会抛出异常。
+"""
+function validate_active_derivative_param_names!(
+    available_param_names::Vector{Symbol},
+    active_param_names::Union{Nothing,Vector{Symbol}},
+    param_group_name::AbstractString,
+)::Nothing
+    if active_param_names === nothing
+        return nothing
+    end
+    if length(unique(active_param_names)) != length(active_param_names)
+        error("Duplicate active $(param_group_name) derivative parameters: $(active_param_names).")
+    end
+
+    available_param_name_set = Set(available_param_names)
+    for active_param_name in active_param_names
+        if !(active_param_name in available_param_name_set)
+            error(
+                "Unknown active $(param_group_name) derivative parameter $(active_param_name). " *
+                "Available parameters: $(join(String.(available_param_names), ", ")).",
+            )
+        end
+    end
+    return nothing
+end
+
+"""
+用途: 设置当前 SR 中 projector 与 backflow 哪些参数参与导数计算。
+
+参数:
+- `projector_param_names::Vector{Symbol}`: 完整 projector 参数名。
+- `backflow_param_names::Vector{Symbol}`: 完整 backflow 参数名。
+- `active_projector_param_names::Union{Nothing, Vector{Symbol}}`: active projector 参数名; `nothing` 表示全部。
+- `active_backflow_param_names::Union{Nothing, Vector{Symbol}}`: active backflow 参数名; `nothing` 表示全部。
+
+返回:
+- `nothing`。该设置只影响本脚本中重定义的 `compute_grad_log_psi!`。
+"""
+function set_active_sr_derivative_param_names!(
+    projector_param_names::Vector{Symbol},
+    backflow_param_names::Vector{Symbol};
+    active_projector_param_names::Union{Nothing,Vector{Symbol}}=nothing,
+    active_backflow_param_names::Union{Nothing,Vector{Symbol}}=nothing,
+)::Nothing
+    validate_active_derivative_param_names!(
+        projector_param_names,
+        active_projector_param_names,
+        "projector",
+    )
+    validate_active_derivative_param_names!(
+        backflow_param_names,
+        active_backflow_param_names,
+        "backflow",
+    )
+
+    ACTIVE_PROJECTOR_DERIVATIVE_PARAM_NAMES[] =
+        active_projector_param_names === nothing ? nothing : copy(active_projector_param_names)
+    ACTIVE_BACKFLOW_DERIVATIVE_PARAM_NAMES[] =
+        active_backflow_param_names === nothing ? nothing : copy(active_backflow_param_names)
+    return nothing
+end
+
+"""
+用途: 根据完整参数名和当前 active 设置返回真正参与 SR 求导的参数名。
+
+参数:
+- `all_param_names::Vector{Symbol}`: 某一参数组的完整参数名。
+- `active_param_names::Union{Nothing, Vector{Symbol}}`: active 参数名; `nothing` 表示全部参与。
+
+返回:
+- `Vector{Symbol}`: 按 SR 参数顺序排列的 active 参数名。
+"""
+function get_active_derivative_param_names(
+    all_param_names::Vector{Symbol},
+    active_param_names::Union{Nothing,Vector{Symbol}},
+)::Vector{Symbol}
+    if active_param_names === nothing
+        return all_param_names
+    end
+    return active_param_names
+end
+
+"""
+用途: 在 `Hubbard_restricted.jl` 中覆盖 SR 的 log-derivative 计算, 支持只优化部分 projector/backflow 参数。
+
+数学公式:
+- 对 determinant 参数仍使用 `O_p = Tr(A^{-1} dA/dp)`。
+- 对 projector 参数使用 `O_p = d log(P) / dp`, 但只保留 active projector 参数。
+- 对 backflow 参数使用 `O_p = Tr(A^{-1} dA_b/dp)`, 但只保留 active backflow 参数。
+
+参数:
+- `vwf::mfVMC.VMC.vwf_det{T}`: determinant 波函数对象。
+
+返回:
+- `Vector{T}`: 与当前 SR active 参数顺序一致的 log-derivative 向量。
+"""
+function mfVMC.VMC.compute_grad_log_psi!(vwf::mfVMC.VMC.vwf_det{T}) where T
+    ws = mfVMC.VMC.ensure_ws!(vwf)
+    ss = vwf.sampler
+
+    a_inv = vwf.awf_inv
+    n_orbitals, n_electrons = size(a_inv)
+
+    wf_param_count = length(vwf.param_keys)
+    projector_param_names_all = mfVMC.Projector.projector_param_names(vwf.projector)
+    backflow_param_names_all = mfVMC.Backflow.backflow_param_names(vwf.backflow)
+    active_projector_param_names = get_active_derivative_param_names(
+        projector_param_names_all,
+        ACTIVE_PROJECTOR_DERIVATIVE_PARAM_NAMES[],
+    )
+    active_backflow_param_names = get_active_derivative_param_names(
+        backflow_param_names_all,
+        ACTIVE_BACKFLOW_DERIVATIVE_PARAM_NAMES[],
+    )
+
+    total_active_param_count =
+        wf_param_count + length(active_projector_param_names) + length(active_backflow_param_names)
+    resize!(ws.grad_buffer, total_active_param_count)
+    o_vec = ws.grad_buffer
+    fill!(o_vec, zero(T))
+
+    has_active_backflow = mfVMC.Backflow.uses_backflow(vwf.backflow)
+    for param_index in 1:wf_param_count
+        dU_t = @view vwf.dUt_matrix[:, :, param_index]
+        derivative_orbitals = if has_active_backflow
+            mfVMC.Backflow.fill_backflow_chain_rule_orbitals!(
+                ws.backflow_chain_rule_buffer,
+                transpose(dU_t),
+                ss.state,
+                vwf.backflow,
+            )
+            ws.backflow_chain_rule_buffer
+        else
+            nothing
+        end
+
+        total_sum = zero(T)
+        @inbounds for electron_index in 1:n_electrons
+            row_index = ss.electron_locs[electron_index]
+            column_sum = zero(T)
+            if has_active_backflow
+                @simd for orbital_index in 1:n_orbitals
+                    column_sum += a_inv[orbital_index, electron_index] *
+                                  derivative_orbitals[row_index, orbital_index]
+                end
+            else
+                @simd for orbital_index in 1:n_orbitals
+                    column_sum += a_inv[orbital_index, electron_index] *
+                                  dU_t[orbital_index, row_index]
+                end
+            end
+            total_sum += column_sum
+        end
+        o_vec[param_index] = total_sum
+    end
+
+    output_offset = wf_param_count
+    if !isempty(active_projector_param_names)
+        full_projector_derivatives = mfVMC.Projector.projector_log_derivative(vwf.projector, ss)
+        projector_derivative_map = Dict{Symbol,Float64}()
+        for (param_name, derivative_value) in zip(projector_param_names_all, full_projector_derivatives)
+            projector_derivative_map[param_name] = Float64(derivative_value)
+        end
+        for (active_offset, param_name) in enumerate(active_projector_param_names)
+            if !haskey(projector_derivative_map, param_name)
+                error("Missing projector derivative for active parameter $(param_name).")
+            end
+            o_vec[output_offset + active_offset] = T(projector_derivative_map[param_name])
+        end
+        output_offset += length(active_projector_param_names)
+    end
+
+    if !isempty(active_backflow_param_names)
+        backflow_pairs = mfVMC.Backflow.build_backflow_derivative_orbitals(
+            vwf.base_gs_U,
+            ss.state,
+            vwf.backflow,
+        )
+        backflow_derivative_map = Dict{Symbol,Matrix{T}}()
+        for derivative_pair in backflow_pairs
+            backflow_derivative_map[first(derivative_pair)] = last(derivative_pair)
+        end
+
+        for (active_offset, param_name) in enumerate(active_backflow_param_names)
+            if !haskey(backflow_derivative_map, param_name)
+                error("Missing backflow derivative for active parameter $(param_name).")
+            end
+            derivative_orbitals = backflow_derivative_map[param_name]
+            total_sum = zero(T)
+            @inbounds for electron_index in 1:n_electrons
+                row_index = ss.electron_locs[electron_index]
+                column_sum = zero(T)
+                @simd for orbital_index in 1:n_orbitals
+                    column_sum += a_inv[orbital_index, electron_index] *
+                                  derivative_orbitals[row_index, orbital_index]
+                end
+                total_sum += column_sum
+            end
+            o_vec[output_offset + active_offset] = total_sum
+        end
+    end
+
+    return o_vec
 end
 
 # ==============================================================================
@@ -561,6 +790,465 @@ function build_restricted_composite_backflow(
     ])
 end
 
+"""
+用途: 根据命令行开关选择 restricted Hubbard 使用的 backflow 对象。
+
+参数:
+- `enable_backflow::Bool`: 是否启用 backflow; `false` 时返回 `NoBackflowTerm()`。
+- `source_bonds::Vector{Tuple{Int, Int}}`: 有向键 `(i, j)` 列表。
+- `source_amplitudes::Vector{<:Real}`: 与有向键对齐的 hopping 振幅 `t_ij`。
+- `bf_epsilon::Float64`: `epsilon` backflow 参数。
+- `bf_eta1::Float64`: `eta1` backflow 参数。
+- `bf_eta2::Float64`: 当前 eta1-only 路径中的兼容占位参数。
+- `bf_eta3::Float64`: 当前 eta1-only 路径中的兼容占位参数。
+
+返回:
+- `AbstractBackflowTerm`: 启用时为 `CompositeBackflowTerm`; 禁用时为 `NoBackflowTerm`。
+"""
+function build_restricted_optional_backflow(
+    enable_backflow::Bool,
+    source_bonds::Vector{Tuple{Int,Int}},
+    source_amplitudes::Vector{<:Real},
+    bf_epsilon::Float64,
+    bf_eta1::Float64,
+    bf_eta2::Float64,
+    bf_eta3::Float64,
+)::AbstractBackflowTerm
+    if !enable_backflow
+        return NoBackflowTerm()
+    end
+
+    return build_restricted_composite_backflow(
+        source_bonds,
+        source_amplitudes,
+        bf_epsilon,
+        bf_eta1,
+        bf_eta2,
+        bf_eta3,
+    )
+end
+
+"""
+用途: 解析命令行布尔开关字符串。
+
+参数:
+- `raw_value::AbstractString`: 命令行输入值, 支持 `true/false`, `1/0`, `yes/no`, `on/off`。
+- `option_name::AbstractString`: 选项名, 用于错误信息。
+
+返回:
+- `Bool`: 解析后的布尔值。
+"""
+function parse_bool_flag(raw_value::AbstractString, option_name::AbstractString)::Bool
+    normalized_value = lowercase(strip(raw_value))
+    if normalized_value in ("true", "t", "1", "yes", "y", "on")
+        return true
+    elseif normalized_value in ("false", "f", "0", "no", "n", "off")
+        return false
+    end
+
+    error("Invalid value for $(option_name): $(raw_value). Expected true/false, 1/0, yes/no, or on/off.")
+end
+
+"""
+用途: 解析命令行输入的固定参数字符串。
+
+参数:
+- `fixed_params_string::AbstractString`: 固定参数字符串, 格式为 `"name=value,name=value"`。
+
+返回:
+- `Dict{Symbol, Float64}`: 参数名到固定值的映射。
+"""
+function parse_fixed_param_string(fixed_params_string::AbstractString)::Dict{Symbol,Float64}
+    fixed_param_values = Dict{Symbol,Float64}()
+    stripped_input = strip(fixed_params_string)
+    if isempty(stripped_input)
+        return fixed_param_values
+    end
+
+    for raw_assignment in split(stripped_input, ",")
+        assignment = strip(raw_assignment)
+        if isempty(assignment)
+            continue
+        end
+
+        pieces = split(assignment, "=")
+        if length(pieces) != 2
+            error("Invalid fixed parameter assignment: $(assignment). Expected format name=value.")
+        end
+
+        param_name_string = strip(pieces[1])
+        param_value_string = strip(pieces[2])
+        if isempty(param_name_string) || isempty(param_value_string)
+            error("Invalid fixed parameter assignment: $(assignment). Expected non-empty name and value.")
+        end
+
+        param_name = Symbol(param_name_string)
+        if haskey(fixed_param_values, param_name)
+            error("Duplicate fixed parameter assignment for $(param_name).")
+        end
+
+        try
+            fixed_param_values[param_name] = parse(Float64, param_value_string)
+        catch parse_error
+            error("Invalid numeric value for fixed parameter $(param_name): $(param_value_string).")
+        end
+    end
+
+    return fixed_param_values
+end
+
+"""
+用途: 解析命令行输入的 active 参数名列表。
+
+参数:
+- `param_names_string::AbstractString`: 参数名字符串, 格式为 `"name,name"`; 空字符串表示不显式限制 active 参数。
+
+返回:
+- `Vector{Symbol}`: 按命令行顺序排列的参数名列表。
+"""
+function parse_param_name_list(param_names_string::AbstractString)::Vector{Symbol}
+    stripped_input = strip(param_names_string)
+    if isempty(stripped_input)
+        return Symbol[]
+    end
+
+    param_names = Symbol[]
+    seen_param_names = Set{Symbol}()
+    for raw_name in split(stripped_input, ",")
+        param_name_string = strip(raw_name)
+        if isempty(param_name_string)
+            error("Invalid active parameter list: empty parameter name in $(param_names_string).")
+        end
+
+        param_name = Symbol(param_name_string)
+        if param_name in seen_param_names
+            error("Duplicate active parameter name: $(param_name).")
+        end
+        push!(param_names, param_name)
+        push!(seen_param_names, param_name)
+    end
+
+    return param_names
+end
+
+"""
+用途: 用 json 中已有的参数覆盖默认初始参数, 缺失参数保留默认值。
+
+参数:
+- `json_path::AbstractString`: 参数 json 文件路径。
+- `full_param_names::Vector{Symbol}`: 完整参数名列表。
+- `default_param_values::Vector{Float64}`: 与 `full_param_names` 对齐的默认初始参数。
+
+返回:
+- `Vector{Float64}`: json 覆盖后的完整初始参数向量。
+"""
+function build_init_params_from_json_with_defaults(
+    json_path::AbstractString,
+    full_param_names::Vector{Symbol},
+    default_param_values::Vector{Float64},
+)::Vector{Float64}
+    if length(full_param_names) != length(default_param_values)
+        error("full_param_names and default_param_values length mismatch.")
+    end
+    if !isfile(json_path)
+        error("JSON file not found: $(json_path)")
+    end
+
+    raw_param_dict = JSON.parsefile(json_path)
+    param_index_map = Dict(String(param_name) => param_index for (param_index, param_name) in enumerate(full_param_names))
+    init_param_values = copy(default_param_values)
+
+    for (param_name_string, param_value) in raw_param_dict
+        if !haskey(param_index_map, String(param_name_string))
+            continue
+        end
+        if !(param_value isa Number)
+            error("Invalid value for key $(param_name_string) in json: $(param_value)")
+        end
+        init_param_values[param_index_map[String(param_name_string)]] = Float64(param_value)
+    end
+
+    return init_param_values
+end
+
+"""
+用途: 检查固定参数名是否都存在于完整参数列表中。
+
+参数:
+- `full_param_names::Vector{Symbol}`: 完整参数名列表。
+- `fixed_param_values::Dict{Symbol, Float64}`: 参数名到固定值的映射。
+
+返回:
+- `nothing`。
+"""
+function validate_fixed_param_names!(
+    full_param_names::Vector{Symbol},
+    fixed_param_values::Dict{Symbol,Float64},
+)::Nothing
+    full_param_name_set = Set(full_param_names)
+    for fixed_param_name in keys(fixed_param_values)
+        if !(fixed_param_name in full_param_name_set)
+            error("Unknown fixed parameter: $(fixed_param_name). Available parameters: $(join(String.(full_param_names), ", ")).")
+        end
+    end
+    return nothing
+end
+
+"""
+用途: 将固定参数值覆盖到完整初始参数向量中。
+
+参数:
+- `full_param_names::Vector{Symbol}`: 完整参数名列表。
+- `param_values::Vector{Float64}`: 与 `full_param_names` 对齐的完整参数值。
+- `fixed_param_values::Dict{Symbol, Float64}`: 参数名到固定值的映射。
+
+返回:
+- `Vector{Float64}`: 覆盖固定值后的完整参数值。
+"""
+function apply_fixed_params_to_values(
+    full_param_names::Vector{Symbol},
+    param_values::Vector{Float64},
+    fixed_param_values::Dict{Symbol,Float64},
+)::Vector{Float64}
+    if length(full_param_names) != length(param_values)
+        error("full_param_names and param_values length mismatch.")
+    end
+    validate_fixed_param_names!(full_param_names, fixed_param_values)
+
+    updated_param_values = copy(param_values)
+    for (param_index, param_name) in enumerate(full_param_names)
+        if haskey(fixed_param_values, param_name)
+            updated_param_values[param_index] = fixed_param_values[param_name]
+        end
+    end
+    return updated_param_values
+end
+
+"""
+用途: 根据固定参数集合构造参与 SR 优化的参数下标。
+
+参数:
+- `full_param_names::Vector{Symbol}`: 完整参数名列表。
+- `fixed_param_values::Dict{Symbol, Float64}`: 参数名到固定值的映射。
+
+返回:
+- `Vector{Int}`: 未固定参数在完整参数列表中的下标。
+"""
+function build_active_param_indices(
+    full_param_names::Vector{Symbol},
+    fixed_param_values::Dict{Symbol,Float64},
+)::Vector{Int}
+    validate_fixed_param_names!(full_param_names, fixed_param_values)
+    return [
+        param_index for (param_index, param_name) in enumerate(full_param_names)
+        if !haskey(fixed_param_values, param_name)
+    ]
+end
+
+"""
+用途: 根据固定参数集合和显式 active 参数名构造参与 SR 优化的参数下标。
+
+参数:
+- `full_param_names::Vector{Symbol}`: 完整参数名列表。
+- `fixed_param_values::Dict{Symbol, Float64}`: 参数名到固定值的映射。
+- `active_param_names::Vector{Symbol}`: 命令行指定的 active 参数名; 为空时表示所有未固定参数。
+
+返回:
+- `Vector{Int}`: active 参数在完整参数列表中的下标, 顺序跟随完整参数列表以匹配 `compute_grad_log_psi!`。
+"""
+function build_active_param_indices(
+    full_param_names::Vector{Symbol},
+    fixed_param_values::Dict{Symbol,Float64},
+    active_param_names::Vector{Symbol},
+)::Vector{Int}
+    if isempty(active_param_names)
+        return build_active_param_indices(full_param_names, fixed_param_values)
+    end
+
+    validate_fixed_param_names!(full_param_names, fixed_param_values)
+    full_param_index_map = Dict(param_name => param_index for (param_index, param_name) in enumerate(full_param_names))
+    for active_param_name in active_param_names
+        if !haskey(full_param_index_map, active_param_name)
+            error("Unknown active parameter: $(active_param_name). Available parameters: $(join(String.(full_param_names), ", ")).")
+        end
+        if haskey(fixed_param_values, active_param_name)
+            error("Parameter $(active_param_name) cannot be both fixed and active.")
+        end
+    end
+
+    active_param_name_set = Set(active_param_names)
+    return [
+        param_index for (param_index, param_name) in enumerate(full_param_names)
+        if param_name in active_param_name_set
+    ]
+end
+
+"""
+用途: 在每次构造波函数前, 将完整参数向量中的固定参数重置为命令行给定值。
+
+参数:
+- `full_param_names::Vector{Symbol}`: 完整参数名列表。
+- `param_values::Vector{Float64}`: 与 `full_param_names` 对齐的完整参数值, 会被原地修改。
+- `fixed_param_values::Dict{Symbol, Float64}`: 参数名到固定值的映射。
+
+返回:
+- `Vector{Float64}`: 原地修改后的 `param_values`。
+"""
+function enforce_fixed_params!(
+    full_param_names::Vector{Symbol},
+    param_values::Vector{Float64},
+    fixed_param_values::Dict{Symbol,Float64},
+)::Vector{Float64}
+    if length(full_param_names) != length(param_values)
+        error("full_param_names and param_values length mismatch.")
+    end
+    validate_fixed_param_names!(full_param_names, fixed_param_values)
+
+    for (param_index, param_name) in enumerate(full_param_names)
+        if haskey(fixed_param_values, param_name)
+            param_values[param_index] = fixed_param_values[param_name]
+        end
+    end
+    return param_values
+end
+
+"""
+用途: 检查固定参数是否都属于 mean-field 参数集合。
+
+参数:
+- `wf_param_names::Vector{Symbol}`: 当前 ansatz 的 mean-field 参数名列表。
+- `fixed_param_values::Dict{Symbol, Float64}`: 参数名到固定值的映射。
+
+返回:
+- `nothing`。若固定了非 mean-field 参数会抛出异常。
+"""
+function validate_fixed_mean_field_params!(
+    wf_param_names::Vector{Symbol},
+    fixed_param_values::Dict{Symbol,Float64},
+)::Nothing
+    wf_param_name_set = Set(wf_param_names)
+    for fixed_param_name in keys(fixed_param_values)
+        if !(fixed_param_name in wf_param_name_set)
+            error(
+                "Only mean-field parameters can be fixed in this SR path. " *
+                "Got $(fixed_param_name), available mean-field parameters are $(join(String.(wf_param_names), ", ")).",
+            )
+        end
+    end
+    return nothing
+end
+
+"""
+用途: 将 SR 优化器中的 active 参数向量合并回完整参数向量。
+
+参数:
+- `full_param_template::Vector{Float64}`: 完整参数模板, 其中固定参数已经是固定值。
+- `active_param_indices::Vector{Int}`: active 参数在完整参数向量中的下标。
+- `active_param_values::Vector{Float64}`: SR 优化器当前持有的 active 参数值。
+
+返回:
+- `Vector{Float64}`: 合并后的完整参数向量。
+"""
+function merge_active_params_into_full(
+    full_param_template::Vector{Float64},
+    active_param_indices::Vector{Int},
+    active_param_values::Vector{Float64},
+)::Vector{Float64}
+    if length(active_param_indices) != length(active_param_values)
+        error("active_param_indices and active_param_values length mismatch.")
+    end
+    full_param_values = copy(full_param_template)
+    for (active_offset, param_index) in enumerate(active_param_indices)
+        if param_index < 1 || param_index > length(full_param_template)
+            error("active parameter index $(param_index) is outside 1:$(length(full_param_template)).")
+        end
+        full_param_values[param_index] = active_param_values[active_offset]
+    end
+    return full_param_values
+end
+
+"""
+用途: 将固定参数补写进 SR 产生的最优参数 JSON。
+
+参数:
+- `json_path::AbstractString`: `extract_min_energy` 生成的 JSON 文件路径。
+- `fixed_param_values::Dict{Symbol, Float64}`: 参数名到固定值的映射。
+
+返回:
+- `nothing`。
+"""
+function append_fixed_params_to_json!(
+    json_path::AbstractString,
+    fixed_param_values::Dict{Symbol,Float64},
+)::Nothing
+    if isempty(fixed_param_values)
+        return nothing
+    end
+    param_dict = JSON.parsefile(json_path)
+    for (param_name, param_value) in fixed_param_values
+        param_dict[String(param_name)] = param_value
+    end
+    open(json_path, "w") do io
+        JSON.print(io, param_dict)
+        println(io)
+    end
+    return nothing
+end
+
+"""
+用途: 将未参与 SR 优化的参数补写进最优参数 JSON。
+
+参数:
+- `json_path::AbstractString`: `extract_min_energy` 生成的 JSON 文件路径。
+- `full_param_names::Vector{Symbol}`: 完整参数名列表。
+- `full_param_values::Vector{Float64}`: 与 `full_param_names` 对齐的完整参数值模板。
+- `active_param_indices::Vector{Int}`: 参与 SR 优化的参数下标。
+
+返回:
+- `nothing`。
+"""
+function append_inactive_params_to_json!(
+    json_path::AbstractString,
+    full_param_names::Vector{Symbol},
+    full_param_values::Vector{Float64},
+    active_param_indices::Vector{Int},
+)::Nothing
+    if length(full_param_names) != length(full_param_values)
+        error("full_param_names and full_param_values length mismatch.")
+    end
+
+    active_param_index_set = Set(active_param_indices)
+    param_dict = JSON.parsefile(json_path)
+    for (param_index, param_name) in enumerate(full_param_names)
+        if !(param_index in active_param_index_set)
+            param_dict[String(param_name)] = full_param_values[param_index]
+        end
+    end
+
+    open(json_path, "w") do io
+        JSON.print(io, param_dict)
+        println(io)
+    end
+    return nothing
+end
+
+"""
+用途: 根据参数更新 restricted Hubbard determinant 波函数和参数导数。
+
+参数:
+- `vwf`: determinant 波函数对象。
+- `param_names::Vector{Symbol}`: 完整参数名列表, 顺序为 mean-field, projector, backflow。
+- `params::Vector{Float64}`: 与 `param_names` 对齐的完整参数值。
+- `lx, ly, bcx, bcy, target_sz`: 晶格尺寸、边界条件和 total Sz。
+- `nparams_proj::Int`: projector 参数数量。
+- `nparams_backflow::Int`: backflow 参数数量。
+- `Q::Float64`: stripe 波矢。
+- `x0::Float64`: stripe 中心偏移。
+- `active_wf_param_names::Union{Nothing, Vector{Symbol}}`: 参与求导和 SR 的 mean-field 参数名; 为 `nothing` 时使用全部 mean-field 参数。
+
+返回:
+- `nothing`。
+"""
 function update_ansatz!(
     vwf,
     param_names::Vector{Symbol},
@@ -573,7 +1261,8 @@ function update_ansatz!(
     nparams_proj::Int=0,
     nparams_backflow::Int=0,
     Q::Float64=0.0,
-    x0::Float64=0.0
+    x0::Float64=0.0,
+    active_wf_param_names::Union{Nothing,Vector{Symbol}}=nothing,
 )
     # 支持输入为 wf 参数 + projector 参数 + backflow 参数的拼接向量
     nparms = length(param_names)
@@ -584,6 +1273,13 @@ function update_ansatz!(
     projector_param_values = params[(nparams_wf+1):(nparams_wf+nparams_proj)]
     backflow_param_names = param_names[(nparams_wf+nparams_proj+1):end]
     backflow_param_values = params[(nparams_wf+nparams_proj+1):end]
+    derivative_wf_param_names = active_wf_param_names === nothing ? wf_param_names : active_wf_param_names
+    wf_param_name_set = Set(wf_param_names)
+    for derivative_param_name in derivative_wf_param_names
+        if !(derivative_param_name in wf_param_name_set)
+            error("Active mean-field parameter $(derivative_param_name) is not in full mean-field parameter list.")
+        end
+    end
     # 这里也可以把 bcx, bcy 提出来作为参数
     param_map = Dict{Symbol,Float64}(zip(wf_param_names, wf_param_values))
 
@@ -612,17 +1308,17 @@ function update_ansatz!(
         x0=x0
     )
 
-    _, gs_U, dUt_params = PartonSquare.make_ansatz_and_derivs(hubbard_params; param_names=wf_param_names, target_sz=target_sz, Q=Q, x0=x0)
+    _, gs_U, dUt_params = PartonSquare.make_ansatz_and_derivs(hubbard_params; param_names=derivative_wf_param_names, target_sz=target_sz, Q=Q, x0=x0)
 
     copyto!(vwf.base_gs_U, gs_U)
     copyto!(vwf.gs_U, gs_U)
     copyto!(vwf.backflow_u, gs_U)
     copyto!(vwf.gs_U_t, permutedims(gs_U))
-    dUt_matrix = zeros(Float64, size(gs_U, 2), size(gs_U, 1), length(wf_param_names))
-    for (idx, name) in enumerate(wf_param_names)
+    dUt_matrix = zeros(Float64, size(gs_U, 2), size(gs_U, 1), length(derivative_wf_param_names))
+    for (idx, name) in enumerate(derivative_wf_param_names)
         dUt_matrix[:, :, idx] = dUt_params[name]
     end
-    update_vwf_params!(vwf, wf_param_names, dUt_matrix)
+    update_vwf_params!(vwf, derivative_wf_param_names, dUt_matrix)
     if !isempty(projector_param_names)
         update_vwf_projector_params!(vwf, projector_param_names, projector_param_values)
     end
@@ -719,7 +1415,10 @@ function main()
     bf_eta1 = args["bf_eta1"]
     bf_eta2 = args["bf_eta2"]
     bf_eta3 = args["bf_eta3"]
+    enable_backflow = parse_bool_flag(args["enable_backflow"], "--enable_backflow")
     init_params_json = args["init_params_json"]
+    fixed_params_string = args["fixed_params"]
+    active_params_string = args["active_params"]
     N_sites = lx * ly
     #要优化的参数
     if ansatz == "AFM"
@@ -781,7 +1480,8 @@ function main()
 
     # Projector 定义
     projector = build_restricted_projector(lx, ly, g)
-    backflow = build_restricted_composite_backflow(
+    backflow = build_restricted_optional_backflow(
+        enable_backflow,
         backflow_source_bonds,
         backflow_source_amplitudes,
         bf_epsilon,
@@ -800,11 +1500,45 @@ function main()
     param_names = vcat(wf_param_names, proj_param_names, backflow_param_name_list)
 
     if !isempty(init_params_json)
-        init_params = build_init_params_from_json(init_params_json, param_names)
+        init_params = build_init_params_from_json_with_defaults(init_params_json, param_names, init_params)
         if is_root
             println("Loaded initial parameters from json: $(init_params_json)")
         end
     end
+    fixed_param_values = parse_fixed_param_string(fixed_params_string)
+    requested_active_param_names = parse_param_name_list(active_params_string)
+    validate_fixed_mean_field_params!(wf_param_names, fixed_param_values)
+    if !isempty(fixed_param_values)
+        init_params = apply_fixed_params_to_values(param_names, init_params, fixed_param_values)
+    end
+    active_param_indices = build_active_param_indices(param_names, fixed_param_values, requested_active_param_names)
+    if job == "SR" && isempty(active_param_indices)
+        error("At least one parameter must remain active for SR optimization.")
+    end
+    uses_param_subset = length(active_param_indices) != length(param_names) || !isempty(requested_active_param_names)
+    sr_param_names = uses_param_subset ? param_names[active_param_indices] : param_names
+    sr_init_params = uses_param_subset ? init_params[active_param_indices] : init_params
+    wf_param_name_set = Set(wf_param_names)
+    projector_param_name_set = Set(proj_param_names)
+    backflow_param_name_set = Set(backflow_param_name_list)
+    active_wf_param_names = [
+        name for name in sr_param_names
+        if name in wf_param_name_set
+    ]
+    active_projector_param_names = [
+        name for name in sr_param_names
+        if name in projector_param_name_set
+    ]
+    active_backflow_param_names = [
+        name for name in sr_param_names
+        if name in backflow_param_name_set
+    ]
+    set_active_sr_derivative_param_names!(
+        proj_param_names,
+        backflow_param_name_list;
+        active_projector_param_names=uses_param_subset ? active_projector_param_names : nothing,
+        active_backflow_param_names=uses_param_subset ? active_backflow_param_names : nothing,
+    )
 
     terms = OperatorTerm[]
     for (i, j) in bonds1
@@ -839,6 +1573,17 @@ function main()
     # C. 更新波函数参数
     if rank == 0
         println("Initial parameters: $init_params")
+        if !isempty(fixed_param_values)
+            fixed_param_messages = [
+                "$(String(param_name))=$(fixed_param_values[param_name])"
+                for param_name in sort(collect(keys(fixed_param_values)); by=String)
+            ]
+            println("Fixed parameters: $(join(fixed_param_messages, ", "))")
+        end
+        if uses_param_subset
+            active_param_names = param_names[active_param_indices]
+            println("Active parameters: $(join(String.(active_param_names), ", "))")
+        end
     end
     update_ansatz!(vwf, param_names, init_params, lx, ly, BCX, BCY, target_sz; nparams_proj=nparams_proj, nparams_backflow=nparams_backflow, Q=Q, x0=x0)
 
@@ -851,21 +1596,33 @@ function main()
         sr_params = SRParams(vmc_params=meas_params, n_steps=n_steps, lr=lr)
         exp_lr_func = build_exponential_lr_func(lr, lr_end, n_steps)
 
-        update_vwf_func! = (vwf, params) -> update_ansatz!(vwf, param_names, params, lx, ly, BCX, BCY, target_sz; nparams_proj=nparams_proj, nparams_backflow=nparams_backflow, Q=Q, x0=x0)
+        update_vwf_func! = (vwf, params) -> begin
+            full_params = uses_param_subset ?
+                          merge_active_params_into_full(init_params, active_param_indices, params) :
+                          params
+            derivative_wf_param_names = uses_param_subset ? active_wf_param_names : nothing
+            update_ansatz!(vwf, param_names, full_params, lx, ly, BCX, BCY, target_sz; nparams_proj=nparams_proj, nparams_backflow=nparams_backflow, Q=Q, x0=x0, active_wf_param_names=derivative_wf_param_names)
+        end
 
         run_sr_optimization(
             ham,
             vwf,
             kernel,
-            init_params,
+            sr_init_params,
             update_vwf_func!,
             sr_params;
             log_file=joinpath(folder, "sr_history.txt"),
-            param_names=param_names,
+            param_names=sr_param_names,
             lr_func=exp_lr_func
         )
         if is_root
             min_energy = extract_min_energy(joinpath(folder, "sr_history.txt"))
+            append_inactive_params_to_json!(
+                joinpath(folder, "min_params.json"),
+                param_names,
+                init_params,
+                active_param_indices,
+            )
         end
     elseif job == "measure"
         observables = defination_observabels(lx, ly)
