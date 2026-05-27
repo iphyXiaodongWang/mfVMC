@@ -55,6 +55,8 @@ export build_backflow_derivative_orbitals, build_eq4_backflow_derivative_orbital
 abstract type AbstractBackflowTerm end
 abstract type AbstractBackflowCorrectionTerm end
 
+const BACKFLOW_EPSILON_MASK_TERMS = (:eta1, :eta2, :eta3)
+
 
 """
 用途: 保存 Eq.(5) 单个 backflow correction term 的公共 source 数据。
@@ -89,6 +91,30 @@ function build_backflow_correction_source_cache(
         outgoing_bond_indices_by_source=graph_cache.outgoing_bond_indices_by_source,
         incoming_source_sites_by_target=graph_cache.incoming_source_sites_by_target,
     )
+end
+
+"""
+用途: 规范化 `epsilon` prefactor 使用的 virtual hopping mask 通道列表。
+
+参数:
+- `epsilon_mask_terms::AbstractVector{Symbol}`: 允许的元素为 `:eta1`, `:eta2`, `:eta3`。
+
+返回:
+- `Vector{Symbol}`: 去重后且保持输入顺序的 mask 通道列表。
+"""
+function normalize_backflow_epsilon_mask_terms(
+    epsilon_mask_terms::AbstractVector{Symbol},
+)::Vector{Symbol}
+    normalized_terms = Symbol[]
+    for mask_term in epsilon_mask_terms
+        if !(mask_term in BACKFLOW_EPSILON_MASK_TERMS)
+            error("Unknown epsilon mask term $(mask_term). Allowed terms are :eta1, :eta2, and :eta3.")
+        end
+        if !(mask_term in normalized_terms)
+            push!(normalized_terms, mask_term)
+        end
+    end
+    return normalized_terms
 end
 
 
@@ -183,17 +209,19 @@ end
 用途: Eq.(5) 中的 `epsilon` backflow correction term。
 
 数学公式:
-- `delta U_epsilon(i, sigma) = (epsilon_bf - 1) * xi_i * U_0(i, sigma)`。
+- `delta U_epsilon(i, sigma) = (epsilon_bf - 1) * xi_{i,sigma} * U_0(i, sigma)`。
 
 字段:
 - `param_name::Symbol`: 参数名。
 - `epsilon_bf::Float64`: `epsilon` 参数值。
+- `epsilon_mask_terms::Vector{Symbol}`: 控制 `xi_{i,sigma}` 的 virtual hopping 通道。
 - `source_bonds::Vector{Tuple{Int, Int}}`: 有向键 `(i, j)` 列表。
 - `source_amplitudes::Vector{Float64}`: 与有向键对齐的 hopping 振幅。
 """
 mutable struct BackflowEpsilonTerm <: AbstractBackflowCorrectionTerm
     param_name::Symbol
     epsilon_bf::Float64
+    epsilon_mask_terms::Vector{Symbol}
     source_bonds::Vector{Tuple{Int, Int}}
     source_amplitudes::Vector{Float64}
     source_data_signature::UInt
@@ -456,6 +484,8 @@ end
 参数:
 - `param_name::Symbol`: 参数名, 默认 `:bf_epsilon`。
 - `epsilon_bf::Real`: `epsilon` 参数值。
+- `epsilon_mask_terms::AbstractVector{Symbol}`: 打开 `epsilon` prefactor 的 virtual hopping 通道,
+  允许 `:eta1`, `:eta2`, `:eta3`。
 - `source_bonds::Vector{Tuple{Int, Int}}`: 有向键 `(i, j)` 列表。
 - `source_amplitudes::Vector{<:Real}`: 每条有向键对应的 hopping 振幅。
 
@@ -465,6 +495,7 @@ end
 function BackflowEpsilonTerm(;
     param_name::Symbol=:bf_epsilon,
     epsilon_bf::Real=1.0,
+    epsilon_mask_terms::AbstractVector{Symbol}=Symbol[:eta1],
     source_bonds::Vector{Tuple{Int, Int}}=Tuple{Int, Int}[],
     source_amplitudes::Vector{<:Real}=ones(Float64, length(source_bonds)),
 )
@@ -472,6 +503,7 @@ function BackflowEpsilonTerm(;
     return BackflowEpsilonTerm(
         param_name,
         Float64(epsilon_bf),
+        normalize_backflow_epsilon_mask_terms(epsilon_mask_terms),
         source_cache.source_bonds,
         source_cache.source_amplitudes,
         source_cache.source_data_signature,
@@ -913,7 +945,7 @@ end
 用途: 将 Eq.(5) 的 `epsilon` correction term 在 proposal 后对单个站点行块的贡献累加到 buffer。
 
 数学公式:
-- `delta U_epsilon(i, sigma; x') = (epsilon_bf - 1) * xi_i(x') * U_0(i, sigma)`。
+- `delta U_epsilon(i, sigma; x') = (epsilon_bf - 1) * xi_{i,sigma}(x') * U_0(i, sigma)`。
 
 参数:
 - `site_block_buffer::AbstractMatrix{T}`: 待累加的 `2 x N_orb` 站点行块。
@@ -935,25 +967,31 @@ function add_backflow_correction_site_block_after_proposal!(
     site_index::Int,
 ) where {T}
     site_state_after = get_site_state_after_proposal(state_vector, proposal, site_index)
-    if site_state_after != DB || site_index > length(correction_term.outgoing_bond_indices_by_source)
+    if site_index > length(correction_term.outgoing_bond_indices_by_source)
         return nothing
     end
 
-    xi_value = false
-    for bond_index in correction_term.outgoing_bond_indices_by_source[site_index]
-        (_, target_site) = correction_term.source_bonds[bond_index]
-        if get_site_state_after_proposal(state_vector, proposal, target_site) == HOLE
-            xi_value = true
-            break
+    epsilon_shift = T(correction_term.epsilon_bf - 1.0)
+    for row_offset in 1:2
+        spin = backflow_spin_from_row_offset(row_offset)
+        xi_value = false
+        for bond_index in correction_term.outgoing_bond_indices_by_source[site_index]
+            (_, target_site) = correction_term.source_bonds[bond_index]
+            target_state_after = get_site_state_after_proposal(state_vector, proposal, target_site)
+            if is_backflow_epsilon_row_active(
+                site_state_after,
+                target_state_after,
+                spin,
+                correction_term.epsilon_mask_terms,
+            )
+                xi_value = true
+                break
+            end
         end
-    end
-
-    if xi_value
-        row_up = 2 * (site_index - 1) + 1
-        row_dn_hole = row_up + 1
-        epsilon_shift = T(correction_term.epsilon_bf - 1.0)
-        @views site_block_buffer[1, :] .+= epsilon_shift .* base_orbitals[row_up, :]
-        @views site_block_buffer[2, :] .+= epsilon_shift .* base_orbitals[row_dn_hole, :]
+        if xi_value
+            row_index = 2 * (site_index - 1) + row_offset
+            @views site_block_buffer[row_offset, :] .+= epsilon_shift .* base_orbitals[row_index, :]
+        end
     end
 
     return nothing
@@ -1588,10 +1626,148 @@ function backflow_h_sigma(state_code::Int8, spin::Int8)::Float64
 end
 
 """
+用途: 计算 Eq.(5) 中 `eta2` 对给定 `(i, j, sigma)` 的局域 virtual hopping 因子。
+
+数学公式:
+- `eta2_factor = n_{i,sigma} h_{i,-sigma} n_{j,-sigma} h_{j,sigma}`。
+
+参数:
+- `state_i::Int8`: source site `i` 的物理状态编码。
+- `state_j::Int8`: target site `j` 的物理状态编码。
+- `spin::Int8`: 当前行对应的物理自旋 `sigma`。
+
+返回:
+- `Float64`: 因子取值, 当前实现中为 `0.0` 或 `1.0`。
+"""
+function compute_eta2_virtual_hopping_factor(
+    state_i::Int8,
+    state_j::Int8,
+    spin::Int8,
+)::Float64
+    opposite_spin = backflow_opposite_spin(spin)
+    return backflow_n_sigma(state_i, spin) *
+           backflow_h_sigma(state_i, opposite_spin) *
+           backflow_n_sigma(state_j, opposite_spin) *
+           backflow_h_sigma(state_j, spin)
+end
+
+"""
+用途: 计算 Eq.(5) 中 `eta3` 对给定 `(i, j, sigma)` 的 mixed virtual hopping 因子。
+
+数学公式:
+- `eta3_factor = D_i n_{j,-sigma} h_{j,sigma} + n_{i,sigma} h_{i,-sigma} H_j`。
+
+参数:
+- `state_i::Int8`: source site `i` 的物理状态编码。
+- `state_j::Int8`: target site `j` 的物理状态编码。
+- `spin::Int8`: 当前行对应的物理自旋 `sigma`。
+
+返回:
+- `Float64`: 因子取值, 当前实现中为 `0.0` 或 `1.0`。
+"""
+function compute_eta3_virtual_hopping_factor(
+    state_i::Int8,
+    state_j::Int8,
+    spin::Int8,
+)::Float64
+    opposite_spin = backflow_opposite_spin(spin)
+    return (state_i == DB ? 1.0 : 0.0) *
+           backflow_n_sigma(state_j, opposite_spin) *
+           backflow_h_sigma(state_j, spin) +
+           backflow_n_sigma(state_i, spin) *
+           backflow_h_sigma(state_i, opposite_spin) *
+           (state_j == HOLE ? 1.0 : 0.0)
+end
+
+"""
+用途: 判断 `epsilon` prefactor 是否应在某个 `(i, sigma)` 行打开。
+
+数学公式:
+- 若 `epsilon_mask_terms` 包含 `:eta1`, 则检查 `D_i H_j`。
+- 若包含 `:eta2`, 则检查
+  `n_{i,sigma} h_{i,-sigma} n_{j,-sigma} h_{j,sigma}`。
+- 若包含 `:eta3`, 则检查
+  `D_i n_{j,-sigma} h_{j,sigma} + n_{i,sigma} h_{i,-sigma} H_j`。
+
+参数:
+- `state_i::Int8`: source site `i` 的物理状态编码。
+- `state_j::Int8`: target site `j` 的物理状态编码。
+- `spin::Int8`: 当前行对应的物理自旋 `sigma`。
+- `epsilon_mask_terms::Vector{Symbol}`: 参与 `epsilon` mask 的 virtual hopping 通道。
+
+返回:
+- `Bool`: 任一指定通道在该有向键上激活时返回 `true`。
+"""
+function is_backflow_epsilon_row_active(
+    state_i::Int8,
+    state_j::Int8,
+    spin::Int8,
+    epsilon_mask_terms::Vector{Symbol},
+)::Bool
+    for mask_term in epsilon_mask_terms
+        if mask_term == :eta1
+            if state_i == DB && state_j == HOLE
+                return true
+            end
+        elseif mask_term == :eta2
+            if compute_eta2_virtual_hopping_factor(state_i, state_j, spin) != 0.0
+                return true
+            end
+        elseif mask_term == :eta3
+            if compute_eta3_virtual_hopping_factor(state_i, state_j, spin) != 0.0
+                return true
+            end
+        else
+            error("Unknown epsilon mask term $(mask_term).")
+        end
+    end
+    return false
+end
+
+"""
+用途: 为 `BackflowEpsilonTerm` 构造 spin-resolved `xi_{i,sigma}` 行掩码。
+
+数学公式:
+- `xi_{i,sigma} = 1`, 当且仅当存在有向键 `(i, j)` 使得
+  `epsilon_mask_terms` 指定的任意 virtual hopping 因子非零。
+
+参数:
+- `state_vector::Vector{Int8}`: 当前 Monte Carlo 构型。
+- `correction_term::BackflowEpsilonTerm`: `epsilon` correction term。
+
+返回:
+- `Vector{Bool}`: 长度为 `2 * N_sites` 的行掩码, 第 `2i-1` 行为 up,
+  第 `2i` 行为 down。
+"""
+function compute_backflow_epsilon_row_mask(
+    state_vector::Vector{Int8},
+    correction_term::BackflowEpsilonTerm,
+)::Vector{Bool}
+    epsilon_row_mask = falses(2 * length(state_vector))
+    for (site_i, site_j) in correction_term.source_bonds
+        state_i = state_vector[site_i]
+        state_j = state_vector[site_j]
+        for row_offset in 1:2
+            spin = backflow_spin_from_row_offset(row_offset)
+            if is_backflow_epsilon_row_active(
+                state_i,
+                state_j,
+                spin,
+                correction_term.epsilon_mask_terms,
+            )
+                row_i = 2 * (site_i - 1) + row_offset
+                epsilon_row_mask[row_i] = true
+            end
+        end
+    end
+    return epsilon_row_mask
+end
+
+"""
 用途: 将 Eq.(5) 的 `epsilon` correction term 加到 backflow 轨道矩阵。
 
 数学公式:
-- `delta U_epsilon(i, sigma) = (epsilon_bf - 1) * xi_i * U_0(i, sigma)`。
+- `delta U_epsilon(i, sigma) = (epsilon_bf - 1) * xi_{i,sigma} * U_0(i, sigma)`。
 
 参数:
 - `backflow_orbitals::AbstractMatrix{T}`: 待累加的 backflow 轨道矩阵。
@@ -1609,22 +1785,13 @@ function add_backflow_correction_orbitals!(
     correction_term::BackflowEpsilonTerm,
 ) where {T}
     validate_backflow_correction_source_data!(correction_term)
-    recombination_mask = zeros(Bool, length(state_vector))
-    for (site_i, site_j) in correction_term.source_bonds
-        if state_vector[site_i] == DB && state_vector[site_j] == HOLE
-            recombination_mask[site_i] = true
-        end
-    end
-
+    epsilon_row_mask = compute_backflow_epsilon_row_mask(state_vector, correction_term)
     epsilon_shift = T(correction_term.epsilon_bf - 1.0)
-    for site_i in eachindex(state_vector)
-        if !recombination_mask[site_i]
+    for row_index in eachindex(epsilon_row_mask)
+        if !epsilon_row_mask[row_index]
             continue
         end
-        row_up = 2 * (site_i - 1) + 1
-        row_dn_hole = row_up + 1
-        @views backflow_orbitals[row_up, :] .+= epsilon_shift .* base_orbitals[row_up, :]
-        @views backflow_orbitals[row_dn_hole, :] .+= epsilon_shift .* base_orbitals[row_dn_hole, :]
+        @views backflow_orbitals[row_index, :] .+= epsilon_shift .* base_orbitals[row_index, :]
     end
 
     return nothing
@@ -2048,7 +2215,7 @@ end
 用途: 将 Eq.(5) 的 `epsilon` correction term 对 `epsilon_bf` 的导数累加到导数轨道矩阵。
 
 数学公式:
-- `partial U_b(i, sigma) / partial epsilon_bf = xi_i * U_0(i, sigma)`。
+- `partial U_b(i, sigma) / partial epsilon_bf = xi_{i,sigma} * U_0(i, sigma)`。
 
 参数:
 - `derivative_orbitals::AbstractMatrix{T}`: 待累加的导数轨道矩阵。
@@ -2066,21 +2233,12 @@ function add_backflow_correction_derivative_orbitals!(
     correction_term::BackflowEpsilonTerm,
 ) where {T}
     validate_backflow_correction_source_data!(correction_term)
-    recombination_mask = zeros(Bool, length(state_vector))
-    for (site_i, site_j) in correction_term.source_bonds
-        if state_vector[site_i] == DB && state_vector[site_j] == HOLE
-            recombination_mask[site_i] = true
-        end
-    end
-
-    for site_i in eachindex(state_vector)
-        if !recombination_mask[site_i]
+    epsilon_row_mask = compute_backflow_epsilon_row_mask(state_vector, correction_term)
+    for row_index in eachindex(epsilon_row_mask)
+        if !epsilon_row_mask[row_index]
             continue
         end
-        row_up = 2 * (site_i - 1) + 1
-        row_dn_hole = row_up + 1
-        copyto!(@view(derivative_orbitals[row_up, :]), @view(base_orbitals[row_up, :]))
-        copyto!(@view(derivative_orbitals[row_dn_hole, :]), @view(base_orbitals[row_dn_hole, :]))
+        copyto!(@view(derivative_orbitals[row_index, :]), @view(base_orbitals[row_index, :]))
     end
 
     return nothing

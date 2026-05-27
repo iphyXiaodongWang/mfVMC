@@ -163,11 +163,11 @@ function parse_commandline()
         arg_type = Float64
         default = 0.0
         "--bf_eta2"
-        help = "Eq.(5) backflow eta2 spin-exchange hopping parameter, currently ignored by eta1-only restricted backflow"
+        help = "Eq.(5) backflow eta2 spin-exchange hopping parameter"
         arg_type = Float64
         default = 0.0
         "--bf_eta3"
-        help = "Eq.(5) backflow eta3 mixed virtual hopping parameter, currently ignored by eta1-only restricted backflow"
+        help = "Eq.(5) backflow eta3 mixed virtual hopping parameter"
         arg_type = Float64
         default = 0.0
     end
@@ -748,23 +748,28 @@ function build_restricted_projector(
 end
 
 """
-用途: 构造受约束 Hubbard 主程序当前用于测试的 eta1-only composite backflow。
+用途: 构造受约束 Hubbard 主程序使用的完整 Eq.(5) composite backflow。
 
 数学公式:
-- `U_b = U_0 + delta U_epsilon + delta U_eta1`。
-- `delta U_epsilon(i, sigma) = (bf_epsilon - 1) * xi_i * U_0(i, sigma)`。
+- `U_b = U_0 + delta U_epsilon + delta U_eta1 + delta U_eta2 + delta U_eta3`。
+- `delta U_epsilon(i, sigma) = (bf_epsilon - 1) * xi_{i,sigma} * U_0(i, sigma)`。
 - `delta U_eta1(i, sigma) = bf_eta1 * sum_j t_ij * D_i * H_j * U_0(j, sigma)`。
+- `delta U_eta2(i, sigma) = bf_eta2 * sum_j t_ij *
+   n_i_sigma h_i_-sigma n_j_-sigma h_j_sigma * U_0(j, sigma)`。
+- `delta U_eta3(i, sigma) = bf_eta3 * sum_j t_ij *
+   (D_i n_j_-sigma h_j_sigma + n_i_sigma h_i_-sigma H_j) * U_0(j, sigma)`。
+- `xi_{i,sigma}` 在 `eta1`, `eta2`, `eta3` 任一局域 virtual hopping 条件非零时取 `1`。
 
 参数:
 - `source_bonds::Vector{Tuple{Int, Int}}`: 有向键 `(i, j)` 列表。
 - `source_amplitudes::Vector{<:Real}`: 与有向键对齐的 hopping 振幅 `t_ij`。
 - `bf_epsilon::Float64`: `epsilon` backflow 参数, 退化值为 `1.0`。
 - `bf_eta1::Float64`: `eta1` backflow 参数, 退化值为 `0.0`。
-- `bf_eta2::Float64`: 兼容旧命令行的占位参数, 当前不参与构造。
-- `bf_eta3::Float64`: 兼容旧命令行的占位参数, 当前不参与构造。
+- `bf_eta2::Float64`: `eta2` backflow 参数, 退化值为 `0.0`。
+- `bf_eta3::Float64`: `eta3` backflow 参数, 退化值为 `0.0`。
 
 返回:
-- `CompositeBackflowTerm`: 按 `bf_epsilon, bf_eta1` 顺序排列的 backflow。
+- `CompositeBackflowTerm`: 按 `bf_epsilon, bf_eta1, bf_eta2, bf_eta3` 顺序排列的 backflow。
 """
 function build_restricted_composite_backflow(
     source_bonds::Vector{Tuple{Int,Int}},
@@ -778,12 +783,25 @@ function build_restricted_composite_backflow(
         BackflowEpsilonTerm(
             param_name=:bf_epsilon,
             epsilon_bf=bf_epsilon,
+            epsilon_mask_terms=Symbol[:eta1, :eta2, :eta3],
             source_bonds=source_bonds,
             source_amplitudes=source_amplitudes,
         ),
         BackflowEta1DoublonHoleTerm(
             param_name=:bf_eta1,
             eta1_bf=bf_eta1,
+            source_bonds=source_bonds,
+            source_amplitudes=source_amplitudes,
+        ),
+        BackflowEta2SpinExchangeTerm(
+            param_name=:bf_eta2,
+            eta2_bf=bf_eta2,
+            source_bonds=source_bonds,
+            source_amplitudes=source_amplitudes,
+        ),
+        BackflowEta3MixedVirtualHopTerm(
+            param_name=:bf_eta3,
+            eta3_bf=bf_eta3,
             source_bonds=source_bonds,
             source_amplitudes=source_amplitudes,
         ),
@@ -799,8 +817,8 @@ end
 - `source_amplitudes::Vector{<:Real}`: 与有向键对齐的 hopping 振幅 `t_ij`。
 - `bf_epsilon::Float64`: `epsilon` backflow 参数。
 - `bf_eta1::Float64`: `eta1` backflow 参数。
-- `bf_eta2::Float64`: 当前 eta1-only 路径中的兼容占位参数。
-- `bf_eta3::Float64`: 当前 eta1-only 路径中的兼容占位参数。
+- `bf_eta2::Float64`: `eta2` backflow 参数。
+- `bf_eta3::Float64`: `eta3` backflow 参数。
 
 返回:
 - `AbstractBackflowTerm`: 启用时为 `CompositeBackflowTerm`; 禁用时为 `NoBackflowTerm`。

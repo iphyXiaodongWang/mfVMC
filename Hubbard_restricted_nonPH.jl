@@ -13,7 +13,7 @@ using Utils: add_term_ij_nonPH, compute_eig_and_dU_reg1
 
 说明:
 - nonPH 版本删除 mean-field pairing 参数, 因此这里不提供 `etax` 和 `etay`。
-- backflow 的 `bf_eta2`, `bf_eta3` 仍保留为命令行占位, 当前 eta1-only 路径不使用它们。
+- backflow 使用完整 Eq.(5) 的 `bf_epsilon`, `bf_eta1`, `bf_eta2`, `bf_eta3`。
 """
 function parse_nonph_commandline()
     settings = ArgParseSettings()
@@ -148,11 +148,11 @@ function parse_nonph_commandline()
         arg_type = Float64
         default = 0.0
         "--bf_eta2"
-        help = "Eq.(5) backflow eta2 placeholder, currently ignored by eta1-only restricted backflow"
+        help = "Eq.(5) backflow eta2 spin-exchange hopping parameter"
         arg_type = Float64
         default = 0.0
         "--bf_eta3"
-        help = "Eq.(5) backflow eta3 placeholder, currently ignored by eta1-only restricted backflow"
+        help = "Eq.(5) backflow eta3 mixed virtual hopping parameter"
         arg_type = Float64
         default = 0.0
     end
