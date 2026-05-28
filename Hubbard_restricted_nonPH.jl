@@ -273,10 +273,10 @@ function build_restricted_hubbard_nonph_hamiltonian(
             bc_pp = ((x == lx) ? params.bcx : 1.0) * ((y == ly) ? params.bcy : 1.0)
             bc_mp = ((x == 1) ? params.bcx : 1.0) * ((y == ly) ? params.bcy : 1.0)
 
-            add_term_ij_nonPH(hamiltonian, site_i, site_x, params.chi1 * bc_x)
-            add_term_ij_nonPH(hamiltonian, site_i, site_y, params.chi1 * bc_y)
-            add_term_ij_nonPH(hamiltonian, site_i, site_pp, params.chi2 * bc_pp)
-            add_term_ij_nonPH(hamiltonian, site_i, site_mp, params.chi2 * bc_mp)
+            add_term_ij_nonPH(hamiltonian, site_i, site_x, -params.chi1 * bc_x)
+            add_term_ij_nonPH(hamiltonian, site_i, site_y, -params.chi1 * bc_y)
+            add_term_ij_nonPH(hamiltonian, site_i, site_pp, -params.chi2 * bc_pp)
+            add_term_ij_nonPH(hamiltonian, site_i, site_mp, -params.chi2 * bc_mp)
 
             up_row = 2 * (site_i - 1) + 1
             down_row = up_row + 1

@@ -913,10 +913,10 @@ function build_ham_PH(p::RestrictedHubbardParams)
 			idmp = xy_to_idx((x == 1) ? Lx : x - 1, (y == Ly) ? 1 : y + 1, Ly)
 			bc_pp = ((x == Lx) ? p.bcx : 1.0) * ((y == Ly) ? p.bcy : 1.0)
 			bc_mp = ((x == 1) ? p.bcx : 1.0) * ((y == Ly) ? p.bcy : 1.0)
-			add_term_ij_PH(H, id0, idx, chi1 * bc_x, etax0 * bc_x)
-			add_term_ij_PH(H, id0, idy, chi1 * bc_y, etay0 * bc_y)
-			add_term_ij_PH(H, id0, idpp, chi2 * bc_pp, 0.0)
-			add_term_ij_PH(H, id0, idmp, chi2 * bc_mp, 0.0)
+			add_term_ij_PH(H, id0, idx, -chi1 * bc_x, etax0 * bc_x)
+			add_term_ij_PH(H, id0, idy, -chi1 * bc_y, etay0 * bc_y)
+			add_term_ij_PH(H, id0, idpp, -chi2 * bc_pp, 0.0)
+			add_term_ij_PH(H, id0, idmp, -chi2 * bc_mp, 0.0)
 			H[2*(id0-1)+1, 2*(id0-1)+1] += sign * mz0 / 2 + mu0 / 2
 			H[2*(id0-1)+2, 2*(id0-1)+2] += sign * mz0 / 2 - mu0 / 2
 		end
