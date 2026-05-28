@@ -3,37 +3,34 @@ module Backflow
 using ..Sampler
 
 export AbstractBackflowTerm, AbstractBackflowCorrectionTerm
-export NoBackflowTerm, Eq4BackflowTerm
+export NoBackflowTerm
 export CompositeBackflowTerm
 export BackflowEpsilonTerm, BackflowEta1DoublonHoleTerm
 export BackflowEta2SpinExchangeTerm, BackflowEta3MixedVirtualHopTerm
 export uses_backflow
 export backflow_param_names, backflow_param_values, backflow_param_count
 export update_backflow_params!
-export compute_doublon_hole_masks, compute_recombination_mask
-export build_eq4_backflow_graph_cache
-export build_backflow_orbitals, build_eq4_backflow_orbitals
+export compute_doublon_hole_masks
+export build_backflow_orbitals
 export fill_backflow_chain_rule_orbitals!
-export build_backflow_derivative_orbitals, build_eq4_backflow_derivative_orbitals
+export build_backflow_derivative_orbitals
 
 """
 用途: 管理 determinant 路线中的 backflow correlation 轨道修正。
 
 当前实现范围:
-- 第一阶段只实现 PRB 2008 中 `Eq.(4)` 的核心 orbital dressing。
-- 当前项目的 `Hubbard.jl` 使用 `ConfigurationPH`, 即内部基底不是
-  `up electron + down electron`, 而是 `up electron + down hole`。
-- 因此本模块中的 backflow 公式不是直接作用在“物理电子轨道”上, 而是作用在
-  当前 determinant 实际使用的 PH 轨道基底上。
+- 当前实现保留组合式 Eq.(5) backflow correction terms: `epsilon`, `eta1`, `eta2`, `eta3`。
+- 当前实现只假设轨道矩阵采用每个 site 两行的 spin-resolved layout:
+  第一行为 `UP`, 第二行为 `DN`。
+- 该 layout 可由不同 determinant 表示共用, 具体行的物理解释由调用方决定。
 
-当前代码采用的 `Eq.(4)` 对应写法为:
+当前代码采用的组合式写法为:
 
-- `U_b(a, i, k; x) = [1 + (epsilon_bf - 1) * xi_i(x)] * U_0(a, i, k)
-   + eta_bf * sum_j[t_ij * D_i(x) * H_j(x) * U_0(a, j, k)]`
+- `U_b(i, sigma, k; x) = U_0(i, sigma, k) + sum_m delta U_m(i, sigma, k; x)`,
+  其中 `m` 遍历 `epsilon`, `eta1`, `eta2`, `eta3` correction terms。
 
 其中:
-- `a` 表示当前代码中的内部通道, 即 `up` 或 `dn_hole`。
-- `i, j` 为格点指标, `k` 为轨道指标。
+- `i, j` 为格点指标, `sigma` 为物理自旋标签, `k` 为轨道指标。
 - `U_0` 为裸轨道矩阵, `U_b` 为构型依赖的 backflow 轨道矩阵。
 - `D_i(x) = 1` 当且仅当 site `i` 为 doublon, 否则为 0。
 - `H_i(x) = 1` 当且仅当 site `i` 为 hole, 否则为 0。
@@ -78,8 +75,8 @@ function build_backflow_correction_source_cache(
 
     source_bonds_copy = copy(source_bonds)
     source_amplitudes_copy = Float64.(source_amplitudes)
-    graph_cache = build_eq4_backflow_graph_cache(source_bonds_copy)
-    source_data_signature = compute_eq4_backflow_source_data_signature(
+    graph_cache = build_backflow_source_graph_cache(source_bonds_copy)
+    source_data_signature = compute_backflow_source_data_signature(
         source_bonds_copy,
         source_amplitudes_copy,
     )
@@ -119,7 +116,7 @@ end
 
 
 """
-用途: 保存 `Eq.(4)` backflow 的图缓存, 便于快速定位受影响站点。
+用途: 保存 backflow source graph 的图缓存, 便于快速定位受影响站点。
 
 参数:
 - `outgoing_bond_indices_by_source::Vector{Vector{Int}}`: 按 source site 存储的 bond 索引列表。
@@ -128,7 +125,7 @@ end
 返回:
 - `NamedTuple`: 包含上述两个缓存数组。
 """
-function build_eq4_backflow_graph_cache(source_bonds::Vector{Tuple{Int, Int}})
+function build_backflow_source_graph_cache(source_bonds::Vector{Tuple{Int, Int}})
     max_site_index = 0
     for (bond_index, (site_i, site_j)) in enumerate(source_bonds)
         if site_i < 1 || site_j < 1
@@ -167,41 +164,6 @@ end
 - `NoBackflowTerm`, 用于复用统一接口。
 """
 struct NoBackflowTerm <: AbstractBackflowTerm
-end
-
-
-"""
-用途: 保存 `Eq.(4)` backflow 所需的全局参数与键列表。
-
-数学公式:
-- `U_b = [1 + (epsilon_bf - 1) * xi_i] * U_0
-   + eta_bf * sum_j[t_ij * D_i * H_j * U_0(j)]`。
-
-结构约定:
-- `source_bonds` 与 `source_amplitudes` 在构造后禁止原地修改。
-- 若需要修改 bond 拓扑或 `t_ij`, 应重新构造新的 `Eq4BackflowTerm`。
-
-参数:
-- `param_name_epsilon::Symbol`: `epsilon_bf` 的参数名。
-- `param_name_eta::Symbol`: `eta_bf` 的参数名。
-- `epsilon_bf::Float64`: `Eq.(4)` 中的 `epsilon`。
-- `eta_bf::Float64`: `Eq.(4)` 中的 `eta`。
-- `source_bonds::Vector{Tuple{Int, Int}}`: 有向键 `(i, j)` 列表, 表示 `D_i * H_j`。
-- `source_amplitudes::Vector{Float64}`: 与 `source_bonds` 对齐的 `t_ij` 振幅列表。
-
-返回:
-- `Eq4BackflowTerm` 实例。
-"""
-mutable struct Eq4BackflowTerm <: AbstractBackflowTerm
-    param_name_epsilon::Symbol
-    param_name_eta::Symbol
-    epsilon_bf::Float64
-    eta_bf::Float64
-    source_bonds::Vector{Tuple{Int, Int}}
-    source_amplitudes::Vector{Float64}
-    source_data_signature::UInt
-    outgoing_bond_indices_by_source::Vector{Vector{Int}}
-    incoming_source_sites_by_target::Vector{Vector{Int}}
 end
 
 
@@ -321,7 +283,7 @@ end
 返回:
 - `UInt`: 用于检测原地修改的内容签名。
 """
-function compute_eq4_backflow_source_data_signature(
+function compute_backflow_source_data_signature(
     source_bonds::Vector{Tuple{Int, Int}},
     source_amplitudes::Vector{<:Real},
 )
@@ -336,145 +298,6 @@ function compute_eq4_backflow_source_data_signature(
     end
 
     return source_data_signature
-end
-
-
-"""
-用途: 校验 `Eq4BackflowTerm` 的 source 数据在构造后未被原地修改。
-
-参数:
-- `backflow_term::Eq4BackflowTerm`: 待校验的 backflow 参数对象。
-
-返回:
-- `nothing`。若检测到原地修改则抛出 error。
-"""
-function validate_eq4_backflow_source_data!(
-    backflow_term::Eq4BackflowTerm,
-)
-    current_signature = compute_eq4_backflow_source_data_signature(
-        backflow_term.source_bonds,
-        backflow_term.source_amplitudes,
-    )
-
-    if current_signature != backflow_term.source_data_signature
-        error("Eq4BackflowTerm source_bonds/source_amplitudes were mutated after construction. Please rebuild Eq4BackflowTerm instead of modifying it in place.")
-    end
-
-    return nothing
-end
-
-
-"""
-用途: 构造带图缓存的 `Eq.(4)` backflow 参数对象。
-
-参数:
-- `param_name_epsilon::Symbol`: `epsilon_bf` 的参数名。
-- `param_name_eta::Symbol`: `eta_bf` 的参数名。
-- `epsilon_bf::Real`: `Eq.(4)` 中的 `epsilon`。
-- `eta_bf::Real`: `Eq.(4)` 中的 `eta`。
-- `source_bonds::Vector{Tuple{Int, Int}}`: 有向键 `(i, j)` 列表。
-- `source_amplitudes::Vector{<:Real}`: 每条键对应的 `t_ij`。
-
-返回:
-- `Eq4BackflowTerm` 实例。
-"""
-function build_eq4_backflow_term_with_cache(
-    param_name_epsilon::Symbol,
-    param_name_eta::Symbol,
-    epsilon_bf::Real,
-    eta_bf::Real,
-    source_bonds::Vector{Tuple{Int, Int}},
-    source_amplitudes::Vector{<:Real},
-)
-    if length(source_bonds) != length(source_amplitudes)
-        error("Length mismatch: source_bonds has $(length(source_bonds)) entries, but source_amplitudes has $(length(source_amplitudes)).")
-    end
-
-    source_bonds_copy = copy(source_bonds)
-    source_amplitudes_copy = Float64.(source_amplitudes)
-    graph_cache = build_eq4_backflow_graph_cache(source_bonds_copy)
-    source_data_signature = compute_eq4_backflow_source_data_signature(
-        source_bonds_copy,
-        source_amplitudes_copy,
-    )
-
-    return Eq4BackflowTerm(
-        param_name_epsilon,
-        param_name_eta,
-        Float64(epsilon_bf),
-        Float64(eta_bf),
-        source_bonds_copy,
-        source_amplitudes_copy,
-        source_data_signature,
-        graph_cache.outgoing_bond_indices_by_source,
-        graph_cache.incoming_source_sites_by_target,
-    )
-end
-
-
-"""
-用途: 兼容旧的 positional 构造方式, 并自动补齐图缓存。
-
-参数:
-- `param_name_epsilon::Symbol`: `epsilon_bf` 的参数名。
-- `param_name_eta::Symbol`: `eta_bf` 的参数名。
-- `epsilon_bf::Real`: `Eq.(4)` 中的 `epsilon`。
-- `eta_bf::Real`: `Eq.(4)` 中的 `eta`。
-- `source_bonds::Vector{Tuple{Int, Int}}`: 有向键 `(i, j)` 列表。
-- `source_amplitudes::Vector{<:Real}`: 每条键对应的 `t_ij`, 默认全为 `1.0`。
-
-返回:
-- `Eq4BackflowTerm` 实例。
-"""
-function Eq4BackflowTerm(
-    param_name_epsilon::Symbol,
-    param_name_eta::Symbol,
-    epsilon_bf::Real,
-    eta_bf::Real,
-    source_bonds::Vector{Tuple{Int, Int}},
-    source_amplitudes::Vector{<:Real},
-)
-    return build_eq4_backflow_term_with_cache(
-        param_name_epsilon,
-        param_name_eta,
-        epsilon_bf,
-        eta_bf,
-        source_bonds,
-        source_amplitudes,
-    )
-end
-
-
-"""
-用途: 构造 `Eq.(4)` backflow 参数对象, 并为每条键提供默认振幅 `1.0`。
-
-参数:
-- `param_name_epsilon::Symbol`: `epsilon_bf` 的参数名。
-- `param_name_eta::Symbol`: `eta_bf` 的参数名。
-- `epsilon_bf::Real`: `Eq.(4)` 中的 `epsilon`。
-- `eta_bf::Real`: `Eq.(4)` 中的 `eta`。
-- `source_bonds::Vector{Tuple{Int, Int}}`: 有向键 `(i, j)` 列表。
-- `source_amplitudes::Vector{<:Real}`: 每条键对应的 `t_ij`, 默认全为 `1.0`。
-
-返回:
-- `Eq4BackflowTerm` 实例。
-"""
-function Eq4BackflowTerm(;
-    param_name_epsilon::Symbol=:bf_epsilon,
-    param_name_eta::Symbol=:bf_eta,
-    epsilon_bf::Real=1.0,
-    eta_bf::Real=0.0,
-    source_bonds::Vector{Tuple{Int, Int}}=Tuple{Int, Int}[],
-    source_amplitudes::Vector{<:Real}=ones(Float64, length(source_bonds)),
-)
-    return build_eq4_backflow_term_with_cache(
-        param_name_epsilon,
-        param_name_eta,
-        epsilon_bf,
-        eta_bf,
-        source_bonds,
-        source_amplitudes,
-    )
 end
 
 
@@ -613,7 +436,6 @@ end
 - `Bool`: 若不是 `NoBackflowTerm`, 返回 `true`。
 """
 uses_backflow(::NoBackflowTerm) = false
-uses_backflow(::Eq4BackflowTerm) = true
 uses_backflow(::CompositeBackflowTerm) = true
 
 """
@@ -660,9 +482,6 @@ end
 - `Vector{Symbol}`: 参数名列表。
 """
 backflow_param_names(::NoBackflowTerm) = Symbol[]
-function backflow_param_names(backflow_term::Eq4BackflowTerm)
-    return Symbol[backflow_term.param_name_epsilon, backflow_term.param_name_eta]
-end
 function backflow_param_names(backflow_term::CompositeBackflowTerm)
     return Symbol[backflow_correction_param_name(term) for term in backflow_term.terms]
 end
@@ -678,64 +497,10 @@ end
 - `Vector{Float64}`: 参数值列表。
 """
 backflow_param_values(::NoBackflowTerm) = Float64[]
-function backflow_param_values(backflow_term::Eq4BackflowTerm)
-    return Float64[backflow_term.epsilon_bf, backflow_term.eta_bf]
-end
 function backflow_param_values(backflow_term::CompositeBackflowTerm)
     return Float64[backflow_correction_param_value(term) for term in backflow_term.terms]
 end
 
-
-"""
-用途: 收集一次 proposal 会影响到的站点索引。
-
-规则:
-- 先包含 proposal 涉及的改动站点。
-- 再包含所有其 outgoing bonds 会指向这些改动站点, 且当前构型中为 doublon 的 source site。
-- 返回结果按站点索引升序排列, 且不重复。
-
-参数:
-- `state_vector::Vector{Int8}`: 当前构型的状态数组, 用于提供站点总数并做边界检查。
-- `backflow_term::Eq4BackflowTerm`: backflow 图缓存对象。
-- `proposal::MoveProposal`: Monte Carlo proposal。
-
-返回:
-- `Vector{Int}`: 受影响的站点索引列表。
-"""
-function collect_affected_site_indices(
-    state_vector::Vector{Int8},
-    backflow_term::Eq4BackflowTerm,
-    proposal::MoveProposal,
-)
-    validate_eq4_backflow_source_data!(backflow_term)
-
-    n_sites = length(state_vector)
-    affected_site_set = Set{Int}()
-
-    if 1 <= proposal.site1 <= n_sites
-        push!(affected_site_set, proposal.site1)
-    end
-    if 1 <= proposal.site2 <= n_sites
-        push!(affected_site_set, proposal.site2)
-    end
-
-    max_target_site = min(n_sites, length(backflow_term.incoming_source_sites_by_target))
-    for target_site in (proposal.site1, proposal.site2)
-        if 1 <= target_site <= max_target_site
-            for source_site in backflow_term.incoming_source_sites_by_target[target_site]
-                if !(1 <= source_site <= n_sites)
-                    error("Backflow cache source site $source_site is out of bounds for a state vector with $n_sites sites.")
-                end
-                if source_site != proposal.site1 && source_site != proposal.site2 && state_vector[source_site] != DB
-                    continue
-                end
-                push!(affected_site_set, source_site)
-            end
-        end
-    end
-
-    return sort!(collect(affected_site_set))
-end
 
 """
 用途: 向站点索引列表中追加一个尚未出现的站点, 用于局域更新热路径的小集合去重。
@@ -838,110 +603,6 @@ end
 
 
 """
-用途: 将单个受影响站点在 proposal 提交后的局域 backflow 行块写入预分配 buffer。
-
-数学公式:
-- `U_b(a, i, k; x') = [1 + (epsilon_bf - 1) * xi_i(x')] * U_0(a, i, k)
-   + eta_bf * sum_j[t_ij * D_i(x') * H_j(x') * U_0(a, j, k)]`。
-
-参数:
-- `site_block_buffer::AbstractMatrix{T}`: 输出 buffer, 形状必须为 `2 x N_orb`。
-- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
-- `state_vector::Vector{Int8}`: proposal 提交前的构型状态数组。
-- `backflow_term::Eq4BackflowTerm`: `Eq.(4)` backflow 参数对象。
-- `proposal::MoveProposal`: Monte Carlo proposal。
-- `site_index::Int`: 待写入的站点编号。
-
-返回:
-- `nothing`。
-"""
-function fill_eq4_backflow_site_block_after_proposal!(
-    site_block_buffer::AbstractMatrix{T},
-    base_orbitals::AbstractMatrix{T},
-    state_vector::Vector{Int8},
-    backflow_term::Eq4BackflowTerm,
-    proposal::MoveProposal,
-    site_index::Int,
-) where {T}
-    if size(site_block_buffer, 1) != 2 || size(site_block_buffer, 2) != size(base_orbitals, 2)
-        error("Local site block buffer must have shape (2, $(size(base_orbitals, 2))), got $(size(site_block_buffer)).")
-    end
-
-    row_up = 2 * (site_index - 1) + 1
-    row_dn_hole = 2 * (site_index - 1) + 2
-    copyto!(@view(site_block_buffer[1, :]), @view(base_orbitals[row_up, :]))
-    copyto!(@view(site_block_buffer[2, :]), @view(base_orbitals[row_dn_hole, :]))
-
-    site_state_after = get_site_state_after_proposal(state_vector, proposal, site_index)
-    is_doublon_after = site_state_after == DB
-    xi_value = false
-
-    if site_index <= length(backflow_term.outgoing_bond_indices_by_source) && is_doublon_after
-        for bond_index in backflow_term.outgoing_bond_indices_by_source[site_index]
-            (_, target_site) = backflow_term.source_bonds[bond_index]
-            if get_site_state_after_proposal(state_vector, proposal, target_site) == HOLE
-                xi_value = true
-                break
-            end
-        end
-    end
-
-    prefactor = one(T) + T(backflow_term.epsilon_bf - 1.0) * T(xi_value)
-    site_block_buffer .*= prefactor
-
-    if site_index <= length(backflow_term.outgoing_bond_indices_by_source) && is_doublon_after
-        eta_value = T(backflow_term.eta_bf)
-        for bond_index in backflow_term.outgoing_bond_indices_by_source[site_index]
-            (_, target_site) = backflow_term.source_bonds[bond_index]
-            if get_site_state_after_proposal(state_vector, proposal, target_site) != HOLE
-                continue
-            end
-
-            target_row_up = 2 * (target_site - 1) + 1
-            target_row_dn_hole = 2 * (target_site - 1) + 2
-            bond_amplitude = T(backflow_term.source_amplitudes[bond_index])
-
-            @views site_block_buffer[1, :] .+= eta_value * bond_amplitude .* base_orbitals[target_row_up, :]
-            @views site_block_buffer[2, :] .+= eta_value * bond_amplitude .* base_orbitals[target_row_dn_hole, :]
-        end
-    end
-
-    return nothing
-end
-
-"""
-用途: 用统一接口写入 Eq.(4) backflow 在 proposal 提交后的局域站点行块。
-
-参数:
-- `site_block_buffer::AbstractMatrix{T}`: 输出 buffer, 形状必须为 `2 x N_orb`。
-- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
-- `state_vector::Vector{Int8}`: proposal 提交前的构型状态数组。
-- `backflow_term::Eq4BackflowTerm`: `Eq.(4)` backflow 参数对象。
-- `proposal::MoveProposal`: Monte Carlo proposal。
-- `site_index::Int`: 待写入的站点编号。
-
-返回:
-- `nothing`。
-"""
-function fill_backflow_site_block_after_proposal!(
-    site_block_buffer::AbstractMatrix{T},
-    base_orbitals::AbstractMatrix{T},
-    state_vector::Vector{Int8},
-    backflow_term::Eq4BackflowTerm,
-    proposal::MoveProposal,
-    site_index::Int,
-) where {T}
-    return fill_eq4_backflow_site_block_after_proposal!(
-        site_block_buffer,
-        base_orbitals,
-        state_vector,
-        backflow_term,
-        proposal,
-        site_index,
-    )
-end
-
-"""
 用途: 将 Eq.(5) 的 `epsilon` correction term 在 proposal 后对单个站点行块的贡献累加到 buffer。
 
 数学公式:
@@ -1035,10 +696,10 @@ function add_backflow_correction_site_block_after_proposal!(
         end
 
         target_row_up = 2 * (target_site - 1) + 1
-        target_row_dn_hole = target_row_up + 1
+        target_row_down = target_row_up + 1
         bond_amplitude = T(correction_term.source_amplitudes[bond_index])
         @views site_block_buffer[1, :] .+= eta1_value * bond_amplitude .* base_orbitals[target_row_up, :]
-        @views site_block_buffer[2, :] .+= eta1_value * bond_amplitude .* base_orbitals[target_row_dn_hole, :]
+        @views site_block_buffer[2, :] .+= eta1_value * bond_amplitude .* base_orbitals[target_row_down, :]
     end
 
     return nothing
@@ -1191,9 +852,9 @@ function fill_backflow_site_block_after_proposal!(
     end
 
     row_up = 2 * (site_index - 1) + 1
-    row_dn_hole = row_up + 1
+    row_down = row_up + 1
     copyto!(@view(site_block_buffer[1, :]), @view(base_orbitals[row_up, :]))
-    copyto!(@view(site_block_buffer[2, :]), @view(base_orbitals[row_dn_hole, :]))
+    copyto!(@view(site_block_buffer[2, :]), @view(base_orbitals[row_down, :]))
 
     for correction_term in backflow_term.terms
         add_backflow_correction_site_block_after_proposal!(
@@ -1207,85 +868,6 @@ function fill_backflow_site_block_after_proposal!(
     end
 
     return nothing
-end
-
-
-"""
-用途: 仅为单个受影响站点构造 proposal 提交后的局域 backflow 行块。
-
-数学公式:
-- `U_b(a, i, k; x') = [1 + (epsilon_bf - 1) * xi_i(x')] * U_0(a, i, k)
-   + eta_bf * sum_j[t_ij * D_i(x') * H_j(x') * U_0(a, j, k)]`。
-
-参数:
-- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
-- `state_vector::Vector{Int8}`: proposal 提交前的构型状态数组。
-- `backflow_term::Eq4BackflowTerm`: `Eq.(4)` backflow 参数对象。
-- `proposal::MoveProposal`: Monte Carlo proposal。
-- `site_index::Int`: 待构造局域行块的站点编号。
-
-返回:
-- `Matrix{T}`: 形状为 `2 x N_orb` 的局域站点行块。
-"""
-function build_eq4_backflow_site_block_after_proposal(
-    base_orbitals::AbstractMatrix{T},
-    state_vector::Vector{Int8},
-    backflow_term::Eq4BackflowTerm,
-    proposal::MoveProposal,
-    site_index::Int,
-) where {T}
-    site_block = Matrix{T}(undef, 2, size(base_orbitals, 2))
-    fill_eq4_backflow_site_block_after_proposal!(
-        site_block,
-        base_orbitals,
-        state_vector,
-        backflow_term,
-        proposal,
-        site_index,
-    )
-    return site_block
-end
-
-
-"""
-用途: 为所有受影响站点批量构造 proposal 提交后的局域 backflow 行块。
-
-参数:
-- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
-- `state_vector::Vector{Int8}`: proposal 提交前的构型状态数组。
-- `backflow_term::Eq4BackflowTerm`: `Eq.(4)` backflow 参数对象。
-- `proposal::MoveProposal`: Monte Carlo proposal。
-- `affected_sites::Vector{Int}`: 已排序的受影响站点列表。
-
-返回:
-- `Vector{Pair{Int, Matrix{T}}}`: `site_index => site_block` 的有序列表。
-"""
-function build_local_backflow_site_blocks_after_proposal(
-    base_orbitals::AbstractMatrix{T},
-    state_vector::Vector{Int8},
-    backflow_term::Eq4BackflowTerm,
-    proposal::MoveProposal,
-    affected_sites::Vector{Int},
-) where {T}
-    validate_eq4_backflow_source_data!(backflow_term)
-    validate_orbital_dimensions(base_orbitals, length(state_vector))
-
-    site_blocks = Vector{Pair{Int, Matrix{T}}}(undef, length(affected_sites))
-    for (block_index, site_index) in enumerate(affected_sites)
-        if !(1 <= site_index <= length(state_vector))
-            error("Affected site $site_index is out of bounds for a state vector with $(length(state_vector)) sites.")
-        end
-
-        site_blocks[block_index] = site_index => build_eq4_backflow_site_block_after_proposal(
-            base_orbitals,
-            state_vector,
-            backflow_term,
-            proposal,
-            site_index,
-        )
-    end
-
-    return site_blocks
 end
 
 
@@ -1304,10 +886,10 @@ end
 
 
 """
-用途: 按名称批量更新 `Eq.(4)` backflow 参数。
+用途: 按名称批量更新 backflow 参数。
 
 参数:
-- `backflow_term::Eq4BackflowTerm`: backflow 参数对象。
+- `backflow_term::AbstractBackflowTerm`: backflow 参数对象。
 - `param_names::Vector{Symbol}`: 参数名列表。
 - `param_values::Vector{<:Real}`: 参数值列表。
 
@@ -1322,28 +904,6 @@ function update_backflow_params!(
     if !isempty(param_names) || !isempty(param_values)
         error("NoBackflowTerm does not accept any parameters.")
     end
-    return nothing
-end
-
-function update_backflow_params!(
-    backflow_term::Eq4BackflowTerm,
-    param_names::Vector{Symbol},
-    param_values::Vector{<:Real},
-)
-    if length(param_names) != length(param_values)
-        error("Length mismatch: param_names has $(length(param_names)) entries, but param_values has $(length(param_values)).")
-    end
-
-    for (param_name, param_value) in zip(param_names, param_values)
-        if param_name == backflow_term.param_name_epsilon
-            backflow_term.epsilon_bf = Float64(param_value)
-        elseif param_name == backflow_term.param_name_eta
-            backflow_term.eta_bf = Float64(param_value)
-        else
-            error("Unknown backflow parameter name: $param_name")
-        end
-    end
-
     return nothing
 end
 
@@ -1483,44 +1043,7 @@ end
 
 
 """
-用途: 计算 `Eq.(4)` 中的 `xi_i(x)` 重组掩码。
-
-数学公式:
-- `xi_i(x) = 1`, 当且仅当存在某个有向键 `(i, j)` 满足 `D_i(x) * H_j(x) = 1`。
-- 否则 `xi_i(x) = 0`。
-
-参数:
-- `backflow_term::Eq4BackflowTerm`: backflow 参数对象。
-- `doublon_mask::Vector{Float64}`: `D_i` 列表。
-- `hole_mask::Vector{Float64}`: `H_i` 列表。
-
-返回:
-- `Vector{Float64}`: `xi_i(x)` 数组。
-"""
-function compute_recombination_mask(
-    backflow_term::Eq4BackflowTerm,
-    doublon_mask::Vector{Float64},
-    hole_mask::Vector{Float64},
-)
-    validate_eq4_backflow_source_data!(backflow_term)
-
-    if length(doublon_mask) != length(hole_mask)
-        error("Mask length mismatch: doublon_mask has $(length(doublon_mask)) entries, but hole_mask has $(length(hole_mask)).")
-    end
-
-    recombination_mask = zeros(Float64, length(doublon_mask))
-    for (site_i, site_j) in backflow_term.source_bonds
-        if doublon_mask[site_i] > 0.5 && hole_mask[site_j] > 0.5
-            recombination_mask[site_i] = 1.0
-        end
-    end
-
-    return recombination_mask
-end
-
-
-"""
-用途: 校验轨道矩阵与站点数是否匹配当前 PH 基底。
+用途: 校验轨道矩阵与每个 site 两行的 spin-resolved layout 是否匹配。
 
 参数:
 - `base_orbitals::AbstractMatrix`: 裸轨道矩阵, 其行数必须为 `2 * N_sites`。
@@ -1532,7 +1055,7 @@ end
 function validate_orbital_dimensions(base_orbitals::AbstractMatrix, n_sites::Int)
     expected_rows = 2 * n_sites
     if size(base_orbitals, 1) != expected_rows
-        error("Orbital row mismatch: expected $expected_rows rows for PH basis, got $(size(base_orbitals, 1)).")
+        error("Orbital row mismatch: expected $expected_rows rows for two-spin-row layout, got $(size(base_orbitals, 1)).")
     end
     return nothing
 end
@@ -1549,7 +1072,7 @@ end
 function validate_backflow_correction_source_data!(
     correction_term::AbstractBackflowCorrectionTerm,
 )
-    current_signature = compute_eq4_backflow_source_data_signature(
+    current_signature = compute_backflow_source_data_signature(
         correction_term.source_bonds,
         correction_term.source_amplitudes,
     )
@@ -1562,7 +1085,7 @@ function validate_backflow_correction_source_data!(
 end
 
 """
-用途: 将 PH 内部行偏移映射为方案 A 使用的物理自旋标签。
+用途: 将每个 site 内部的行偏移映射为物理自旋标签。
 
 参数:
 - `row_offset::Int`: 站点内行偏移, `1` 为 up 通道, `2` 为 down 通道。
@@ -1989,86 +1512,6 @@ end
 
 
 """
-用途: 构造 `Eq.(4)` 的构型依赖 backflow 轨道矩阵。
-
-数学公式:
-- `U_b(a, i, k; x) = [1 + (epsilon_bf - 1) * xi_i(x)] * U_0(a, i, k)
-   + eta_bf * sum_j[t_ij * D_i(x) * H_j(x) * U_0(a, j, k)]`。
-
-实现说明:
-- 对每个站点 `i`, 同时更新两条内部行:
-  `row_up = 2 * (i - 1) + 1`,
-  `row_dn_hole = 2 * (i - 1) + 2`。
-- 第一阶段统一对这两个内部通道施加同一组 backflow 系数。
-
-参数:
-- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
-- `state_vector::Vector{Int8}`: 当前 Monte Carlo 构型。
-- `backflow_term::Eq4BackflowTerm`: `Eq.(4)` backflow 参数对象。
-
-返回:
-- `Matrix{T}`: 构型依赖的 `U_b(x)`。
-"""
-function build_eq4_backflow_orbitals(
-    base_orbitals::AbstractMatrix{T},
-    state_vector::Vector{Int8},
-    backflow_term::Eq4BackflowTerm,
-) where {T}
-    n_sites = length(state_vector)
-    validate_orbital_dimensions(base_orbitals, n_sites)
-
-    doublon_mask, hole_mask = compute_doublon_hole_masks(state_vector)
-    recombination_mask = compute_recombination_mask(backflow_term, doublon_mask, hole_mask)
-
-    backflow_orbitals = Matrix{T}(base_orbitals)
-
-    for site_index in 1:n_sites
-        row_up = 2 * (site_index - 1) + 1
-        row_dn_hole = 2 * (site_index - 1) + 2
-        prefactor = one(T) + T(backflow_term.epsilon_bf - 1.0) * T(recombination_mask[site_index])
-
-        @views backflow_orbitals[row_up, :] .*= prefactor
-        @views backflow_orbitals[row_dn_hole, :] .*= prefactor
-    end
-
-    for (bond_index, (site_i, site_j)) in enumerate(backflow_term.source_bonds)
-        if doublon_mask[site_i] > 0.5 && hole_mask[site_j] > 0.5
-            row_i_up = 2 * (site_i - 1) + 1
-            row_i_dn_hole = 2 * (site_i - 1) + 2
-            row_j_up = 2 * (site_j - 1) + 1
-            row_j_dn_hole = 2 * (site_j - 1) + 2
-            bond_amplitude = T(backflow_term.source_amplitudes[bond_index])
-            eta_value = T(backflow_term.eta_bf)
-
-            @views backflow_orbitals[row_i_up, :] .+= eta_value * bond_amplitude .* base_orbitals[row_j_up, :]
-            @views backflow_orbitals[row_i_dn_hole, :] .+= eta_value * bond_amplitude .* base_orbitals[row_j_dn_hole, :]
-        end
-    end
-
-    return backflow_orbitals
-end
-
-
-"""
-用途: 统一入口, 按 backflow 对象类型构造轨道矩阵。
-
-参数:
-- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵。
-- `state_vector::Vector{Int8}`: 当前构型。
-- `backflow_term::AbstractBackflowTerm`: backflow 对象。
-
-返回:
-- `Matrix{T}`: 处理后的轨道矩阵。
-"""
-function build_backflow_orbitals(
-    base_orbitals::AbstractMatrix{T},
-    state_vector::Vector{Int8},
-    backflow_term::Eq4BackflowTerm,
-) where {T}
-    return build_eq4_backflow_orbitals(base_orbitals, state_vector, backflow_term)
-end
-
-"""
 用途: 检查 chain rule 输出矩阵与输入导数轨道矩阵尺寸一致。
 
 参数:
@@ -2151,65 +1594,6 @@ function fill_backflow_chain_rule_orbitals!(
     end
     return nothing
 end
-
-"""
-用途: 计算 Eq.(4) backflow 对 mean-field 参数的 chain rule 轨道导数。
-
-数学公式:
-- `dU_b(a, i, k) / dp =
-   [1 + (epsilon_bf - 1) * xi_i] * dU_0(a, i, k) / dp
-   + eta_bf * sum_j[t_ij * D_i * H_j * dU_0(a, j, k) / dp]`。
-
-参数:
-- `output_orbitals::AbstractMatrix{T}`: 输出矩阵, 写入 `dU_b / dp`。
-- `input_derivative_orbitals::AbstractMatrix{T}`: 输入裸轨道导数 `dU_0 / dp`。
-- `state_vector::Vector{Int8}`: 当前 Monte Carlo 构型。
-- `backflow_term::Eq4BackflowTerm`: Eq.(4) backflow 参数对象。
-
-返回:
-- `nothing`。
-"""
-function fill_backflow_chain_rule_orbitals!(
-    output_orbitals::AbstractMatrix{T},
-    input_derivative_orbitals::AbstractMatrix{T},
-    state_vector::Vector{Int8},
-    backflow_term::Eq4BackflowTerm,
-) where {T}
-    n_sites = length(state_vector)
-    validate_eq4_backflow_source_data!(backflow_term)
-    validate_orbital_dimensions(input_derivative_orbitals, n_sites)
-    validate_chain_rule_output_dimensions(output_orbitals, input_derivative_orbitals)
-
-    doublon_mask, hole_mask = compute_doublon_hole_masks(state_vector)
-    recombination_mask = compute_recombination_mask(backflow_term, doublon_mask, hole_mask)
-
-    copyto!(output_orbitals, input_derivative_orbitals)
-
-    for site_index in 1:n_sites
-        prefactor = one(T) + T(backflow_term.epsilon_bf - 1.0) * T(recombination_mask[site_index])
-        row_up = 2 * (site_index - 1) + 1
-        row_dn_hole = row_up + 1
-        @views output_orbitals[row_up, :] .*= prefactor
-        @views output_orbitals[row_dn_hole, :] .*= prefactor
-    end
-
-    eta_value = T(backflow_term.eta_bf)
-    for (bond_index, (site_i, site_j)) in enumerate(backflow_term.source_bonds)
-        if doublon_mask[site_i] > 0.5 && hole_mask[site_j] > 0.5
-            bond_amplitude = T(backflow_term.source_amplitudes[bond_index])
-            row_i_up = 2 * (site_i - 1) + 1
-            row_i_dn_hole = row_i_up + 1
-            row_j_up = 2 * (site_j - 1) + 1
-            row_j_dn_hole = row_j_up + 1
-
-            @views output_orbitals[row_i_up, :] .+= eta_value * bond_amplitude .* input_derivative_orbitals[row_j_up, :]
-            @views output_orbitals[row_i_dn_hole, :] .+= eta_value * bond_amplitude .* input_derivative_orbitals[row_j_dn_hole, :]
-        end
-    end
-
-    return nothing
-end
-
 
 """
 用途: 将 Eq.(5) 的 `epsilon` correction term 对 `epsilon_bf` 的导数累加到导数轨道矩阵。
@@ -2436,90 +1820,6 @@ function build_backflow_derivative_orbitals(
     end
 
     return derivative_pairs
-end
-
-
-"""
-用途: 构造 `Eq.(4)` 对 `epsilon_bf` 与 `eta_bf` 的轨道导数矩阵。
-
-数学公式:
-- `partial U_b / partial epsilon_bf = xi_i * U_0(i)`。
-- `partial U_b / partial eta_bf = sum_j[t_ij * D_i * H_j * U_0(j)]`。
-
-参数:
-- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
-- `state_vector::Vector{Int8}`: 当前 Monte Carlo 构型。
-- `backflow_term::Eq4BackflowTerm`: `Eq.(4)` backflow 参数对象。
-
-返回:
-- `Tuple{Matrix{T}, Matrix{T}}`: `(d_orbitals_epsilon, d_orbitals_eta)`。
-"""
-function build_eq4_backflow_derivative_orbitals(
-    base_orbitals::AbstractMatrix{T},
-    state_vector::Vector{Int8},
-    backflow_term::Eq4BackflowTerm,
-) where {T}
-    n_sites = length(state_vector)
-    validate_orbital_dimensions(base_orbitals, n_sites)
-
-    doublon_mask, hole_mask = compute_doublon_hole_masks(state_vector)
-    recombination_mask = compute_recombination_mask(backflow_term, doublon_mask, hole_mask)
-
-    d_orbitals_epsilon = zeros(T, size(base_orbitals))
-    d_orbitals_eta = zeros(T, size(base_orbitals))
-
-    for site_index in 1:n_sites
-        if recombination_mask[site_index] > 0.5
-            row_up = 2 * (site_index - 1) + 1
-            row_dn_hole = 2 * (site_index - 1) + 2
-            @views d_orbitals_epsilon[row_up, :] .= base_orbitals[row_up, :]
-            @views d_orbitals_epsilon[row_dn_hole, :] .= base_orbitals[row_dn_hole, :]
-        end
-    end
-
-    for (bond_index, (site_i, site_j)) in enumerate(backflow_term.source_bonds)
-        if doublon_mask[site_i] > 0.5 && hole_mask[site_j] > 0.5
-            row_i_up = 2 * (site_i - 1) + 1
-            row_i_dn_hole = 2 * (site_i - 1) + 2
-            row_j_up = 2 * (site_j - 1) + 1
-            row_j_dn_hole = 2 * (site_j - 1) + 2
-            bond_amplitude = T(backflow_term.source_amplitudes[bond_index])
-
-            @views d_orbitals_eta[row_i_up, :] .+= bond_amplitude .* base_orbitals[row_j_up, :]
-            @views d_orbitals_eta[row_i_dn_hole, :] .+= bond_amplitude .* base_orbitals[row_j_dn_hole, :]
-        end
-    end
-
-    return d_orbitals_epsilon, d_orbitals_eta
-end
-
-
-"""
-用途: 统一返回 backflow 参数顺序对应的轨道导数矩阵列表。
-
-参数:
-- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵。
-- `state_vector::Vector{Int8}`: 当前构型。
-- `backflow_term::AbstractBackflowTerm`: backflow 对象。
-
-返回:
-- `Vector{Pair{Symbol, Matrix{T}}}`: 参数名到轨道导数矩阵的有序列表。
-"""
-function build_backflow_derivative_orbitals(
-    base_orbitals::AbstractMatrix{T},
-    state_vector::Vector{Int8},
-    backflow_term::Eq4BackflowTerm,
-) where {T}
-    d_orbitals_epsilon, d_orbitals_eta = build_eq4_backflow_derivative_orbitals(
-        base_orbitals,
-        state_vector,
-        backflow_term,
-    )
-
-    return Pair{Symbol, Matrix{T}}[
-        backflow_term.param_name_epsilon => d_orbitals_epsilon,
-        backflow_term.param_name_eta => d_orbitals_eta,
-    ]
 end
 
 
