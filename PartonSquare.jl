@@ -929,6 +929,128 @@ function build_ham_PH(p::RestrictedHubbardParams)
 	H = Hermitian(H + H')
 	return H
 end
+
+"""
+用途: 构造 restricted Hubbard 的 non-PH Pfaffian/BdG mean-field Hamiltonian。
+
+参数:
+- `p::RestrictedHubbardParams`: restricted Hubbard mean-field 参数, 使用 `chi1`, `chi2`,
+  `etax`, `etay`, `mu`, `Delta_AF`, `Delta_c`, `Delta_s`, `Q`, `x0`; 固定 regulator
+  `Delta_onsite_s` 在 Pfaffian 版本中不使用。
+
+返回:
+- `Hermitian{Float64, Matrix{Float64}}`: 维度为 `4Nlat x 4Nlat` 的 BdG 矩阵。
+
+公式:
+- 先构造 spinful electron block `h` 与 singlet pairing block `Delta`。
+- BdG 矩阵采用现有 Pfaffian 代码约定:
+  `H_BdG = [-h  -Delta; Delta  h]`。
+"""
+function build_ham_pfa(p::RestrictedHubbardParams)
+	Lx, Ly = p.Lx, p.Ly
+	Nlat = Lx * Ly
+	chi1, chi2 = p.chi1, p.chi2
+	etax, etay = p.etax, p.etay
+	mu = p.mu
+	Delta_AF, Delta_c, Delta_s = p.Delta_AF, p.Delta_c, p.Delta_s
+	Q, x0 = p.Q, p.x0
+	hblock = zeros(Float64, 2 * Nlat, 2 * Nlat)
+	pairing_block = zeros(Float64, 2 * Nlat, 2 * Nlat)
+
+	for x in 1:Lx
+		mu0 = mu + Delta_c * cos(Q * (x - x0))
+		mz0 = Delta_AF + Delta_s * sin(Q / 2 * (x - x0))
+		etax0 = etax * abs(cos(Q / 2 * (x + 0.5 - x0)))
+		etay0 = -etay * abs(cos(Q / 2 * (x - x0)))
+		for y in 1:Ly
+			id0 = xy_to_idx(x, y, Ly)
+			sign = (-1)^(x + y)
+			idy = (y == Ly) ? xy_to_idx(x, 1, Ly) : xy_to_idx(x, y + 1, Ly)
+			bc_y = (y == Ly) ? p.bcy : 1.0
+			idx = (x == Lx) ? xy_to_idx(1, y, Ly) : xy_to_idx(x + 1, y, Ly)
+			bc_x = (x == Lx) ? p.bcx : 1.0
+			idpp = xy_to_idx((x == Lx) ? 1 : x + 1, (y == Ly) ? 1 : y + 1, Ly)
+			idmp = xy_to_idx((x == 1) ? Lx : x - 1, (y == Ly) ? 1 : y + 1, Ly)
+			bc_pp = ((x == Lx) ? p.bcx : 1.0) * ((y == Ly) ? p.bcy : 1.0)
+			bc_mp = ((x == 1) ? p.bcx : 1.0) * ((y == Ly) ? p.bcy : 1.0)
+
+			add_term_ij_nonPH(hblock, id0, idx, -chi1 * bc_x)
+			add_term_ij_nonPH(hblock, id0, idy, -chi1 * bc_y)
+			add_term_ij_nonPH(hblock, id0, idpp, -chi2 * bc_pp)
+			add_term_ij_nonPH(hblock, id0, idmp, -chi2 * bc_mp)
+			add_term_ij_pfa_pairing(pairing_block, id0, idx, etax0 * bc_x)
+			add_term_ij_pfa_pairing(pairing_block, id0, idy, etay0 * bc_y)
+
+			hblock[2*(id0-1)+1, 2*(id0-1)+1] += sign * mz0 / 2 + mu0 / 2
+			hblock[2*(id0-1)+2, 2*(id0-1)+2] += -sign * mz0 / 2 + mu0 / 2
+		end
+	end
+
+	hblock .+= hblock'
+	pairing_block .-= pairing_block'
+	return Hermitian([-hblock -pairing_block; pairing_block hblock])
+end
+
+"""
+用途: 从 restricted Hubbard Pfaffian/BdG mean-field 生成 pairing matrix `F` 及其参数导数。
+
+参数:
+- `p::RestrictedHubbardParams`: restricted Hubbard mean-field 参数。
+- `param_names::Vector{Symbol}`: 需要求导的 mean-field 参数名。
+
+返回:
+- `Tuple{Vector{Float64}, Matrix{Float64}, OrderedDict{Symbol, Matrix{Float64}}}`:
+  eigenvalues, 反对称 pairing matrix `F`, 以及与 `param_names` 对应的 `dF/dp`。
+
+公式:
+- 对 BdG 矩阵对角化后取负能 BdG 子空间, 记 particle/hole block 为 `u`, `v`。
+- Pfaffian pair matrix 采用 `F = v * pinv(u)`, 并显式反对称化:
+  `F <- (F - F') / 2`。
+- 导数使用 `dF = dv * pinv(u) + v * d pinv(u)`。
+"""
+function make_ansatz_and_derivs_pfa(
+	p::RestrictedHubbardParams;
+	param_names::Vector{Symbol}=Symbol[],
+)
+	H = build_ham_pfa(p)
+	H_alphas = OrderedDict{Symbol, Matrix{Float64}}()
+	for name in param_names
+		p_alpha = RestrictedHubbardParams(;
+			(; :Lx => p.Lx,
+				:Ly => p.Ly,
+				:bcx => p.bcx,
+				:bcy => p.bcy,
+				name => 1.0,
+				:Q => p.Q,
+				:x0 => p.x0)...,
+		)
+		H_alphas[name] = Matrix(build_ham_pfa(p_alpha))
+	end
+
+	ε, U_full, _, dU_dict = Utils.compute_eig_and_dU_reg1(H, H_alphas)
+	eig_eq_error = norm(Matrix(H) * U_full - U_full * Diagonal(ε))
+	if is_root_rank()
+		println("Eigen equation error (HU - Uε): ", eig_eq_error)
+	end
+
+	N = div(length(ε), 2)
+	umatrix = U_full[1:N, 1:N]
+	vmatrix = U_full[(N+1):end, 1:N]
+	pinv_umatrix = pinv(umatrix)
+	F = vmatrix * pinv_umatrix
+	F .= 0.5 .* (F .- F')
+
+	F_alphas = OrderedDict{Symbol, Matrix{Float64}}()
+	for name in param_names
+		dumatrix = dU_dict[name][1:N, 1:N]
+		dvmatrix = dU_dict[name][(N+1):end, 1:N]
+		dF = dvmatrix * pinv_umatrix + vmatrix * pinv_derivative(umatrix, dumatrix, pinv_umatrix)
+		dF .= 0.5 .* (dF .- dF')
+		F_alphas[name] = dF
+	end
+
+	return ε, F, F_alphas
+end
 function make_ansatz_and_derivs(p::RestrictedHubbardParams; param_names::Vector{Symbol} = [], target_sz::Int = 0,Q::Float64=0.0,x0::Float64=0.0)
 	H = build_ham_PH(p)
 
