@@ -74,6 +74,10 @@ function parse_commandline()
         help = "spin stripe order parameters"
         arg_type = Float64
         default = 3.0
+        "--Delta_onsite_s"
+        help = "Fixed onsite singlet s-wave pairing regulator in the PH mean-field Hamiltonian"
+        arg_type = Float64
+        default = 0.0
         "--mu"
         help = "chemical potential"
         arg_type = Float64
@@ -1280,6 +1284,7 @@ function update_ansatz!(
     nparams_backflow::Int=0,
     Q::Float64=0.0,
     x0::Float64=0.0,
+    Delta_onsite_s::Float64=0.0,
     active_wf_param_names::Union{Nothing,Vector{Symbol}}=nothing,
 )
     # 支持输入为 wf 参数 + projector 参数 + backflow 参数的拼接向量
@@ -1322,6 +1327,7 @@ function update_ansatz!(
         Delta_AF=Delta_AF,
         Delta_c=Delta_c,
         Delta_s=Delta_s,
+        Delta_onsite_s=Delta_onsite_s,
         Q=Q,
         x0=x0
     )
@@ -1426,6 +1432,7 @@ function main()
     t1 = args["t1"]
     t2 = args["t2"]
     U = args["U"]
+    Delta_onsite_s = args["Delta_onsite_s"]
     job = args["job"]
     ansatz = args["ansatz"]
     g = args["g"]
@@ -1603,7 +1610,7 @@ function main()
             println("Active parameters: $(join(String.(active_param_names), ", "))")
         end
     end
-    update_ansatz!(vwf, param_names, init_params, lx, ly, BCX, BCY, target_sz; nparams_proj=nparams_proj, nparams_backflow=nparams_backflow, Q=Q, x0=x0)
+    update_ansatz!(vwf, param_names, init_params, lx, ly, BCX, BCY, target_sz; nparams_proj=nparams_proj, nparams_backflow=nparams_backflow, Q=Q, x0=x0, Delta_onsite_s=Delta_onsite_s)
 
 
     # D. 运行模拟
@@ -1619,7 +1626,7 @@ function main()
                           merge_active_params_into_full(init_params, active_param_indices, params) :
                           params
             derivative_wf_param_names = uses_param_subset ? active_wf_param_names : nothing
-            update_ansatz!(vwf, param_names, full_params, lx, ly, BCX, BCY, target_sz; nparams_proj=nparams_proj, nparams_backflow=nparams_backflow, Q=Q, x0=x0, active_wf_param_names=derivative_wf_param_names)
+            update_ansatz!(vwf, param_names, full_params, lx, ly, BCX, BCY, target_sz; nparams_proj=nparams_proj, nparams_backflow=nparams_backflow, Q=Q, x0=x0, Delta_onsite_s=Delta_onsite_s, active_wf_param_names=derivative_wf_param_names)
         end
 
         run_sr_optimization(

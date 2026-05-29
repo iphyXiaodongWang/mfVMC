@@ -864,6 +864,7 @@ struct RestrictedHubbardParams
 	Delta_AF::Float64
 	Delta_c::Float64
 	Delta_s::Float64
+	Delta_onsite_s::Float64
 	Q::Float64
 	x0::Float64
 end
@@ -880,10 +881,11 @@ function RestrictedHubbardParams(;
 	Delta_AF::Float64 = 0.0,
 	Delta_c::Float64 = 0.0,
 	Delta_s::Float64 = 0.0,
+	Delta_onsite_s::Float64 = 0.0,
 	Q::Float64 = 0.0,
 	x0::Float64 = 0.0
 )
-	return RestrictedHubbardParams(Lx, Ly, bcx, bcy, chi1, chi2, etax, etay, mu, Delta_AF, Delta_c, Delta_s, Q, x0)
+	return RestrictedHubbardParams(Lx, Ly, bcx, bcy, chi1, chi2, etax, etay, mu, Delta_AF, Delta_c, Delta_s, Delta_onsite_s, Q, x0)
 end
 function build_ham_PH(p::RestrictedHubbardParams)
 	Lx, Ly = p.Lx, p.Ly
@@ -892,6 +894,7 @@ function build_ham_PH(p::RestrictedHubbardParams)
 	etax,etay = p.etax,p.etay
 	mu = p.mu
 	Delta_AF, Delta_c, Delta_s = p.Delta_AF, p.Delta_c, p.Delta_s
+	Delta_onsite_s = p.Delta_onsite_s
 	Q, x0 = p.Q, p.x0
 	H = zeros(Float64, 2 * Nlat, 2 * Nlat)
 	for x in 1:Lx
@@ -919,6 +922,8 @@ function build_ham_PH(p::RestrictedHubbardParams)
 			add_term_ij_PH(H, id0, idmp, -chi2 * bc_mp, 0.0)
 			H[2*(id0-1)+1, 2*(id0-1)+1] += sign * mz0 / 2 + mu0 / 2
 			H[2*(id0-1)+2, 2*(id0-1)+2] += sign * mz0 / 2 - mu0 / 2
+			# 固定 onsite singlet s-wave regulator, 公式为 H_{i↑, i↓} = Delta_onsite_s。
+			H[2*(id0-1)+1, 2*(id0-1)+2] += Delta_onsite_s
 		end
 	end
 	H = Hermitian(H + H')
