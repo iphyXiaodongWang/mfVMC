@@ -705,12 +705,13 @@ end
 # ======================================================================
 struct HubbardParams
 	Lx::Int
-	Ly::Int
-	bcx::Float64
-	bcy::Float64
-	chi1::Float64
-	etad1::Dict{Symbol, Float64}
-	etas1::Dict{Symbol, Float64}
+        Ly::Int
+        bcx::Float64
+        bcy::Float64
+        x_boundary::Symbol
+        chi1::Float64
+        etax::Dict{Symbol, Float64}
+        etay::Dict{Symbol, Float64}
 	chi2::Float64
 	mu::Dict{Symbol, Float64}
 	mz::Dict{Symbol, Float64}
@@ -726,7 +727,7 @@ end
 用途: 将 Hubbard 最近邻配对参数统一转换为按 `x` 列存储的 `Dict` 形式。
 
 参数:
-- `param_name::Symbol`: 参数前缀, 当前支持 `:etad1` 或 `:etas1`。
+- `param_name::Symbol`: 参数前缀, 当前支持 `:etax` 或 `:etay`。
 - `param_value::Union{Float64, Dict{Symbol, Float64}}`: 标量均匀参数或按列参数字典。
 - `lx::Int`: 晶格在 `x` 方向的列数。
 
@@ -749,33 +750,37 @@ end
 
 function HubbardParams(;
 	Lx::Int,
-	Ly::Int,
-	bcx::Float64 = 1.0,
-	bcy::Float64 = 1.0,
-	chi1::Float64 = 0.0,
-	etad1::Union{Float64, Dict{Symbol, Float64}} = 0.0,
-	etas1::Union{Float64, Dict{Symbol, Float64}} = 0.0,
+        Ly::Int,
+        bcx::Float64 = 1.0,
+        bcy::Float64 = 1.0,
+        x_boundary::Symbol = :pbc,
+        chi1::Float64 = 0.0,
+        etax::Union{Float64, Dict{Symbol, Float64}} = 0.0,
+        etay::Union{Float64, Dict{Symbol, Float64}} = 0.0,
 	chi2::Float64 =0.0,
 	mu::Dict{Symbol, Float64} = Dict{Symbol, Float64}(),
 	mz::Dict{Symbol, Float64} = Dict{Symbol, Float64}()
 )
-	etad1_by_x = normalize_hubbard_x_column_parameter(:etad1, etad1, Lx)
-	etas1_by_x = normalize_hubbard_x_column_parameter(:etas1, etas1, Lx)
-	return HubbardParams(Lx, Ly, bcx, bcy, chi1, etad1_by_x, etas1_by_x, chi2, mu, mz)
+        if x_boundary != :pbc && x_boundary != :obc
+                error("Unknown x_boundary=$(x_boundary). Expected :pbc or :obc.")
+        end
+        etax_by_x = normalize_hubbard_x_column_parameter(:etax, etax, Lx)
+        etay_by_x = normalize_hubbard_x_column_parameter(:etay, etay, Lx)
+        return HubbardParams(Lx, Ly, bcx, bcy, x_boundary, chi1, etax_by_x, etay_by_x, chi2, mu, mz)
 end
 function build_ham_PH(p::HubbardParams)
 	Lx, Ly = p.Lx, p.Ly
 	Nlat = Lx * Ly
 	chi1 = p.chi1
-	etad1 = p.etad1
-	etas1 = p.etas1
+        etax = p.etax
+        etay = p.etay
 	chi2 = p.chi2
 	mz = p.mz
 	mu = p.mu
 	H = zeros(Float64, 2 * Nlat, 2 * Nlat)
 	for x in 1:Lx
-		etad10 = get(etad1, Symbol("etad1_$(x)"), 0.0)
-		etas10 = get(etas1, Symbol("etas1_$(x)"), 0.0)
+                etax0 = get(etax, Symbol("etax_$(x)"), 0.0)
+                etay0 = -get(etay, Symbol("etay_$(x)"), 0.0)
 		mz0 = get(mz, Symbol("mz_$(x)"), 0.0)
 		mu0 = get(mu, Symbol("mu_$(x)"), 0.0)
 		for y in 1:Ly
@@ -789,13 +794,17 @@ function build_ham_PH(p::HubbardParams)
 			bc_x = (x == Lx) ? p.bcx : 1.0
 			# --- 次近邻对角方向 ---
 			idpp = xy_to_idx((x == Lx) ? 1 : x + 1, (y == Ly) ? 1 : y + 1, Ly)
-			idmp = xy_to_idx((x == 1) ? Lx : x - 1, (y == Ly) ? 1 : y + 1, Ly)
-			bc_pp = ((x == Lx) ? p.bcx : 1.0) * ((y == Ly) ? p.bcy : 1.0)
-			bc_mp = ((x == 1) ? p.bcx : 1.0) * ((y == Ly) ? p.bcy : 1.0)
-			add_term_ij_PH(H, id0, idx, chi1 * bc_x, (+etas10 - etad10) * bc_x)
-			add_term_ij_PH(H, id0, idy, chi1 * bc_y, (etas10 + etad10) * bc_y)
-			add_term_ij_PH(H, id0, idpp, chi2 * bc_pp, 0.0)
-			add_term_ij_PH(H, id0, idmp, chi2 * bc_mp, 0.0)
+                        idmp = xy_to_idx((x == 1) ? Lx : x - 1, (y == Ly) ? 1 : y + 1, Ly)
+                        bc_pp = ((x == Lx) ? p.bcx : 1.0) * ((y == Ly) ? p.bcy : 1.0)
+                        bc_mp = ((x == 1) ? p.bcx : 1.0) * ((y == Ly) ? p.bcy : 1.0)
+                        if x < Lx || p.x_boundary == :pbc
+                                add_term_ij_PH(H, id0, idx, -chi1 * bc_x, etax0 * bc_x)
+                                add_term_ij_PH(H, id0, idpp, -chi2 * bc_pp, 0.0)
+                        end
+                        add_term_ij_PH(H, id0, idy, -chi1 * bc_y, etay0 * bc_y)
+                        if x > 1 || p.x_boundary == :pbc
+                                add_term_ij_PH(H, id0, idmp, -chi2 * bc_mp, 0.0)
+                        end
 			H[2*(id0-1)+1, 2*(id0-1)+1] += Q * mz0 / 2 + mu0 / 2
 			H[2*(id0-1)+2, 2*(id0-1)+2] += Q * mz0 / 2 - mu0 / 2
 		end
@@ -804,7 +813,7 @@ function build_ham_PH(p::HubbardParams)
 	H = Hermitian(H + H')
 	return H
 end
-function make_ansatz_and_derivs(p::HubbardParams; param_names::Vector{Symbol} = [:etad1, :etas1, :mz], target_sz::Int = 0)
+function make_ansatz_and_derivs(p::HubbardParams; param_names::Vector{Symbol} = [:etax, :etay, :mz], target_sz::Int = 0)
 	H = build_ham_PH(p)
 
 	H_alphas = OrderedDict{Symbol, Matrix{Float64}}()
@@ -814,19 +823,21 @@ function make_ansatz_and_derivs(p::HubbardParams; param_names::Vector{Symbol} = 
 			str = String(name)[1:(idx-1)]
 			p_alpha = HubbardParams(;
 				(; :Lx => p.Lx,
-					:Ly => p.Ly,
-					:bcx => p.bcx,
-					:bcy => p.bcy,
-					Symbol(str) => Dict(name => 1.0))...,
-			)
-		else
+                                        :Ly => p.Ly,
+                                        :bcx => p.bcx,
+                                        :bcy => p.bcy,
+                                        :x_boundary => p.x_boundary,
+                                        Symbol(str) => Dict(name => 1.0))...,
+                        )
+                else
 			p_alpha = HubbardParams(;
 				(; :Lx => p.Lx,
-					:Ly => p.Ly,
-					:bcx => p.bcx,
-					:bcy => p.bcy,
-					name => 1.0)...,
-			)
+                                        :Ly => p.Ly,
+                                        :bcx => p.bcx,
+                                        :bcy => p.bcy,
+                                        :x_boundary => p.x_boundary,
+                                        name => 1.0)...,
+                        )
 		end
 		H_alphas[name] = build_ham_PH(p_alpha)
 	end

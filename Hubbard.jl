@@ -50,12 +50,20 @@ function parse_commandline()
         help = "Boundary condition phase in Y (1.0 or -1.0)"
         arg_type = Float64
         default = 0.999
-        "--etad1"
-        help = "MF parameters"
+        "--x_boundary"
+        help = "X boundary type: pbc or obc"
+        arg_type = String
+        default = "pbc"
+        "--edge_pinning"
+        help = "Staggered Sz pinning strength on x edges. Used only when --x_boundary obc"
+        arg_type = Float64
+        default = 0.1
+        "--etax"
+        help = "Initial x-bond pairing amplitude in the mean-field ansatz"
         arg_type = Float64
         default = 0.01
-        "--etas1"
-        help = "MF parameters"
+        "--etay"
+        help = "Initial y-bond pairing amplitude in the mean-field ansatz"
         arg_type = Float64
         default = 0.01
         "--chi2"
@@ -134,6 +142,10 @@ function parse_commandline()
         help = "Charge modulation amplitude for Stripe initial mean-field parameters"
         arg_type = Float64
         default = 0.0
+        "--stripe_spin_peak_x"
+        help = "X coordinate where the Stripe spin modulation envelope reaches its peak. NaN keeps the old --stripe_center phase"
+        arg_type = Float64
+        default = NaN
         "--g"
         help = "Gutzwiller projector parameter"
         arg_type = Float64
@@ -144,14 +156,6 @@ function parse_commandline()
         default = 0.0
         "--vj2"
         help = "Jastrow projector parameter on next-nearest-neighbor bonds"
-        arg_type = Float64
-        default = 0.0
-        "--bf_epsilon"
-        help = "Eq.(4) backflow epsilon parameter"
-        arg_type = Float64
-        default = 1.0
-        "--bf_eta"
-        help = "Eq.(4) backflow eta parameter"
         arg_type = Float64
         default = 0.0
     end
@@ -192,20 +196,22 @@ end
 - `mu_uniform::Float64`: 平均 chemical potential `μ`。
 - `stripe_mu_amp::Float64`: 电荷调制振幅 `Δc`。
 - `mz_amp::Float64`: 自旋调制振幅 `Δs`。
-- `etad1_uniform::Float64`: 当前代码中的均匀 d-wave pairing 参数。
-- `etas1_uniform::Float64`: 当前代码中的均匀 s-wave pairing 参数。
+- `etax_uniform::Float64`: x 方向 bond pairing 初值。
+- `etay_uniform::Float64`: y 方向 bond pairing 初值。
+- `stripe_spin_peak_x::Float64`: spin modulation envelope 峰值所在的 x 坐标。若为 `NaN`, 使用 `stripe_center` 给出的旧相位。
 
 返回:
-- `NamedTuple`: 包含 `etad1`, `etas1`, `mz`, `mu` 四个 `Dict{Symbol, Float64}`。
+- `NamedTuple`: 包含 `etax`, `etay`, `mz`, `mu` 四个 `Dict{Symbol, Float64}`。
 
 公式:
 - `Q = 2π / λ`
+- 若 `stripe_spin_peak_x` 为 `NaN`, `x0` 来自 `stripe_center`; 否则 `x0 = stripe_spin_peak_x - λ / 2`。
 - `mu_x = μ + Δc * cos[Q * (x - x0)]`
 - `mz_x = Δs * sin[Q / 2 * (x - x0)]`
-- `Δx(x) = (etas1 - etad1) * |cos[Q / 2 * (x + 1/2 - x0)]|`
-- `Δy(x) = (etas1 + etad1) * |cos[Q / 2 * (x - x0)]|`
-- `etas1_x = (Δx(x) + Δy(x)) / 2`
-- `etad1_x = (Δy(x) - Δx(x)) / 2`
+- `Δx(x) = etax * |cos[Q / 2 * (x + 1/2 - x0)]|`
+- `Δy(x) = etay * |cos[Q / 2 * (x - x0)]|`
+- `etax_x = Δx(x)`
+- `etay_x = Δy(x)`
 """
 function build_stripe_initial_column_params(
     lx::Int,
@@ -214,20 +220,25 @@ function build_stripe_initial_column_params(
     mu_uniform::Float64,
     stripe_mu_amp::Float64,
     mz_amp::Float64,
-    etad1_uniform::Float64,
-    etas1_uniform::Float64,
+    etax_uniform::Float64,
+    etay_uniform::Float64,
+    stripe_spin_peak_x::Float64=NaN,
 )
     if lambda <= 0
         error("lambda must be positive.")
     end
 
-    stripe_center_offset = get_stripe_center_offset(stripe_center)
+    stripe_center_offset = if isnan(stripe_spin_peak_x)
+        get_stripe_center_offset(stripe_center)
+    else
+        stripe_spin_peak_x - lambda / 2.0
+    end
     stripe_wave_vector = 2.0 * pi / lambda
-    x_bond_pairing_uniform = etas1_uniform - etad1_uniform
-    y_bond_pairing_uniform = etas1_uniform + etad1_uniform
+    x_bond_pairing_uniform = etax_uniform
+    y_bond_pairing_uniform = etay_uniform
 
-    etad1_by_x = Dict{Symbol,Float64}()
-    etas1_by_x = Dict{Symbol,Float64}()
+    etax_by_x = Dict{Symbol,Float64}()
+    etay_by_x = Dict{Symbol,Float64}()
     mz_by_x = Dict{Symbol,Float64}()
     mu_by_x = Dict{Symbol,Float64}()
 
@@ -239,11 +250,88 @@ function build_stripe_initial_column_params(
         x_bond_pairing = x_bond_pairing_uniform * abs(cos(stripe_wave_vector / 2.0 * (x_coordinate + 0.5 - stripe_center_offset)))
         y_bond_pairing = y_bond_pairing_uniform * abs(cos(stripe_wave_vector / 2.0 * (x_coordinate - stripe_center_offset)))
 
-        etas1_by_x[Symbol("etas1_$(x)")] = (x_bond_pairing + y_bond_pairing) / 2.0
-        etad1_by_x[Symbol("etad1_$(x)")] = (y_bond_pairing - x_bond_pairing) / 2.0
+        etax_by_x[Symbol("etax_$(x)")] = x_bond_pairing
+        etay_by_x[Symbol("etay_$(x)")] = y_bond_pairing
     end
 
-    return (; etad1=etad1_by_x, etas1=etas1_by_x, mz=mz_by_x, mu=mu_by_x)
+    return (; etax=etax_by_x, etay=etay_by_x, mz=mz_by_x, mu=mu_by_x)
+end
+
+"""
+用途: 将命令行输入的 x 方向边界条件名称规范化为内部 Symbol.
+
+参数:
+- `x_boundary::AbstractString`: 命令行输入, 允许 `pbc` 或 `obc`, 大小写不敏感.
+
+返回:
+- `Symbol`: `:pbc` 表示 x 方向周期边界, `:obc` 表示 x 方向开边界.
+"""
+function normalize_x_boundary_name(x_boundary::AbstractString)::Symbol
+    normalized_name = Symbol(lowercase(strip(x_boundary)))
+    if normalized_name == :pbc || normalized_name == :obc
+        return normalized_name
+    end
+    error("Unknown x_boundary=$(x_boundary). Expected pbc or obc.")
+end
+
+"""
+用途: 将二维格点坐标 `(x, y)` 映射到一维 site index.
+
+参数:
+- `x::Int`: x 方向列坐标, 必须在 `1:lx` 内.
+- `y::Int`: y 方向坐标, 按周期边界取模.
+- `lx::Int`: x 方向长度.
+- `ly::Int`: y 方向长度.
+
+返回:
+- `Int`: 一维 site index, 取值范围为 `1:(lx * ly)`.
+"""
+function hubbard_column_site_index(x::Int, y::Int, lx::Int, ly::Int)::Int
+    if x < 1 || x > lx
+        error("x=$(x) is outside 1:$(lx).")
+    end
+    return (x - 1) * ly + mod(y - 1, ly) + 1
+end
+
+"""
+用途: 为 x-column Hubbard 模型构造最近邻和次近邻 bond 列表.
+
+参数:
+- `lx::Int`: x 方向长度.
+- `ly::Int`: y 方向长度.
+- `x_boundary::Symbol`: `:pbc` 表示 x 方向周期, `:obc` 表示 x 方向开边界.
+
+返回:
+- `Tuple{Vector{Tuple{Int, Int}}, Vector{Tuple{Int, Int}}}`:
+  `(bonds1, bonds2)`, 分别为无向 bond 的一个方向代表. 后续构造 Hamiltonian 时会显式加入 Hermitian conjugate.
+
+公式:
+- 最近邻包含 `+x` 与 `+y` 两个方向.
+- 次近邻包含 `(+x, +y)` 与 `(+x, -y)` 两个方向.
+- `:obc` 时不包含任何跨越 `x = lx -> 1` 的 bond.
+"""
+function build_hubbard_column_bonds(lx::Int, ly::Int, x_boundary::Symbol)
+    if lx <= 0 || ly <= 0
+        error("lx and ly must be positive, got lx=$(lx), ly=$(ly).")
+    end
+    if x_boundary != :pbc && x_boundary != :obc
+        error("Unknown x_boundary=$(x_boundary). Expected :pbc or :obc.")
+    end
+
+    bonds1 = Tuple{Int,Int}[]
+    bonds2 = Tuple{Int,Int}[]
+    for y in 1:ly, x in 1:lx
+        site = hubbard_column_site_index(x, y, lx, ly)
+        has_forward_x_bond = x < lx || x_boundary == :pbc
+        if has_forward_x_bond
+            x_forward = x == lx ? 1 : x + 1
+            push!(bonds1, (site, hubbard_column_site_index(x_forward, y, lx, ly)))
+            push!(bonds2, (site, hubbard_column_site_index(x_forward, y + 1, lx, ly)))
+            push!(bonds2, (site, hubbard_column_site_index(x_forward, y - 1, lx, ly)))
+        end
+        push!(bonds1, (site, hubbard_column_site_index(x, y + 1, lx, ly)))
+    end
+    return bonds1, bonds2
 end
 
 function update_ansatz!(
@@ -254,60 +342,58 @@ function update_ansatz!(
     ly,
     bcx,
     bcy,
+    x_boundary::Symbol,
     target_sz::Int;
     nparams_proj::Int=0,
-    nparams_backflow::Int=0,
 )
-    # 支持输入为 wf 参数 + projector 参数 + backflow 参数的拼接向量
+    # 支持输入为 wf 参数 + projector 参数的拼接向量
     nparms = length(param_names)
-    nparams_wf = nparms - nparams_proj - nparams_backflow
+    nparams_wf = nparms - nparams_proj
     wf_param_names = param_names[1:nparams_wf]
     wf_param_values = params[1:nparams_wf]
-    projector_param_names = param_names[(nparams_wf+1):(nparams_wf+nparams_proj)]
-    projector_param_values = params[(nparams_wf+1):(nparams_wf+nparams_proj)]
-    backflow_param_names = param_names[(nparams_wf+nparams_proj+1):end]
-    backflow_param_values = params[(nparams_wf+nparams_proj+1):end]
+    projector_param_names = param_names[(nparams_wf+1):end]
+    projector_param_values = params[(nparams_wf+1):end]
     # 这里也可以把 bcx, bcy 提出来作为参数
     param_map = Dict{Symbol,Float64}(zip(wf_param_names, wf_param_values))
 
     chi2 = get(param_map, :chi2, 0.0)
 
-    etad1 = Dict{Symbol,Float64}()
-    etas1 = Dict{Symbol,Float64}()
+    etax = Dict{Symbol,Float64}()
+    etay = Dict{Symbol,Float64}()
     mz = Dict{Symbol,Float64}()
     mu = Dict{Symbol,Float64}()
 
     for (name, value) in param_map
         name_str = String(name)
-        if startswith(name_str, "etad1_")
-            etad1[name] = value
-        elseif startswith(name_str, "etas1_")
-            etas1[name] = value
+        if startswith(name_str, "etax_")
+            etax[name] = value
+        elseif startswith(name_str, "etay_")
+            etay[name] = value
         elseif startswith(name_str, "mz_")
             mz[name] = value
         elseif startswith(name_str, "mu_")
             mu[name] = value
-        elseif name == :etad1 || name == :etas1 || name == :chi2
+        elseif name == :etax || name == :etay || name == :chi2
             continue
         else
             error("Unknown parameter name: $name")
         end
     end
 
-    if haskey(param_map, :etad1)
-        if !isempty(etad1)
-            error("Found both uniform etad1 and x-dependent etad1_* parameters.")
+    if haskey(param_map, :etax)
+        if !isempty(etax)
+            error("Found both uniform etax and x-dependent etax_* parameters.")
         end
         for x in 1:lx
-            etad1[Symbol("etad1_$(x)")] = param_map[:etad1]
+            etax[Symbol("etax_$(x)")] = param_map[:etax]
         end
     end
-    if haskey(param_map, :etas1)
-        if !isempty(etas1)
-            error("Found both uniform etas1 and x-dependent etas1_* parameters.")
+    if haskey(param_map, :etay)
+        if !isempty(etay)
+            error("Found both uniform etay and x-dependent etay_* parameters.")
         end
         for x in 1:lx
-            etas1[Symbol("etas1_$(x)")] = param_map[:etas1]
+            etay[Symbol("etay_$(x)")] = param_map[:etay]
         end
     end
 
@@ -316,9 +402,10 @@ function update_ansatz!(
         Ly=ly,
         bcx=bcx,
         bcy=bcy,
+        x_boundary=x_boundary,
         chi1=1.0,
-        etad1=etad1,
-        etas1=etas1,
+        etax=etax,
+        etay=etay,
         chi2=chi2,
         mu=mu,
         mz=mz
@@ -337,9 +424,6 @@ function update_ansatz!(
     update_vwf_params!(vwf, wf_param_names, dUt_matrix)
     if !isempty(projector_param_names)
         update_vwf_projector_params!(vwf, projector_param_names, projector_param_values)
-    end
-    if !isempty(backflow_param_names)
-        update_vwf_backflow_params!(vwf, backflow_param_names, backflow_param_values)
     end
     init_gswf!(vwf)
 end
@@ -405,11 +489,14 @@ function main()
     ly = args["Ly"]
     BCX = args["bcx"]
     BCY = args["bcy"]
+    x_boundary = normalize_x_boundary_name(args["x_boundary"])
+    edge_pinning = args["edge_pinning"]
     target_sz = args["target_sz"]
     doping = args["doping"]
     lambda = args["lambda"]
     stripe_center = args["stripe_center"]
     stripe_mu_amp = args["stripe_mu_amp"]
+    stripe_spin_peak_x = args["stripe_spin_peak_x"]
     # if mod(lx, 4) == 0
     #     BCX = -1
     # end
@@ -436,8 +523,6 @@ function main()
     g = args["g"]
     vj1 = args["vj1"]
     vj2 = args["vj2"]
-    bf_epsilon = args["bf_epsilon"]
-    bf_eta = args["bf_eta"]
     init_params_json = args["init_params_json"]
     N_sites = lx * ly
     #要优化的参数
@@ -452,27 +537,28 @@ function main()
             args["mu"],
             stripe_mu_amp,
             args["mz"],
-            args["etad1"],
-            args["etas1"],
+            args["etax"],
+            args["etay"],
+            stripe_spin_peak_x,
         )
         for i in 1:lx
-            push!(wf_param_names, Symbol("etad1_$i"))
-            push!(wf_param_names, Symbol("etas1_$i"))
+            push!(wf_param_names, Symbol("etax_$i"))
+            push!(wf_param_names, Symbol("etay_$i"))
             push!(wf_param_names, Symbol("mz_$i"))
             push!(wf_param_names, Symbol("mu_$i"))
-            push!(wf_init_params, stripe_column_params.etad1[Symbol("etad1_$i")])
-            push!(wf_init_params, stripe_column_params.etas1[Symbol("etas1_$i")])
+            push!(wf_init_params, stripe_column_params.etax[Symbol("etax_$i")])
+            push!(wf_init_params, stripe_column_params.etay[Symbol("etay_$i")])
             push!(wf_init_params, stripe_column_params.mz[Symbol("mz_$i")])
             push!(wf_init_params, stripe_column_params.mu[Symbol("mu_$i")])
         end
     elseif ansatz == "AFM"
         for i in 1:lx
-            push!(wf_param_names, Symbol("etad1_$i"))
-            push!(wf_param_names, Symbol("etas1_$i"))
+            push!(wf_param_names, Symbol("etax_$i"))
+            push!(wf_param_names, Symbol("etay_$i"))
             push!(wf_param_names, Symbol("mz_$i"))
             push!(wf_param_names, Symbol("mu_$i"))
-            push!(wf_init_params, args["etad1"])
-            push!(wf_init_params, args["etas1"])
+            push!(wf_init_params, args["etax"])
+            push!(wf_init_params, args["etay"])
             push!(wf_init_params, args["mz"])
             push!(wf_init_params, args["mu"])
         end
@@ -491,16 +577,7 @@ function main()
 
     # B. 模型与波函数初始化
     #GeneralModel定义
-    bonds1 = Tuple{Int,Int}[]
-    bonds2 = Tuple{Int,Int}[]
-    idx(x, y) = mod(x - 1, lx) * ly + mod(y - 1, ly) + 1
-    for y in 1:ly, x in 1:lx
-        u = idx(x, y)
-        push!(bonds1, (u, idx(x + 1, y)))
-        push!(bonds1, (u, idx(x, y + 1)))
-        push!(bonds2, (u, idx(x + 1, y + 1)))
-        push!(bonds2, (u, idx(x - 1, y + 1)))
-    end
+    bonds1, bonds2 = build_hubbard_column_bonds(lx, ly, x_boundary)
 
     site_to_neighbor_sites_j1 = [Int[] for _ in 1:N_sites]
     for (site_i, site_j) in bonds1
@@ -522,45 +599,18 @@ function main()
         end
     end
 
-    backflow_source_bonds = Tuple{Int,Int}[]
-    backflow_source_amplitudes = Float64[]
-    for (site_i, site_j) in bonds1
-        push!(backflow_source_bonds, (site_i, site_j))
-        push!(backflow_source_amplitudes, t1)
-        push!(backflow_source_bonds, (site_j, site_i))
-        push!(backflow_source_amplitudes, t1)
-    end
-    for (site_i, site_j) in bonds2
-        push!(backflow_source_bonds, (site_i, site_j))
-        push!(backflow_source_amplitudes, t2)
-        push!(backflow_source_bonds, (site_j, site_i))
-        push!(backflow_source_amplitudes, t2)
-    end
-
     # Projector 定义
     projector = CompositeProjector([
         GutzwillerProjectorTerm(param_name=:g, g=g),
         JastrowProjectorTerm(param_name=:vj1, v=vj1, site_to_neighbor_sites=site_to_neighbor_sites_j1),
         JastrowProjectorTerm(param_name=:vj2, v=vj2, site_to_neighbor_sites=site_to_neighbor_sites_j2)
     ])
-    #= backflow = Eq4BackflowTerm(
-        param_name_epsilon=:bf_epsilon,
-        param_name_eta=:bf_eta,
-        epsilon_bf=bf_epsilon,
-        eta_bf=bf_eta,
-        source_bonds=backflow_source_bonds,
-        source_amplitudes=backflow_source_amplitudes,
-    ) =#
-    backflow = NoBackflowTerm()
     proj_param_names = projector_param_names(projector)
     proj_init_params = projector_param_values(projector)
     nparams_proj = length(proj_param_names)
-    backflow_param_name_list = backflow_param_names(backflow)
-    backflow_init_params = backflow_param_values(backflow)
-    nparams_backflow = length(backflow_param_name_list)
     # 把波函数参数和投影算符参数拼接成一个向量, 供优化器使用
-    init_params = vcat(wf_init_params, proj_init_params, backflow_init_params)
-    param_names = vcat(wf_param_names, proj_param_names, backflow_param_name_list)
+    init_params = vcat(wf_init_params, proj_init_params)
+    param_names = vcat(wf_param_names, proj_param_names)
 
     if !isempty(init_params_json)
         init_params = build_init_params_from_json(init_params_json, param_names)
@@ -585,6 +635,14 @@ function main()
     for i in 1:N_sites
         push!(terms, OperatorTerm([:n_up, :n_dn], [i, i], U))
     end
+    if x_boundary == :obc && edge_pinning != 0.0
+        for y in 1:ly
+            left_site = hubbard_column_site_index(1, y, lx, ly)
+            right_site = hubbard_column_site_index(lx, y, lx, ly)
+            push!(terms, OperatorTerm([:Sz], [left_site], edge_pinning * (-1)^(y + 1)))
+            #push!(terms, OperatorTerm([:Sz], [right_site], edge_pinning * (-1)^(y + lx)))
+        end
+    end
     ham = GeneralModel(N_sites, terms)
 
     nelec = Int(N_sites * (1 + doping))
@@ -595,7 +653,7 @@ function main()
     sampler = config_Hubbard(N_sites, nup, ndn; ifPH=true)
     init_config_Hubbard!(sampler)
 
-    vwf = vwf_det(zeros(Float64, 2 * N_sites, N_sites + target_sz), sampler; backflow=backflow)
+    vwf = vwf_det(zeros(Float64, 2 * N_sites, N_sites + target_sz), sampler)
     set_projector!(vwf, projector)
     kernel = HubbardKernel(conserve_sz=true)
 
@@ -603,7 +661,7 @@ function main()
     if rank == 0
         println("Initial parameters: $init_params")
     end
-    update_ansatz!(vwf, param_names, init_params, lx, ly, BCX, BCY, target_sz; nparams_proj=nparams_proj, nparams_backflow=nparams_backflow)
+    update_ansatz!(vwf, param_names, init_params, lx, ly, BCX, BCY, x_boundary, target_sz; nparams_proj=nparams_proj)
 
 
     # D. 运行模拟
@@ -614,7 +672,7 @@ function main()
         sr_params = SRParams(vmc_params=meas_params, n_steps=n_steps, lr=lr)
         exp_lr_func = build_exponential_lr_func(lr, lr_end, n_steps)
 
-        update_vwf_func! = (vwf, params) -> update_ansatz!(vwf, param_names, params, lx, ly, BCX, BCY, target_sz; nparams_proj=nparams_proj, nparams_backflow=nparams_backflow)
+        update_vwf_func! = (vwf, params) -> update_ansatz!(vwf, param_names, params, lx, ly, BCX, BCY, x_boundary, target_sz; nparams_proj=nparams_proj)
 
         run_sr_optimization(
             ham,
