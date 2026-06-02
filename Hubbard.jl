@@ -334,6 +334,257 @@ function build_hubbard_column_bonds(lx::Int, ly::Int, x_boundary::Symbol)
     return bonds1, bonds2
 end
 
+"""
+用途: 构造截断 displacement Jastrow 的位移标签列表。
+
+参数:
+- `lx::Int`: 晶格 x 方向长度。
+- `ly::Int`: 晶格 y 方向长度。
+- `dx_max::Int`: x 方向最大位移, 默认 `div(lx, 2)`。
+- `dy_max::Int`: y 方向最大位移, 默认 `div(ly, 2)`。
+
+返回:
+- `Vector{Tuple{Int, Int}}`: 按 `(dx, dy)` 排序的位移标签, 不包含 `(0, 0)`。
+"""
+function build_truncated_jastrow_displacement_labels(
+    lx::Int,
+    ly::Int;
+    dx_max::Int=div(lx, 2),
+    dy_max::Int=div(ly, 2),
+)::Vector{Tuple{Int,Int}}
+    if lx <= 0 || ly <= 0
+        error("lx and ly must be positive, got lx=$(lx), ly=$(ly).")
+    end
+    if dx_max < 0 || dy_max < 0
+        error("dx_max and dy_max must be non-negative, got dx_max=$(dx_max), dy_max=$(dy_max).")
+    end
+
+    labels = Tuple{Int,Int}[]
+    for dx in 0:min(dx_max, lx - 1)
+        for dy in 0:min(dy_max, div(ly, 2))
+            if dx == 0 && dy == 0
+                continue
+            end
+            push!(labels, (dx, dy))
+        end
+    end
+    return labels
+end
+
+"""
+用途: 为截断 displacement Jastrow 构造参数名。
+
+参数:
+- `dx::Int`: x 方向位移。
+- `dy::Int`: y 方向最短周期位移。
+
+返回:
+- `Symbol`: 形如 `:vj_dx_dy` 的参数名。
+"""
+function build_truncated_jastrow_param_name(dx::Int, dy::Int)::Symbol
+    return Symbol("vj_$(dx)_$(dy)")
+end
+
+"""
+用途: 为给定 displacement 生成唯一无序 pair 集合。
+
+数学公式:
+- 对每个格点 `i = (x, y)`, 连接 `j = (x + dx, y +/- dy)`。
+- x 方向在 `:obc` 下不 wrap, 在 `:pbc` 下 wrap。
+- y 方向始终按周期边界 wrap。
+
+参数:
+- `lx::Int`: 晶格 x 方向长度。
+- `ly::Int`: 晶格 y 方向长度。
+- `dx::Int`: x 方向位移。
+- `dy::Int`: y 方向最短周期位移。
+- `x_boundary::Symbol`: `:pbc` 或 `:obc`。
+
+返回:
+- `Vector{Tuple{Int, Int}}`: 经过 `i < j` 规范化的唯一 pair 列表。
+"""
+function build_truncated_jastrow_pair_set_for_displacement(
+    lx::Int,
+    ly::Int,
+    dx::Int,
+    dy::Int,
+    x_boundary::Symbol,
+)::Vector{Tuple{Int,Int}}
+    if x_boundary != :pbc && x_boundary != :obc
+        error("Unknown x_boundary=$(x_boundary). Expected :pbc or :obc.")
+    end
+    if dx < 0 || dy < 0
+        error("dx and dy must be non-negative, got dx=$(dx), dy=$(dy).")
+    end
+
+    y_offsets = dy == 0 ? (0,) : (dy, -dy)
+    unique_pairs = Set{Tuple{Int,Int}}()
+    for x in 1:lx
+        neighbor_x = x + dx
+        if x_boundary == :pbc
+            neighbor_x = mod(neighbor_x - 1, lx) + 1
+        elseif neighbor_x > lx
+            continue
+        end
+
+        for y in 1:ly
+            site_index = hubbard_column_site_index(x, y, lx, ly)
+            for offset_y in y_offsets
+                neighbor_y = mod(y - 1 + offset_y, ly) + 1
+                neighbor_index = hubbard_column_site_index(neighbor_x, neighbor_y, lx, ly)
+                if neighbor_index == site_index
+                    continue
+                end
+                push!(unique_pairs, (min(site_index, neighbor_index), max(site_index, neighbor_index)))
+            end
+        end
+    end
+    return sort!(collect(unique_pairs))
+end
+
+"""
+用途: 为给定截断 displacement 构造 Jastrow 对称邻接表。
+
+参数:
+- `lx::Int`: 晶格 x 方向长度。
+- `ly::Int`: 晶格 y 方向长度。
+- `dx::Int`: x 方向位移。
+- `dy::Int`: y 方向最短周期位移。
+- `x_boundary::Symbol`: `:pbc` 或 `:obc`。
+
+返回:
+- `Vector{Vector{Int}}`: 每个 site 的 Jastrow 邻居列表, 无自环且对称。
+"""
+function build_truncated_jastrow_neighbor_table_for_displacement(
+    lx::Int,
+    ly::Int,
+    dx::Int,
+    dy::Int,
+    x_boundary::Symbol,
+)::Vector{Vector{Int}}
+    unique_pairs = build_truncated_jastrow_pair_set_for_displacement(lx, ly, dx, dy, x_boundary)
+    neighbor_table = [Int[] for _ in 1:(lx * ly)]
+    for (site_i, site_j) in unique_pairs
+        push!(neighbor_table[site_i], site_j)
+        push!(neighbor_table[site_j], site_i)
+    end
+    for neighbors in neighbor_table
+        sort!(neighbors)
+    end
+    return neighbor_table
+end
+
+"""
+用途: 给截断 displacement Jastrow 参数设置兼容旧命令行的初值。
+
+参数:
+- `dx::Int`: x 方向位移。
+- `dy::Int`: y 方向最短周期位移。
+- `vj1::Float64`: 最近邻 Jastrow 初值。
+- `vj2::Float64`: 对角次近邻 Jastrow 初值。
+
+返回:
+- `Float64`: 当前 displacement 的 Jastrow 初值。
+"""
+function truncated_jastrow_initial_value(dx::Int, dy::Int, vj1::Float64, vj2::Float64)::Float64
+    if (dx == 1 && dy == 0) || (dx == 0 && dy == 1)
+        return vj1
+    elseif dx == 1 && dy == 1
+        return vj2
+    end
+    return 0.0
+end
+
+"""
+用途: 构造截断 displacement Jastrow terms、参数名和初值。
+
+参数:
+- `lx::Int`: 晶格 x 方向长度。
+- `ly::Int`: 晶格 y 方向长度。
+- `x_boundary::Symbol`: `:pbc` 或 `:obc`。
+- `dx_max::Int`: x 方向截断, 默认 `div(lx, 2)`。
+- `dy_max::Int`: y 方向截断, 默认 `div(ly, 2)`。
+- `vj1::Float64`: `(1, 0)` 与 `(0, 1)` 的初值。
+- `vj2::Float64`: `(1, 1)` 的初值。
+
+返回:
+- `Tuple{Vector{JastrowProjectorTerm{Float64}}, Vector{Symbol}, Vector{Float64}}`:
+  `(jastrow_terms, param_names, init_params)`。
+"""
+function build_truncated_displacement_jastrow_terms(
+    lx::Int,
+    ly::Int,
+    x_boundary::Symbol;
+    dx_max::Int=div(lx, 2),
+    dy_max::Int=div(ly, 2),
+    vj1::Float64=0.0,
+    vj2::Float64=0.0,
+)::Tuple{Vector{JastrowProjectorTerm{Float64}},Vector{Symbol},Vector{Float64}}
+    jastrow_terms = JastrowProjectorTerm{Float64}[]
+    param_names = Symbol[]
+    init_params = Float64[]
+
+    for (dx, dy) in build_truncated_jastrow_displacement_labels(lx, ly; dx_max=dx_max, dy_max=dy_max)
+        param_name = build_truncated_jastrow_param_name(dx, dy)
+        init_value = truncated_jastrow_initial_value(dx, dy, vj1, vj2)
+        neighbor_table = build_truncated_jastrow_neighbor_table_for_displacement(lx, ly, dx, dy, x_boundary)
+        push!(
+            jastrow_terms,
+            JastrowProjectorTerm(
+                param_name=param_name,
+                v=init_value,
+                site_to_neighbor_sites=neighbor_table,
+            ),
+        )
+        push!(param_names, param_name)
+        push!(init_params, init_value)
+    end
+
+    return jastrow_terms, param_names, init_params
+end
+
+"""
+用途: 构造 Hubbard.jl 使用的截断 displacement projector。
+
+参数:
+- `lx::Int`: 晶格 x 方向长度。
+- `ly::Int`: 晶格 y 方向长度。
+- `g::Float64`: Gutzwiller projector 初值。
+- `x_boundary::Symbol`: `:pbc` 或 `:obc`。
+- `dx_max::Int`: x 方向 Jastrow 截断, 默认 `div(lx, 2)`。
+- `dy_max::Int`: y 方向 Jastrow 截断, 默认 `div(ly, 2)`。
+- `vj1::Float64`: 最近邻 Jastrow 初值。
+- `vj2::Float64`: 对角次近邻 Jastrow 初值。
+
+返回:
+- `CompositeProjector`: 包含 `g` 与多个 `vj_dx_dy` 的 projector。
+"""
+function build_hubbard_truncated_projector(
+    lx::Int,
+    ly::Int,
+    g::Float64,
+    x_boundary::Symbol;
+    dx_max::Int=div(lx, 2),
+    dy_max::Int=div(ly, 2),
+    vj1::Float64=0.0,
+    vj2::Float64=0.0,
+)::CompositeProjector
+    jastrow_terms, _, _ = build_truncated_displacement_jastrow_terms(
+        lx,
+        ly,
+        x_boundary;
+        dx_max=dx_max,
+        dy_max=dy_max,
+        vj1=vj1,
+        vj2=vj2,
+    )
+    projector_terms = AbstractProjectorTerm[
+        GutzwillerProjectorTerm(param_name=:g, g=g),
+    ]
+    append!(projector_terms, jastrow_terms)
+    return CompositeProjector(projector_terms)
+end
+
 function update_ansatz!(
     vwf,
     param_names::Vector{Symbol},
@@ -579,32 +830,8 @@ function main()
     #GeneralModel定义
     bonds1, bonds2 = build_hubbard_column_bonds(lx, ly, x_boundary)
 
-    site_to_neighbor_sites_j1 = [Int[] for _ in 1:N_sites]
-    for (site_i, site_j) in bonds1
-        if !(site_j in site_to_neighbor_sites_j1[site_i])
-            push!(site_to_neighbor_sites_j1[site_i], site_j)
-        end
-        if !(site_i in site_to_neighbor_sites_j1[site_j])
-            push!(site_to_neighbor_sites_j1[site_j], site_i)
-        end
-    end
-
-    site_to_neighbor_sites_j2 = [Int[] for _ in 1:N_sites]
-    for (site_i, site_j) in bonds2
-        if !(site_j in site_to_neighbor_sites_j2[site_i])
-            push!(site_to_neighbor_sites_j2[site_i], site_j)
-        end
-        if !(site_i in site_to_neighbor_sites_j2[site_j])
-            push!(site_to_neighbor_sites_j2[site_j], site_i)
-        end
-    end
-
     # Projector 定义
-    projector = CompositeProjector([
-        GutzwillerProjectorTerm(param_name=:g, g=g),
-        JastrowProjectorTerm(param_name=:vj1, v=vj1, site_to_neighbor_sites=site_to_neighbor_sites_j1),
-        JastrowProjectorTerm(param_name=:vj2, v=vj2, site_to_neighbor_sites=site_to_neighbor_sites_j2)
-    ])
+    projector = build_hubbard_truncated_projector(lx, ly, g, x_boundary; vj1=vj1, vj2=vj2)
     proj_param_names = projector_param_names(projector)
     proj_init_params = projector_param_values(projector)
     nparams_proj = length(proj_param_names)
