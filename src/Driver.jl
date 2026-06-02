@@ -44,8 +44,9 @@ end
 struct SRParams
     n_steps::Int            # 优化总步数
     lr::Float64             # 学习率
-    diag_shift::Float64     # S矩阵对角偏移 (Ridge)
+    diag_shift::Float64     # S矩阵相对对角偏移, 即 S -> S + diag_shift * Diag(diag(S))
     max_step_size::Float64  # 单次更新最大幅度 (Clipping)
+    eigen_cutoff::Float64   # SR矩阵特征值截断阈值, 保留 λ_i / λ_max >= eigen_cutoff 的方向
     vmc_params::VMCParams
 
     function SRParams(;
@@ -53,9 +54,10 @@ struct SRParams
         lr=0.05,
         diag_shift=1e-3,
         max_step_size=0.1,
+        eigen_cutoff=2e-4,
         vmc_params::VMCParams=VMCParams()
     )
-        new(n_steps, lr, diag_shift, max_step_size, vmc_params)
+        new(n_steps, lr, diag_shift, max_step_size, eigen_cutoff, vmc_params)
     end
 end
 
@@ -362,6 +364,7 @@ function run_sr_optimization(model, vwf, kernel,
             # [Fix] 使用泛型 Solver，自动处理类型
             delta, grad_vec, E_err = solve_sr_update(means, E_history;
                 diag_shift=sr_params.diag_shift,
+                eigen_cutoff=sr_params.eigen_cutoff,
                 is_real_param=true)
 
             params_before_update = copy(current_params)
@@ -422,8 +425,65 @@ function collect_sr_data(obs_buf, session)
     return means, E_history
 end
 
+"""
+用途: 使用相对对角修正和特征值截断求解 SR 线性方程。
+
+参数:
+- `sr_matrix::AbstractMatrix`: SR 协方差矩阵 `S`, 形状为 `P × P`。
+- `force::AbstractVector`: SR 右端项, 通常为 `-gradient`, 长度为 `P`。
+- `diag_shift::Float64`: 相对对角修正强度, 公式为 `S_tilde = S + diag_shift * Diag(diag(S))`。
+- `eigen_cutoff::Float64`: 特征值截断阈值, 只保留 `lambda_i / lambda_max >= eigen_cutoff` 的方向。
+
+返回:
+- `Vector`: SR 参数更新方向 `delta = S_tilde^+ * force`, 其中 `+` 表示截断 pseudo-inverse。
+
+公式:
+- `S_tilde = S + eps * Diag(diag(S))`
+- `S_tilde = U Diag(lambda) U'`
+- `delta = sum_i U_i * (U_i' force) / lambda_i`, 其中只保留满足截断条件的 `lambda_i`。
+"""
+function solve_stabilized_sr_direction(
+    sr_matrix::AbstractMatrix,
+    force::AbstractVector;
+    diag_shift::Float64=1e-3,
+    eigen_cutoff::Float64=2e-4,
+)
+    if diag_shift < 0.0
+        error("diag_shift must be non-negative, got $(diag_shift).")
+    end
+    if eigen_cutoff < 0.0
+        error("eigen_cutoff must be non-negative, got $(eigen_cutoff).")
+    end
+
+    n_params = length(force)
+    if size(sr_matrix, 1) != n_params || size(sr_matrix, 2) != n_params
+        throw(DimensionMismatch("SR matrix size $(size(sr_matrix)) does not match force length $(n_params)."))
+    end
+
+    diagonal_values = real.(diag(sr_matrix))
+    shifted_matrix = Matrix(sr_matrix) + diag_shift * Diagonal(diagonal_values)
+    eigen_result = eigen(Hermitian(shifted_matrix))
+    eigenvalues = eigen_result.values
+    eigenvectors = eigen_result.vectors
+
+    max_eigenvalue = maximum(eigenvalues)
+    if max_eigenvalue <= 0.0
+        return zeros(eltype(force), n_params)
+    end
+
+    keep_indices = findall((eigenvalues .> 0.0) .& (eigenvalues .>= eigen_cutoff * max_eigenvalue))
+    if isempty(keep_indices)
+        return zeros(eltype(force), n_params)
+    end
+
+    kept_vectors = @view eigenvectors[:, keep_indices]
+    kept_values = eigenvalues[keep_indices]
+    coefficients = (kept_vectors' * force) ./ kept_values
+    return kept_vectors * coefficients
+end
+
 function solve_sr_update(means::Dict{Symbol,Any}, E_history::Vector{T};
-    diag_shift::Float64=1e-3, is_real_param::Bool=true) where T<:Number
+    diag_shift::Float64=1e-3, eigen_cutoff::Float64=2e-4, is_real_param::Bool=true) where T<:Number
     N_total = length(E_history)
     E_err = std(E_history) / sqrt(N_total)
 
@@ -443,8 +503,12 @@ function solve_sr_update(means::Dict{Symbol,Any}, E_history::Vector{T};
         grad_final = grad_vec_complex
         S_final = S_mat_complex
     end
-    S_reg = S_final + diag_shift * I(n_params)
-    delta = -(S_reg \ grad_final)
+    delta = solve_stabilized_sr_direction(
+        S_final,
+        -grad_final;
+        diag_shift=diag_shift,
+        eigen_cutoff=eigen_cutoff,
+    )
     return delta, grad_final, E_err
 end
 
