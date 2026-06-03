@@ -143,7 +143,8 @@ function main()
         session_shm=session_shm,
         shared_matrix=shared_matrix,
         leaders_comm=leaders_comm,
-        win=win
+        win=win,
+        initialize_gswf=false
     )
     if defect_ansatz == "FPS"
         folder = joinpath("logs", "target_sz_$(target_sz)")
@@ -170,7 +171,8 @@ function main()
             session_shm=session_shm,
             shared_matrix=shared_matrix,
             leaders_comm=leaders_comm,
-            win=win
+            win=win,
+            initialize_gswf=false
         )
 
         run_sr_optimization(

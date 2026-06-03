@@ -513,10 +513,12 @@ end
 - session_shm: 节点共享内存 communicator 对应的会话信息.
 - shared_matrix: 节点共享内存中的导数三维矩阵.
 - leaders_comm: 仅由各节点共享内存 root 组成的 communicator.
-- win: MPI 共享内存 window 句柄.
-返回:
-- nothing.
-"""
+  - win: MPI 共享内存 window 句柄.
+  - initialize_gswf: 是否在更新轨道和导数后立刻用当前 sampler 构型重建 Slater 矩阵.
+    若为 false, 后续应交给 VMCRunner(auto_fix=true) 调用 find_stable_config! 寻找非奇异初态.
+  返回:
+  - nothing.
+  """
 function update_defect_ansatz!(
     vwf,
     param_names::Vector{Symbol},
@@ -532,7 +534,8 @@ function update_defect_ansatz!(
     session_shm::MPISession=nothing,
     shared_matrix::Array{Float64,3}=nothing,
     leaders_comm::Union{Nothing,MPI.Comm}=nothing,
-    win::MPI.Win=nothing
+    win::MPI.Win=nothing,
+    initialize_gswf::Bool=true
 )
     param_map = Dict{Symbol,Float64}(zip(param_names, params))
 
@@ -611,10 +614,14 @@ function update_defect_ansatz!(
     #gs_u广播
     gs_u = MPI.bcast(gs_u, 0, session_shm.comm)
 
+    copyto!(vwf.base_gs_U, gs_u)
     copyto!(vwf.gs_U, gs_u)
+    copyto!(vwf.backflow_u, gs_u)
     copyto!(vwf.gs_U_t, permutedims(gs_u))
     update_vwf_params!(vwf, param_names, shared_matrix)
-    init_gswf!(vwf)
+    if initialize_gswf
+        init_gswf!(vwf)
+    end
 end
 
 struct SxSq_Estimator
