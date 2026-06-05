@@ -24,7 +24,8 @@ export has_up, has_dn
 include("Projector.jl")
 using .Projector
 export AbstractProjector, AbstractProjectorTerm
-export NoProjectorTerm, GutzwillerProjectorTerm, JastrowProjectorTerm, CompositeProjector
+export NoProjectorTerm, GutzwillerProjectorTerm, SiteGroupGutzwillerProjectorTerm
+export JastrowProjectorTerm, CompositeProjector
 export projector_ratio, projector_log_derivative!, projector_log_derivative
 export projector_param_names, projector_param_values, projector_param_count
 export update_projector_params!, check_projector_consistency

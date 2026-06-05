@@ -55,7 +55,7 @@ mutable struct vwf_det{T,S}
 
     # -- Workspace --
     ws::R1R2WS{T}
-    dUt_matrix::Array{T,3}
+    dUt_matrix::AbstractArray{T,3}
     param_keys::Vector{Symbol}
 end
 
@@ -223,7 +223,7 @@ end
 
 
 
-function update_vwf_params!(vwf::vwf_det{T}, param_names::Vector{Symbol}, dUt_matrix::Array{T,3}) where T
+function update_vwf_params!(vwf::vwf_det{T}, param_names::Vector{Symbol}, dUt_matrix::AbstractArray{T,3}) where T
 
     empty!(vwf.param_keys)
 

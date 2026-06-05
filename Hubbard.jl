@@ -158,6 +158,26 @@ function parse_commandline()
         help = "Jastrow projector parameter on next-nearest-neighbor bonds"
         arg_type = Float64
         default = 0.0
+        "--enable_backflow"
+        help = "Enable PH-basis backflow using the same local-state rules as Hubbard_bf.jl"
+        arg_type = String
+        default = "true"
+        "--bf_epsilon"
+        help = "Backflow epsilon parameter"
+        arg_type = Float64
+        default = 1.0
+        "--bf_eta1"
+        help = "Backflow eta1 doublon-holon parameter"
+        arg_type = Float64
+        default = 0.0
+        "--bf_eta2"
+        help = "Backflow eta2 spin-exchange parameter"
+        arg_type = Float64
+        default = 0.0
+        "--bf_eta3"
+        help = "Backflow eta3 mixed virtual-hop parameter"
+        arg_type = Float64
+        default = 0.0
     end
 
     return parse_args(s)
@@ -585,6 +605,139 @@ function build_hubbard_truncated_projector(
     return CompositeProjector(projector_terms)
 end
 
+"""
+用途: 根据 Hubbard Hamiltonian 的 NN/NNN bond 生成 backflow 使用的有向 source 数据。
+
+参数:
+- `bonds1, bonds2::Vector{Tuple{Int, Int}}`: 无向 NN/NNN bond 的代表方向。
+- `t1, t2::Float64`: 对应 hopping 振幅。
+
+返回:
+- `Tuple{Vector{Tuple{Int, Int}}, Vector{Float64}}`: 有向 source bonds 和振幅。
+"""
+function build_hubbard_backflow_source_data(
+    bonds1::Vector{Tuple{Int,Int}},
+    bonds2::Vector{Tuple{Int,Int}},
+    t1::Float64,
+    t2::Float64,
+)::Tuple{Vector{Tuple{Int,Int}},Vector{Float64}}
+    source_bonds = Tuple{Int,Int}[]
+    source_amplitudes = Float64[]
+    for (site_i, site_j) in bonds1
+        push!(source_bonds, (site_i, site_j))
+        push!(source_amplitudes, t1)
+        push!(source_bonds, (site_j, site_i))
+        push!(source_amplitudes, t1)
+    end
+    for (site_i, site_j) in bonds2
+        push!(source_bonds, (site_i, site_j))
+        push!(source_amplitudes, t2)
+        push!(source_bonds, (site_j, site_i))
+        push!(source_amplitudes, t2)
+    end
+    return source_bonds, source_amplitudes
+end
+
+"""
+用途: 构造 PH Hubbard 使用的 composite backflow。这里故意沿用 `Hubbard_bf.jl`
+中 nonPH 的 local-state 规则, 用于比较非标准 PH backflow 对结果的影响。
+
+参数:
+- `source_bonds, source_amplitudes`: backflow source 数据。
+- `bf_epsilon, bf_eta1, bf_eta2, bf_eta3::Float64`: backflow 参数。
+
+返回:
+- `CompositeBackflowTerm`: 顺序为 `epsilon, eta1, eta2, eta3` 的 backflow。
+"""
+function build_hubbard_composite_backflow(
+    source_bonds::Vector{Tuple{Int,Int}},
+    source_amplitudes::Vector{Float64},
+    bf_epsilon::Float64,
+    bf_eta1::Float64,
+    bf_eta2::Float64,
+    bf_eta3::Float64,
+)::CompositeBackflowTerm
+    return CompositeBackflowTerm([
+        BackflowEpsilonTerm(
+            param_name=:bf_epsilon,
+            epsilon_bf=bf_epsilon,
+            epsilon_mask_terms=Symbol[:eta1, :eta2, :eta3],
+            source_bonds=source_bonds,
+            source_amplitudes=source_amplitudes,
+        ),
+        BackflowEta1DoublonHoleTerm(
+            param_name=:bf_eta1,
+            eta1_bf=bf_eta1,
+            source_bonds=source_bonds,
+            source_amplitudes=source_amplitudes,
+        ),
+        BackflowEta2SpinExchangeTerm(
+            param_name=:bf_eta2,
+            eta2_bf=bf_eta2,
+            source_bonds=source_bonds,
+            source_amplitudes=source_amplitudes,
+        ),
+        BackflowEta3MixedVirtualHopTerm(
+            param_name=:bf_eta3,
+            eta3_bf=bf_eta3,
+            source_bonds=source_bonds,
+            source_amplitudes=source_amplitudes,
+        ),
+    ])
+end
+
+"""
+用途: 根据命令行开关构造 PH Hubbard backflow 对象。
+
+参数:
+- `enable_backflow::Bool`: 是否启用 backflow。
+- 其余参数同 `build_hubbard_composite_backflow`。
+
+返回:
+- `AbstractBackflowTerm`: 启用时为 `CompositeBackflowTerm`, 禁用时为 `NoBackflowTerm()`。
+"""
+function build_hubbard_optional_backflow(
+    enable_backflow::Bool,
+    source_bonds::Vector{Tuple{Int,Int}},
+    source_amplitudes::Vector{Float64},
+    bf_epsilon::Float64,
+    bf_eta1::Float64,
+    bf_eta2::Float64,
+    bf_eta3::Float64,
+)::AbstractBackflowTerm
+    if !enable_backflow
+        return NoBackflowTerm()
+    end
+    return build_hubbard_composite_backflow(
+        source_bonds,
+        source_amplitudes,
+        bf_epsilon,
+        bf_eta1,
+        bf_eta2,
+        bf_eta3,
+    )
+end
+
+"""
+用途: 解析命令行中的布尔字符串。
+
+参数:
+- `raw_value::AbstractString`: 支持 `true/false`, `1/0`, `yes/no`, `on/off`。
+- `option_name::AbstractString`: 命令行选项名, 用于错误信息。
+
+返回:
+- `Bool`: 解析后的布尔值。
+"""
+function parse_hubbard_bool_flag(raw_value::AbstractString, option_name::AbstractString)::Bool
+    normalized_value = lowercase(strip(raw_value))
+    if normalized_value in ("true", "t", "1", "yes", "y", "on")
+        return true
+    elseif normalized_value in ("false", "f", "0", "no", "n", "off")
+        return false
+    end
+    error("Invalid value for $(option_name): $(raw_value).")
+end
+
 function update_ansatz!(
     vwf,
     param_names::Vector{Symbol},
@@ -596,14 +749,17 @@ function update_ansatz!(
     x_boundary::Symbol,
     target_sz::Int;
     nparams_proj::Int=0,
+    nparams_backflow::Int=0,
 )
-    # 支持输入为 wf 参数 + projector 参数的拼接向量
+    # 支持输入为 wf 参数 + projector 参数 + backflow 参数的拼接向量
     nparms = length(param_names)
-    nparams_wf = nparms - nparams_proj
+    nparams_wf = nparms - nparams_proj - nparams_backflow
     wf_param_names = param_names[1:nparams_wf]
     wf_param_values = params[1:nparams_wf]
-    projector_param_names = param_names[(nparams_wf+1):end]
-    projector_param_values = params[(nparams_wf+1):end]
+    projector_param_names = param_names[(nparams_wf+1):(nparams_wf+nparams_proj)]
+    projector_param_values = params[(nparams_wf+1):(nparams_wf+nparams_proj)]
+    backflow_param_names = param_names[(nparams_wf+nparams_proj+1):end]
+    backflow_param_values = params[(nparams_wf+nparams_proj+1):end]
     # 这里也可以把 bcx, bcy 提出来作为参数
     param_map = Dict{Symbol,Float64}(zip(wf_param_names, wf_param_values))
 
@@ -675,6 +831,9 @@ function update_ansatz!(
     update_vwf_params!(vwf, wf_param_names, dUt_matrix)
     if !isempty(projector_param_names)
         update_vwf_projector_params!(vwf, projector_param_names, projector_param_values)
+    end
+    if !isempty(backflow_param_names)
+        update_vwf_backflow_params!(vwf, backflow_param_names, backflow_param_values)
     end
     init_gswf!(vwf)
 end
@@ -832,12 +991,25 @@ function main()
 
     # Projector 定义
     projector = build_hubbard_truncated_projector(lx, ly, g, x_boundary; vj1=vj1, vj2=vj2)
+    source_bonds, source_amplitudes = build_hubbard_backflow_source_data(bonds1, bonds2, t1, t2)
+    backflow = build_hubbard_optional_backflow(
+        parse_hubbard_bool_flag(args["enable_backflow"], "--enable_backflow"),
+        source_bonds,
+        source_amplitudes,
+        args["bf_epsilon"],
+        args["bf_eta1"],
+        args["bf_eta2"],
+        args["bf_eta3"],
+    )
     proj_param_names = projector_param_names(projector)
     proj_init_params = projector_param_values(projector)
     nparams_proj = length(proj_param_names)
-    # 把波函数参数和投影算符参数拼接成一个向量, 供优化器使用
-    init_params = vcat(wf_init_params, proj_init_params)
-    param_names = vcat(wf_param_names, proj_param_names)
+    backflow_param_name_list = backflow_param_names(backflow)
+    backflow_init_params = backflow_param_values(backflow)
+    nparams_backflow = length(backflow_param_name_list)
+    # 把波函数参数, 投影算符参数和 backflow 参数拼接成一个向量, 供优化器使用
+    init_params = vcat(wf_init_params, proj_init_params, backflow_init_params)
+    param_names = vcat(wf_param_names, proj_param_names, backflow_param_name_list)
 
     if !isempty(init_params_json)
         init_params = build_init_params_from_json(init_params_json, param_names)
@@ -880,7 +1052,7 @@ function main()
     sampler = config_Hubbard(N_sites, nup, ndn; ifPH=true)
     init_config_Hubbard!(sampler)
 
-    vwf = vwf_det(zeros(Float64, 2 * N_sites, N_sites + target_sz), sampler)
+    vwf = vwf_det(zeros(Float64, 2 * N_sites, N_sites + target_sz), sampler; backflow=backflow)
     set_projector!(vwf, projector)
     kernel = HubbardKernel(conserve_sz=true)
 
@@ -888,7 +1060,19 @@ function main()
     if rank == 0
         println("Initial parameters: $init_params")
     end
-    update_ansatz!(vwf, param_names, init_params, lx, ly, BCX, BCY, x_boundary, target_sz; nparams_proj=nparams_proj)
+    update_ansatz!(
+        vwf,
+        param_names,
+        init_params,
+        lx,
+        ly,
+        BCX,
+        BCY,
+        x_boundary,
+        target_sz;
+        nparams_proj=nparams_proj,
+        nparams_backflow=nparams_backflow,
+    )
 
 
     # D. 运行模拟
@@ -899,7 +1083,19 @@ function main()
         sr_params = SRParams(vmc_params=meas_params, n_steps=n_steps, lr=lr)
         exp_lr_func = build_exponential_lr_func(lr, lr_end, n_steps)
 
-        update_vwf_func! = (vwf, params) -> update_ansatz!(vwf, param_names, params, lx, ly, BCX, BCY, x_boundary, target_sz; nparams_proj=nparams_proj)
+        update_vwf_func! = (vwf, params) -> update_ansatz!(
+            vwf,
+            param_names,
+            params,
+            lx,
+            ly,
+            BCX,
+            BCY,
+            x_boundary,
+            target_sz;
+            nparams_proj=nparams_proj,
+            nparams_backflow=nparams_backflow,
+        )
 
         run_sr_optimization(
             ham,

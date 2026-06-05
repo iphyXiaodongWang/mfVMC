@@ -1,7 +1,8 @@
 module Projector
 
 export AbstractProjector, AbstractProjectorTerm
-export NoProjectorTerm, GutzwillerProjectorTerm, JastrowProjectorTerm, CompositeProjector
+export NoProjectorTerm, GutzwillerProjectorTerm, SiteGroupGutzwillerProjectorTerm
+export JastrowProjectorTerm, CompositeProjector
 export projector_ratio, projector_log_derivative!, projector_log_derivative
 export projector_param_names, projector_param_values, projector_param_count
 export update_projector_params!, check_projector_consistency
@@ -31,6 +32,84 @@ end
 
 function GutzwillerProjectorTerm(; param_name::Symbol=:g_gutz, g::Real=0.0)
     return GutzwillerProjectorTerm{Float64}(param_name, Float64(g))
+end
+
+
+"""
+用途: site/orbital resolved Gutzwiller projector term, 用分组方式给不同 site 集合设置不同 Gutzwiller 参数。
+
+参数:
+- `param_names::Vector{Symbol}`: 每个 group 的参数名, 第 `k` 个名字对应 group id `k`。
+- `g_values::Vector{T}`: 每个 group 的 Gutzwiller 参数值。
+- `site_groups::Vector{Int}`: `site_groups[i]` 表示 site `i` 属于哪个 group, group id 从 1 开始。
+
+返回:
+- `SiteGroupGutzwillerProjectorTerm` 实例。
+
+数学公式:
+- `P_G(C) = exp(-sum_g g_g D_g(C))`, 其中 `D_g(C) = sum_{i in group g} n_{i up} n_{i down}`。
+"""
+mutable struct SiteGroupGutzwillerProjectorTerm{T<:Real} <: AbstractProjectorTerm
+    param_names::Vector{Symbol}
+    g_values::Vector{T}
+    site_groups::Vector{Int}
+end
+
+"""
+用途: 检查 site/orbital resolved Gutzwiller 的分组信息是否合法。
+
+参数:
+- `param_names::Vector{Symbol}`: 参数名。
+- `g_values::Vector{<:Real}`: 参数值。
+- `site_groups::Vector{Int}`: site 到 group id 的映射。
+
+返回:
+- `nothing`。若长度不匹配、参数名重复或 group id 越界会抛出异常。
+"""
+function _check_site_group_gutzwiller_inputs(
+    param_names::Vector{Symbol},
+    g_values::Vector{<:Real},
+    site_groups::Vector{Int},
+)
+    length(param_names) == length(g_values) ||
+        error("SiteGroupGutzwillerProjectorTerm requires param_names and g_values to have the same length.")
+    !isempty(param_names) ||
+        error("SiteGroupGutzwillerProjectorTerm requires at least one group parameter.")
+    length(unique(param_names)) == length(param_names) ||
+        error("SiteGroupGutzwillerProjectorTerm param_names contains duplicates: $param_names")
+    !isempty(site_groups) ||
+        error("SiteGroupGutzwillerProjectorTerm requires non-empty site_groups.")
+    max_group = length(param_names)
+    for (site, group_id) in enumerate(site_groups)
+        1 <= group_id <= max_group ||
+            error("site_groups[$site] = $group_id is outside 1:$max_group.")
+    end
+    return nothing
+end
+
+"""
+用途: 构造默认 Float64 类型的 site/orbital resolved Gutzwiller projector term。
+
+参数:
+- `param_names::Vector{Symbol}`: 每个 group 的参数名。
+- `g_values::Vector{<:Real}`: 每个 group 的初值。
+- `site_groups::Vector{Int}`: site 到 group id 的映射。
+
+返回:
+- `SiteGroupGutzwillerProjectorTerm{Float64}` 实例。
+"""
+function SiteGroupGutzwillerProjectorTerm(
+    ;
+    param_names::Vector{Symbol},
+    g_values::Vector{<:Real},
+    site_groups::Vector{Int},
+)
+    _check_site_group_gutzwiller_inputs(param_names, g_values, site_groups)
+    return SiteGroupGutzwillerProjectorTerm{Float64}(
+        copy(param_names),
+        Float64.(g_values),
+        copy(site_groups),
+    )
 end
 
 
@@ -179,11 +258,34 @@ end
     return _get_density(Int8(state_code))
 end
 
+"""
+用途: 判断一个 site 状态是否为 doublon。
+
+参数:
+- `state_code`: site 状态编码。
+
+返回:
+- `Float64`: doublon 返回 `1.0`, 否则返回 `0.0`。
+
+数学公式:
+- `d_i = 1_{up} 1_{down}`。
+"""
+@inline function _get_doublon_indicator(state_code::Int8)
+    return ((state_code & UP) != 0 && (state_code & DN) != 0) ? 1.0 : 0.0
+end
+
+@inline function _get_doublon_indicator(state_code::Integer)
+    return _get_doublon_indicator(Int8(state_code))
+end
+
 function projector_param_names(projector_term::NoProjectorTerm)
     return Symbol[]
 end
 function projector_param_names(projector_term::GutzwillerProjectorTerm)
     return Symbol[projector_term.param_name]
+end
+function projector_param_names(projector_term::SiteGroupGutzwillerProjectorTerm)
+    return copy(projector_term.param_names)
 end
 function projector_param_names(projector_term::JastrowProjectorTerm)
     return Symbol[projector_term.param_name]
@@ -211,6 +313,9 @@ function projector_param_values(projector_term::NoProjectorTerm)
 end
 function projector_param_values(projector_term::GutzwillerProjectorTerm)
     return Float64[Float64(projector_term.g)]
+end
+function projector_param_values(projector_term::SiteGroupGutzwillerProjectorTerm)
+    return Float64.(projector_term.g_values)
 end
 function projector_param_values(projector_term::JastrowProjectorTerm)
     return Float64[Float64(projector_term.v)]
@@ -275,6 +380,14 @@ end
 function _set_projector_param!(projector_term::GutzwillerProjectorTerm, name::Symbol, value::Real)
     if projector_term.param_name == name
         projector_term.g = Float64(value)
+        return true
+    end
+    return false
+end
+function _set_projector_param!(projector_term::SiteGroupGutzwillerProjectorTerm, name::Symbol, value::Real)
+    idx = findfirst(==(name), projector_term.param_names)
+    if idx !== nothing
+        projector_term.g_values[idx] = Float64(value)
         return true
     end
     return false
@@ -383,6 +496,65 @@ end
 function projector_ratio(projector_term::GutzwillerProjectorTerm, sampler_state, proposal)
     delta_n_d = _extract_delta_doublon(proposal)
     return exp(-Float64(projector_term.g) * delta_n_d)
+end
+"""
+用途: 计算 site/orbital resolved Gutzwiller term 的 projector 比值。
+
+数学公式:
+- `ratio = exp(-sum_g g_g DeltaD_g)`,
+  其中 `DeltaD_g = D_g(C') - D_g(C)`。
+
+参数:
+- `projector_term::SiteGroupGutzwillerProjectorTerm`: 分组 Gutzwiller term。
+- `sampler_state`: 采样构型对象, 需要提供 `state`。
+- `proposal`: proposal 对象, 需要提供 `site1/site2/old_state1/old_state2/new_state1/new_state2`。
+
+返回:
+- `Float64`: 比值 `P_G(C')/P_G(C)`。
+"""
+function projector_ratio(projector_term::SiteGroupGutzwillerProjectorTerm, sampler_state, proposal)
+    required_props = (
+        :site1,
+        :site2,
+        :old_state1,
+        :old_state2,
+        :new_state1,
+        :new_state2,
+    )
+    for prop_name in required_props
+        if !hasproperty(proposal, prop_name)
+            error("proposal must provide property `$prop_name` for SiteGroupGutzwillerProjectorTerm.")
+        end
+    end
+
+    state_vector = _extract_site_state_vector(sampler_state)
+    length(state_vector) == length(projector_term.site_groups) ||
+        error("site_groups size $(length(projector_term.site_groups)) mismatches sampler state size $(length(state_vector)).")
+
+    site1 = Int(getproperty(proposal, :site1))
+    site2 = Int(getproperty(proposal, :site2))
+    n_sites = length(projector_term.site_groups)
+    1 <= site1 <= n_sites ||
+        error("proposal site1 out of range for SiteGroupGutzwillerProjectorTerm: site1=$site1, n_sites=$n_sites")
+    1 <= site2 <= n_sites ||
+        error("proposal site2 out of range for SiteGroupGutzwillerProjectorTerm: site2=$site2, n_sites=$n_sites")
+
+    log_ratio = 0.0
+    group1 = projector_term.site_groups[site1]
+    delta_doublon1 =
+        _get_doublon_indicator(getproperty(proposal, :new_state1)) -
+        _get_doublon_indicator(getproperty(proposal, :old_state1))
+    log_ratio -= Float64(projector_term.g_values[group1]) * delta_doublon1
+
+    if site2 != site1
+        group2 = projector_term.site_groups[site2]
+        delta_doublon2 =
+            _get_doublon_indicator(getproperty(proposal, :new_state2)) -
+            _get_doublon_indicator(getproperty(proposal, :old_state2))
+        log_ratio -= Float64(projector_term.g_values[group2]) * delta_doublon2
+    end
+
+    return exp(log_ratio)
 end
 """
 用途: 计算单参数 Jastrow term 的局部比值 `P_J(C') / P_J(C)`。
@@ -509,6 +681,41 @@ function projector_log_derivative!(
     end
     n_doublon = _extract_doublon_count(sampler_state)
     buffer[1] = -n_doublon
+    return nothing
+end
+"""
+用途: 写入 site/orbital resolved Gutzwiller term 的对数导数。
+
+数学公式:
+- `d log(P_G) / d g_g = -D_g(C)`,
+  其中 `D_g(C) = sum_{i in group g} n_{i up} n_{i down}`。
+
+参数:
+- `buffer::AbstractVector{<:Number}`: 导数写入缓冲区, 长度等于 group 数。
+- `projector_term::SiteGroupGutzwillerProjectorTerm`。
+- `sampler_state`: 采样构型对象, 需要提供 `state`。
+
+返回:
+- `nothing`。
+"""
+function projector_log_derivative!(
+    buffer::AbstractVector{<:Number},
+    projector_term::SiteGroupGutzwillerProjectorTerm,
+    sampler_state,
+)
+    n_groups = length(projector_term.param_names)
+    length(buffer) == n_groups ||
+        error("SiteGroupGutzwillerProjectorTerm requires buffer length = $n_groups, got $(length(buffer)).")
+
+    state_vector = _extract_site_state_vector(sampler_state)
+    length(state_vector) == length(projector_term.site_groups) ||
+        error("site_groups size $(length(projector_term.site_groups)) mismatches sampler state size $(length(state_vector)).")
+
+    fill!(buffer, 0.0)
+    for site in eachindex(state_vector)
+        group_id = projector_term.site_groups[site]
+        buffer[group_id] -= _get_doublon_indicator(state_vector[site])
+    end
     return nothing
 end
 """
