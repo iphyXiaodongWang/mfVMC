@@ -1345,6 +1345,48 @@ function local_energy(ham, vwf::vwf_det)
     return 0
 end
 
+"""
+用途: 使用 dense `dUt_matrix` 和 BLAS 批量计算 determinant mean-field 参数的 log-derivative。
+
+计算公式:
+- 对第 `alpha` 个参数, `O_alpha = sum_e sum_o A^{-1}_{o,e} * dU_t[o, r_e, alpha]`;
+- 其中 `r_e` 是第 `e` 个电子当前所在的内部基底索引。
+
+参数:
+- `o_vec::AbstractVector{T}`: 输出向量, 前 `length(vwf.param_keys)` 个位置写入 mean-field 参数导数。
+- `vwf::vwf_det{T}`: determinant 波函数, 需要包含当前 `awf_inv`, `electron_locs` 和 `dUt_matrix`。
+
+返回:
+- `AbstractVector{T}`: 原地更新后的 `o_vec`。
+"""
+function _compute_dense_tensor_gradient!(o_vec::AbstractVector{T}, vwf::vwf_det{T}) where T
+    tensor = vwf.dUt_matrix
+    a_inv = vwf.awf_inv
+    n_orb, n_elec = size(a_inv)
+    n_params = length(vwf.param_keys)
+    n_params == 0 && return o_vec
+
+    if size(tensor, 1) != n_orb
+        throw(DimensionMismatch("dUt_matrix first dimension $(size(tensor, 1)) != orbital count $n_orb"))
+    end
+    if size(tensor, 3) != n_params
+        throw(DimensionMismatch("dUt_matrix third dimension $(size(tensor, 3)) != parameter count $n_params"))
+    end
+    if length(o_vec) < n_params
+        throw(DimensionMismatch("gradient buffer length $(length(o_vec)) < parameter count $n_params"))
+    end
+
+    dense_grad = @view o_vec[1:n_params]
+    @inbounds for elec in 1:n_elec
+        row = vwf.sampler.electron_locs[elec]
+        d_ut_row = @view tensor[:, row, 1:n_params]
+        inv_col = @view a_inv[:, elec]
+        mul!(dense_grad, transpose(d_ut_row), inv_col, one(T), one(T))
+    end
+
+    return o_vec
+end
+
 function compute_grad_log_psi!(vwf::vwf_det{T}) where T
     return @timed "compute_grad_log_psi!" begin
         # 1. 准备 Workspace
@@ -1363,40 +1405,34 @@ function compute_grad_log_psi!(vwf::vwf_det{T}) where T
         # 3. 先计算波函数参数梯度部分
         wf_param_count = length(vwf.param_keys)
         has_active_backflow = Backflow.uses_backflow(vwf.backflow)
-        for idx in 1:wf_param_count
-            dU_t = @view vwf.dUt_matrix[:, :, idx]
-            derivative_orbitals = if has_active_backflow
+        if has_active_backflow
+            for idx in 1:wf_param_count
+                dU_t = @view vwf.dUt_matrix[:, :, idx]
                 Backflow.fill_backflow_chain_rule_orbitals!(
                     ws.backflow_chain_rule_buffer,
                     transpose(dU_t),
                     ss.state,
                     vwf.backflow,
                 )
-                ws.backflow_chain_rule_buffer
-            else
-                nothing
-            end
-            total_sum = zero(T)
+                derivative_orbitals = ws.backflow_chain_rule_buffer
+                total_sum = zero(T)
 
-            @inbounds for elec in 1:Nelec
-                r = ss.electron_locs[elec]
+                @inbounds for elec in 1:Nelec
+                    r = ss.electron_locs[elec]
 
-                col_sum = zero(T)
+                    col_sum = zero(T)
 
-                if has_active_backflow
                     @simd for orb in 1:Norb
                         col_sum += A_inv[orb, elec] * derivative_orbitals[r, orb]
                     end
-                else
-                    @simd for orb in 1:Norb
-                        col_sum += A_inv[orb, elec] * dU_t[orb, r]
-                    end
+
+                    total_sum += col_sum
                 end
 
-                total_sum += col_sum
+                O_vec[idx] = total_sum
             end
-
-            O_vec[idx] = total_sum
+        else
+            _compute_dense_tensor_gradient!(O_vec, vwf)
         end
 
         # 4. 再拼接 projector 参数梯度部分
