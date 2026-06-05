@@ -2,6 +2,8 @@ module Model
 
 using ..Sampler
 using ..VMC
+using ..Timing
+import ..Timing: @timed
 
 # import ..VMC: local_energy
 
@@ -271,37 +273,39 @@ end
   并使用费米反对易关系 <c_i c†_j> = delta_ij - <c†_j c_i> 处理 c 在前的顺序。
 """
 function compute_term_energy(term::OperatorTerm, vwf)
-    validate_operator_term(term)
+    return @timed "compute_term_energy" begin
+        validate_operator_term(term)
 
-    if length(term.ops) == 1 && term.ops[1] == :SS
-        site_i = term.sites[1]
-        site_j = term.sites[2]
-        return term.coef * measure_SiSj(vwf, site_i, site_j)
-    end
-
-    ss = vwf.sampler
-    diag_factor = 1.0
-
-    for (op, site) in zip(term.ops, term.sites)
-        if op in DIAG_OP_TOKENS
-            diag_factor *= compute_diag_operator_value(op, site, ss)
+        if length(term.ops) == 1 && term.ops[1] == :SS
+            site_i = term.sites[1]
+            site_j = term.sites[2]
+            return term.coef * measure_SiSj(vwf, site_i, site_j)
         end
-    end
 
-    pair = find_cdag_c_pair_info(term.ops, term.sites)
-    if pair === nothing
-        return term.coef * diag_factor
-    end
+        ss = vwf.sampler
+        diag_factor = 1.0
 
-    spin, site_cdag, site_c, cdag_first = pair
-    if cdag_first
+        for (op, site) in zip(term.ops, term.sites)
+            if op in DIAG_OP_TOKENS
+                diag_factor *= compute_diag_operator_value(op, site, ss)
+            end
+        end
+
+        pair = find_cdag_c_pair_info(term.ops, term.sites)
+        if pair === nothing
+            return term.coef * diag_factor
+        end
+
+        spin, site_cdag, site_c, cdag_first = pair
+        if cdag_first
+            hopping_val = measure_green(vwf, site_cdag, site_c, spin)
+            return term.coef * diag_factor * real(hopping_val)
+        end
+
+        delta_val = site_cdag == site_c ? 1.0 : 0.0
         hopping_val = measure_green(vwf, site_cdag, site_c, spin)
-        return term.coef * diag_factor * real(hopping_val)
+        return term.coef * diag_factor * (delta_val - real(hopping_val))
     end
-
-    delta_val = site_cdag == site_c ? 1.0 : 0.0
-    hopping_val = measure_green(vwf, site_cdag, site_c, spin)
-    return term.coef * diag_factor * (delta_val - real(hopping_val))
 end
 
 """
@@ -315,11 +319,13 @@ end
 - Float64, 局域能量。
 """
 function local_energy(ham::GeneralModel, vwf)
-    energy = 0.0
-    for term in ham.terms
-        energy += compute_term_energy(term, vwf)
+    return @timed "local_energy(GeneralModel)" begin
+        energy = 0.0
+        for term in ham.terms
+            energy += compute_term_energy(term, vwf)
+        end
+        energy
     end
-    return energy
 end
 
 end # module

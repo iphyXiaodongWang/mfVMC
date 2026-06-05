@@ -1,6 +1,9 @@
 # ==============================================================================
 # WorkSpace
 # ==============================================================================
+using ..Timing
+import ..Timing: @timed
+
 mutable struct R1R2WS{T}
     N::Int
     dr1::Vector{T}   # δr1 = newF1 - A[i,:]
@@ -1343,95 +1346,90 @@ function local_energy(ham, vwf::vwf_det)
 end
 
 function compute_grad_log_psi!(vwf::vwf_det{T}) where T
-    # 1. 准备 Workspace
-    ws = ensure_ws!(vwf)
-    ss = vwf.sampler
+    return @timed "compute_grad_log_psi!" begin
+        # 1. 准备 Workspace
+        ws = ensure_ws!(vwf)
+        ss = vwf.sampler
 
-    A_inv = vwf.awf_inv   # Size: (N_orb, N_elec)
-    # A_inv[orb, elec] -> 列优先存储，orb 变化最快
+        A_inv = vwf.awf_inv   # Size: (N_orb, N_elec)
+        # A_inv[orb, elec] -> 列优先存储，orb 变化最快
 
-    Norb, Nelec = size(A_inv)
+        Norb, Nelec = size(A_inv)
 
-    # 2. 获取 Buffer (O_vec)
-    O_vec = ws.grad_buffer
-    fill!(O_vec, zero(T))
+        # 2. 获取 Buffer (O_vec)
+        O_vec = ws.grad_buffer
+        fill!(O_vec, zero(T))
 
-    # 3. 先计算波函数参数梯度部分
-    wf_param_count = length(vwf.param_keys)
-    has_active_backflow = Backflow.uses_backflow(vwf.backflow)
-    for idx in 1:wf_param_count
-        dU_t = @view vwf.dUt_matrix[:, :, idx]
-        derivative_orbitals = if has_active_backflow
-            # backflow 打开时 determinant 使用 U_b = B_x[U_0],
-            # 因此 mean-field 参数导数必须使用 dU_b/dp = B_x[dU_0/dp]。
-            Backflow.fill_backflow_chain_rule_orbitals!(
-                ws.backflow_chain_rule_buffer,
-                transpose(dU_t),
-                ss.state,
-                vwf.backflow,
-            )
-            ws.backflow_chain_rule_buffer
-        else
-            nothing
-        end
-        total_sum = zero(T)
-
-        # 顺序：外层电子(elec)，内层轨道(orb)
-        # 优化理由：dU_t[orb, r] 和 A_inv[orb, elec] 第一维都是 orb，内存连续
-        @inbounds for elec in 1:Nelec
-            r = ss.electron_locs[elec]
-
-            col_sum = zero(T)
-
-            # SIMD 内积
-            if has_active_backflow
-                @simd for orb in 1:Norb
-                    col_sum += A_inv[orb, elec] * derivative_orbitals[r, orb]
-                end
+        # 3. 先计算波函数参数梯度部分
+        wf_param_count = length(vwf.param_keys)
+        has_active_backflow = Backflow.uses_backflow(vwf.backflow)
+        for idx in 1:wf_param_count
+            dU_t = @view vwf.dUt_matrix[:, :, idx]
+            derivative_orbitals = if has_active_backflow
+                Backflow.fill_backflow_chain_rule_orbitals!(
+                    ws.backflow_chain_rule_buffer,
+                    transpose(dU_t),
+                    ss.state,
+                    vwf.backflow,
+                )
+                ws.backflow_chain_rule_buffer
             else
-                @simd for orb in 1:Norb
-                    col_sum += A_inv[orb, elec] * dU_t[orb, r]
-                end
+                nothing
             end
-
-            total_sum += col_sum
-        end
-
-        # 直接使用 enumerate 的索引，不再依赖计数器变量
-        O_vec[idx] = total_sum
-    end
-
-    # 4. 再拼接 projector 参数梯度部分
-    projector_param_count = Projector.projector_param_count(vwf.projector)
-    if projector_param_count > 0
-        start_idx = wf_param_count + 1
-        end_idx = wf_param_count + projector_param_count
-        projector_view = @view O_vec[start_idx:end_idx]
-        Projector.projector_log_derivative!(projector_view, vwf.projector, ss)
-    end
-
-    # 5. 最后拼接 backflow 参数梯度部分
-    backflow_pairs = Backflow.build_backflow_derivative_orbitals(vwf.base_gs_U, ss.state, vwf.backflow)
-    if !isempty(backflow_pairs)
-        start_idx = wf_param_count + projector_param_count + 1
-        for (pair_offset, (_, derivative_orbitals)) in enumerate(backflow_pairs)
             total_sum = zero(T)
 
             @inbounds for elec in 1:Nelec
-                row_idx = ss.electron_locs[elec]
+                r = ss.electron_locs[elec]
+
                 col_sum = zero(T)
 
-                @simd for orb in 1:Norb
-                    col_sum += A_inv[orb, elec] * derivative_orbitals[row_idx, orb]
+                if has_active_backflow
+                    @simd for orb in 1:Norb
+                        col_sum += A_inv[orb, elec] * derivative_orbitals[r, orb]
+                    end
+                else
+                    @simd for orb in 1:Norb
+                        col_sum += A_inv[orb, elec] * dU_t[orb, r]
+                    end
                 end
 
                 total_sum += col_sum
             end
 
-            O_vec[start_idx + pair_offset - 1] = total_sum
+            O_vec[idx] = total_sum
         end
-    end
 
-    # 直接返回 buffer 引用，避免 copy
-    return O_vec
+        # 4. 再拼接 projector 参数梯度部分
+        projector_param_count = Projector.projector_param_count(vwf.projector)
+        if projector_param_count > 0
+            start_idx = wf_param_count + 1
+            end_idx = wf_param_count + projector_param_count
+            projector_view = @view O_vec[start_idx:end_idx]
+            Projector.projector_log_derivative!(projector_view, vwf.projector, ss)
+        end
+
+        # 5. 最后拼接 backflow 参数梯度部分
+        backflow_pairs = Backflow.build_backflow_derivative_orbitals(vwf.base_gs_U, ss.state, vwf.backflow)
+        if !isempty(backflow_pairs)
+            start_idx = wf_param_count + projector_param_count + 1
+            for (pair_offset, (_, derivative_orbitals)) in enumerate(backflow_pairs)
+                total_sum = zero(T)
+
+                @inbounds for elec in 1:Nelec
+                    row_idx = ss.electron_locs[elec]
+                    col_sum = zero(T)
+
+                    @simd for orb in 1:Norb
+                        col_sum += A_inv[orb, elec] * derivative_orbitals[row_idx, orb]
+                    end
+
+                    total_sum += col_sum
+                end
+
+                O_vec[start_idx + pair_offset - 1] = total_sum
+            end
+        end
+
+        O_vec
+    end
 end

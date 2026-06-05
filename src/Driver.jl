@@ -12,6 +12,8 @@ using ..Sampler       # 使用上层模块定义的子模块
 using ..VMC
 using ..Model
 using ..MPI_VMC_Utils
+using ..Timing
+import ..Timing: @timed
 
 export VMCParams, SRParams
 export run_simulation, run_sr_optimization
@@ -410,7 +412,7 @@ function run_sr_optimization(model, vwf, kernel,
 end
 
 function accumulate_sr_stats!(obs_buf::ObservableBuffer{T}, vwf, E_loc::Number) where T
-    O_vec = compute_grad_log_psi!(vwf)
+    O_vec = @timed "compute_grad_log_psi! (in SR)" compute_grad_log_psi!(vwf)
     accumulate_sample!(obs_buf, :E, E_loc)
     accumulate_sample!(obs_buf, :O_avg, O_vec)
     accumulate_sample!(obs_buf, :EO_avg, E_loc .* O_vec)

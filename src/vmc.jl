@@ -6,6 +6,8 @@ using SkewLinearAlgebra
 using ..Sampler
 using ..Projector
 using ..Backflow
+using ..Timing
+import ..Timing: @timed, ENABLE_TIMING, timing_accumulate!
 
 export vwf_det, vwf_pfa, VMCRunner, update_vwf_params!
 export set_projector!, set_backflow!, update_vwf_projector_params!, update_vwf_backflow_params!
@@ -43,20 +45,22 @@ end
 end
 
 function measure_green(vwf, i::Int, j::Int, spin_idx::Int8)
-    ss = vwf.sampler
-    if i == j
-        return (ss.state[i] & spin_idx) != 0 ? 1.0 : 0.0
-    end
+    @timed "measure_green" begin
+        ss = vwf.sampler
+        if i == j
+            return (ss.state[i] & spin_idx) != 0 ? 1.0 : 0.0
+        end
 
-    # c^dag_i c_j: j -> i
-    st_i = ss.state[i]
-    st_j = ss.state[j]
-    if ((st_j & spin_idx) != 0) && ((st_i & spin_idx) == 0)
-        prop = build_single_hop(ss, j, i, spin_idx)
-        ratio_total = calc_total_ratio(vwf, prop)
-        return spin_idx == DN && ifPH(ss) ? -ratio_total : ratio_total
+        # c^dag_i c_j: j -> i
+        st_i = ss.state[i]
+        st_j = ss.state[j]
+        if ((st_j & spin_idx) != 0) && ((st_i & spin_idx) == 0)
+            prop = build_single_hop(ss, j, i, spin_idx)
+            ratio_total = calc_total_ratio(vwf, prop)
+            return spin_idx == DN && ifPH(ss) ? -ratio_total : ratio_total
+        end
+        return 0.0
     end
-    return 0.0
 end
 
 #允许spin flip的green暂未做PH修正
@@ -222,21 +226,23 @@ function measure_SiSj(vwf, i::Int, j::Int)
 end
 
 function calc_ratio(vwf, p::MoveProposal)
-    # 如果 Proposal 无效
-    if p.site1 == 0
-        return one(typeof(vwf.awf_val))
-    end
+    @timed "calc_ratio" begin
+        # 如果 Proposal 无效
+        if p.site1 == 0
+            return one(typeof(vwf.awf_val))
+        end
 
-    if hasproperty(vwf, :backflow) && Backflow.uses_backflow(getproperty(vwf, :backflow))
-        return calc_backflow_ratio_local_update(vwf, p)
-    end
+        if hasproperty(vwf, :backflow) && Backflow.uses_backflow(getproperty(vwf, :backflow))
+            return calc_backflow_ratio_local_update(vwf, p)
+        end
 
-    # 单电子移动 (Hop, Flip, Flip-Hop) -> Rank 1
-    if p.moved_electron_id_2 == 0
-        return ratio_rank1(vwf, p.moved_electron_id_1, p.target_map_idx_1)
-    else
-        # 双电子移动 (Exchange) -> Rank 2
-        return ratio_rank2(vwf, p.moved_electron_id_1, p.moved_electron_id_2, p.target_map_idx_1, p.target_map_idx_2)
+        # 单电子移动 (Hop, Flip, Flip-Hop) -> Rank 1
+        if p.moved_electron_id_2 == 0
+            return ratio_rank1(vwf, p.moved_electron_id_1, p.target_map_idx_1)
+        else
+            # 双电子移动 (Exchange) -> Rank 2
+            return ratio_rank2(vwf, p.moved_electron_id_1, p.moved_electron_id_2, p.target_map_idx_1, p.target_map_idx_2)
+        end
     end
 end
 
@@ -364,37 +370,39 @@ end
 
 
 function mcmc_step!(runner::VMCRunner, rng::AbstractRNG; detailed_balance::Bool=false)
-    vwf = runner.vwf
-    kernel = runner.kernel
-    cfg = vwf.sampler
+    return @timed "mcmc_step!" begin
+        vwf = runner.vwf
+        kernel = runner.kernel
+        cfg = vwf.sampler
 
-    prop, s1, s2 = propose_move(kernel, cfg, rng)
+        prop, s1, s2 = propose_move(kernel, cfg, rng)
 
-    if prop.site1 == 0
-        return false, 0.0, 1.0, prop
-    end
+        if prop.site1 == 0
+            (false, 0.0, 1.0, prop)
+        else
+            # 2. 计算波函数比值 psi_new / psi_old
+            psi_ratio = calc_ratio(vwf, prop)
+            total_ratio = calc_total_ratio(vwf, prop, psi_ratio)
+            # prob_ratio =
 
-    # 2. 计算波函数比值 psi_new / psi_old
-    psi_ratio = calc_ratio(vwf, prop)
-    total_ratio = calc_total_ratio(vwf, prop, psi_ratio)
-    # prob_ratio = 
+            # 3. 计算接受概率 (Metropolis-Hastings)
+            # P_acc = |psi_new/psi_old|^2 * (N_forward / N_reverse)
+            accept_prob = abs2(total_ratio)
+            # Detailed Balance Correction
+            if detailed_balance
+                n_fwd = count_choices(kernel, cfg, s1, s2)
+                n_rev = count_choices_reserve(kernel, cfg, prop, s1, s2)
+                accept_prob *= (Float64(n_fwd) / Float64(n_rev))
+            end
 
-    # 3. 计算接受概率 (Metropolis-Hastings)
-    # P_acc = |psi_new/psi_old|^2 * (N_forward / N_reverse)
-    accept_prob = abs2(total_ratio)
-    # Detailed Balance Correction
-    if detailed_balance
-        n_fwd = count_choices(kernel, cfg, s1, s2)
-        n_rev = count_choices_reserve(kernel, cfg, prop, s1, s2)
-        accept_prob *= (Float64(n_fwd) / Float64(n_rev))
-    end
-
-    # 4. 接受/拒绝
-    if rand(rng) < accept_prob
-        accept_move!(vwf, prop, psi_ratio)
-        return true, accept_prob, total_ratio, prop
-    else
-        return false, accept_prob, total_ratio, prop
+            # 4. 接受/拒绝
+            if rand(rng) < accept_prob
+                accept_move!(vwf, prop, psi_ratio)
+                (true, accept_prob, total_ratio, prop)
+            else
+                (false, accept_prob, total_ratio, prop)
+            end
+        end
     end
 end
 

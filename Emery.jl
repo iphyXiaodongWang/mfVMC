@@ -11,6 +11,7 @@ push!(LOAD_PATH, joinpath(@__DIR__, "src"))
 push!(LOAD_PATH, @__DIR__)
 
 using mfVMC
+import mfVMC.Timing: @timed, timing_reset!, timing_report
 using Utils: add_term_ij_nonPH, compute_eig_and_dU_reg1
 
 const EMERY_ORB_D = 1
@@ -1420,6 +1421,9 @@ function main_column_nonph_backflow()::Nothing
     lr_end = isnan(args["lr_end"]) ? lr : args["lr_end"]
     job = args["job"]
 
+    # Reset timing at start (for measure mode, one-shot; for SR, we accumulate per step)
+    timing_reset!()
+
     mean_field_setup = build_column_emery_nonph_mean_field_parameter_setup(
         args["ansatz"],
         lx,
@@ -1468,7 +1472,7 @@ function main_column_nonph_backflow()::Nothing
         end
     end
 
-    ham = build_emery_general_model(
+    ham = @timed "build_emery_general_model" build_emery_general_model(
         lx,
         ly;
         tpd=args["tpd"],
@@ -1525,7 +1529,7 @@ function main_column_nonph_backflow()::Nothing
     if job == "SR"
         sr_params = SRParams(vmc_params=meas_params, n_steps=args["nSR"], lr=lr)
         exp_lr_func = build_exponential_lr_func(lr, lr_end, args["nSR"])
-        update_vwf_func! = (vwf, params) -> update_column_nonph_ansatz!(
+        update_vwf_func! = (vwf, params) -> @timed "update_column_nonph_ansatz!" update_column_nonph_ansatz!(
             vwf,
             param_names,
             params,
@@ -1551,6 +1555,12 @@ function main_column_nonph_backflow()::Nothing
         )
         if is_root
             extract_min_energy(joinpath(folder, "sr_history.txt"))
+            println("[Timing] SR optimization complete. Printing timing report...")
+            timing_report()
+            open(joinpath(folder, "timing_report.txt"), "w") do io
+                timing_report(io)
+            end
+            println("[Timing] Timing report saved to $(joinpath(folder, "timing_report.txt")).")
         end
     elseif job == "measure"
         results = run_simulation(
@@ -1563,6 +1573,12 @@ function main_column_nonph_backflow()::Nothing
         )
         if is_root && results !== nothing
             write_column_measure_outputs(folder, results)
+            println("[Timing] Measurement complete. Printing timing report...")
+            timing_report()
+            open(joinpath(folder, "timing_report.txt"), "w") do io
+                timing_report(io)
+            end
+            println("[Timing] Timing report saved to $(joinpath(folder, "timing_report.txt")).")
         end
     else
         error("Unknown job: $(job)")
