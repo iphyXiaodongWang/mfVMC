@@ -1088,6 +1088,55 @@ function build_column_backflow_source_data(
 end
 
 """
+用途: 根据 Emery 三带模型的 Cu-O 和 O-O hopping 构造 backflow source 数据。
+
+参数:
+- `lx, ly::Int`: Cu 晶胞尺寸。
+- `tpd::Real`: Cu-O hopping 振幅。
+- `tpp::Real`: O-O hopping 振幅。
+- `bcy::Real`: y 方向周期边界因子。
+
+返回:
+- `Tuple{Vector{Tuple{Int, Int}}, Vector{Float64}}`: 有向 source bonds 和对应振幅。
+
+公式:
+- 对每条 Emery hopping `H_ij = t_ij`, backflow source 同时加入 `(i,j)` 和 `(j,i)`,
+  两个方向都使用同一个 `t_ij`, 以保持三带 Hubbard hopping 的符号约定。
+"""
+function build_emery_backflow_source_data(
+    lx::Int,
+    ly::Int;
+    tpd::Real,
+    tpp::Real,
+    bcy::Real=1.0,
+)::Tuple{Vector{Tuple{Int,Int}},Vector{Float64}}
+    source_bonds = Tuple{Int,Int}[]
+    source_amplitudes = Float64[]
+
+    for bond in build_emery_pd_bonds(lx, ly; amplitude=Float64(tpd), bcy=Float64(bcy))
+        if bond.coef == 0.0
+            continue
+        end
+        push!(source_bonds, (bond.i, bond.j))
+        push!(source_amplitudes, bond.coef)
+        push!(source_bonds, (bond.j, bond.i))
+        push!(source_amplitudes, bond.coef)
+    end
+
+    for bond in build_emery_pp_bonds(lx, ly; amplitude=Float64(tpp), bcy=Float64(bcy))
+        if bond.coef == 0.0
+            continue
+        end
+        push!(source_bonds, (bond.i, bond.j))
+        push!(source_amplitudes, bond.coef)
+        push!(source_bonds, (bond.j, bond.i))
+        push!(source_amplitudes, bond.coef)
+    end
+
+    return source_bonds, source_amplitudes
+end
+
+"""
 用途: 构造 column nonPH 使用的 Eq.(5) composite backflow。
 
 参数:
@@ -1500,7 +1549,7 @@ function parse_column_bf_commandline()
         default = 0.0
         "--enable_backflow"
         arg_type = String
-        default = "false"
+        default = "true"
         "--bf_epsilon"
         arg_type = Float64
         default = 1.0
@@ -1571,10 +1620,22 @@ function main_column_nonph_backflow()::Nothing
         seed=args["seed"] + rank,
     )
 
-    if parse_column_bool_flag(args["enable_backflow"], "--enable_backflow")
-        error("Emery backflow source bonds are not migrated yet. Use --enable_backflow false for this step.")
-    end
-    backflow = NoBackflowTerm()
+    source_bonds, source_amplitudes = build_emery_backflow_source_data(
+        lx,
+        ly;
+        tpd=args["tpd"],
+        tpp=args["tpp"],
+        bcy=bcy,
+    )
+    backflow = build_column_optional_backflow(
+        parse_column_bool_flag(args["enable_backflow"], "--enable_backflow"),
+        source_bonds,
+        source_amplitudes,
+        args["bf_epsilon"],
+        args["bf_eta1"],
+        args["bf_eta2"],
+        args["bf_eta3"],
+    )
     projector = build_emery_density_jastrow_projector(
         lx,
         ly;
@@ -1588,9 +1649,11 @@ function main_column_nonph_backflow()::Nothing
     proj_param_names = projector_param_names(projector)
     proj_init_params = projector_param_values(projector)
     nparams_proj = length(proj_param_names)
-    nparams_backflow = 0
-    init_params = vcat(wf_init_params, proj_init_params)
-    param_names = vcat(wf_param_names, proj_param_names)
+    backflow_param_name_list = backflow_param_names(backflow)
+    backflow_init_params = backflow_param_values(backflow)
+    nparams_backflow = length(backflow_param_name_list)
+    init_params = vcat(wf_init_params, proj_init_params, backflow_init_params)
+    param_names = vcat(wf_param_names, proj_param_names, backflow_param_name_list)
 
     if !isempty(args["init_params_json"])
         init_params = build_init_params_from_json(args["init_params_json"], param_names)
