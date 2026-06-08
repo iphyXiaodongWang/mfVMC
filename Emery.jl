@@ -356,6 +356,24 @@ function build_emery_pp_density_bonds(lx::Int, ly::Int)::Vector{Tuple{Int,Int}}
 end
 
 """
+用途: 构造 Emery 模型 Cu-Cu 最近邻 density Jastrow 使用的 bond 列表。
+
+参数:
+- `lx, ly::Int`: Cu 晶胞尺寸。
+
+返回:
+- `Vector{Tuple{Int, Int}}`: 去重后的 Cu-Cu site pair, 每条 bond 只出现一次。
+"""
+function build_emery_dd_density_bonds(lx::Int, ly::Int)::Vector{Tuple{Int,Int}}
+    bond_set = Set{Tuple{Int,Int}}()
+    for bond in build_emery_dd_bonds(lx, ly; amplitude=1.0)
+        sorted_pair = bond.i < bond.j ? (bond.i, bond.j) : (bond.j, bond.i)
+        push!(bond_set, sorted_pair)
+    end
+    return sort(collect(bond_set))
+end
+
+"""
 用途: 构造 x 方向 OBC, y 方向 PBC 的 Emery 三带物理 Hamiltonian。
 
 参数:
@@ -535,6 +553,101 @@ function build_emery_orbital_gutzwiller_projector(
             site_groups=emery_orbital_gutzwiller_group_vector(lx, ly),
         ),
     ])
+end
+
+"""
+用途: 将无向 bond 列表转换为 `JastrowProjectorTerm` 使用的对称邻接表。
+
+参数:
+- `n_sites::Int`: 总 site 数。
+- `bonds::Vector{Tuple{Int, Int}}`: 无向 site pair 列表, 每个元素为 `(site_i, site_j)`。
+
+返回:
+- `Vector{Vector{Int}}`: 邻接表, `neighbor_table[i]` 保存与 site `i` 参与同一个 Jastrow 参数的邻居。
+"""
+function build_emery_jastrow_neighbor_table(
+    n_sites::Int,
+    bonds::Vector{Tuple{Int,Int}},
+)::Vector{Vector{Int}}
+    n_sites > 0 || error("n_sites must be positive, got $(n_sites).")
+    neighbor_sets = [Set{Int}() for _ in 1:n_sites]
+    for (site_i, site_j) in bonds
+        1 <= site_i <= n_sites || error("Jastrow bond site_i=$(site_i) is outside 1:$(n_sites).")
+        1 <= site_j <= n_sites || error("Jastrow bond site_j=$(site_j) is outside 1:$(n_sites).")
+        site_i != site_j || error("Jastrow bond cannot contain self-loop: site=$(site_i).")
+        push!(neighbor_sets[site_i], site_j)
+        push!(neighbor_sets[site_j], site_i)
+    end
+    return [sort(collect(neighbors)) for neighbors in neighbor_sets]
+end
+
+"""
+用途: 构造 Emery onsite Gutzwiller 和三类最近邻 density Jastrow 的 composite projector。
+
+参数:
+- `lx, ly::Int`: Cu 晶胞尺寸。
+- `enable_orbital_gutzwiller::Bool`: 是否加入 orbital-resolved onsite Gutzwiller。
+- `g_d::Real`: Cu d 轨道 doublon penalty 初值。
+- `g_p::Real`: O p_x/p_y 轨道共享 doublon penalty 初值。
+- `vj_oo::Real`: 最近邻 O-O density Jastrow 初值。
+- `vj_cuo::Real`: 最近邻 Cu-O density Jastrow 初值。
+- `vj_cucu::Real`: 最近邻 Cu-Cu density Jastrow 初值。
+
+返回:
+- `CompositeProjector`: 参数顺序为 `g_d, g_p, vj_oo, vj_cuo, vj_cucu`, 关闭 Gutzwiller 时只保留三个 Jastrow 参数。
+
+公式:
+- 每个 Jastrow term 使用 `P_J = exp[-v * sum_{<i,j>} n_i n_j]`。
+"""
+function build_emery_density_jastrow_projector(
+    lx::Int,
+    ly::Int;
+    enable_orbital_gutzwiller::Bool,
+    g_d::Real,
+    g_p::Real,
+    vj_oo::Real,
+    vj_cuo::Real,
+    vj_cucu::Real,
+)::CompositeProjector
+    n_sites = emery_n_sites(lx, ly)
+    terms = AbstractProjectorTerm[]
+    if enable_orbital_gutzwiller
+        push!(
+            terms,
+            SiteGroupGutzwillerProjectorTerm(
+                param_names=Symbol[:g_d, :g_p],
+                g_values=Float64[g_d, g_p],
+                site_groups=emery_orbital_gutzwiller_group_vector(lx, ly),
+            ),
+        )
+    end
+
+    push!(
+        terms,
+        JastrowProjectorTerm(
+            param_name=:vj_oo,
+            v=vj_oo,
+            site_to_neighbor_sites=build_emery_jastrow_neighbor_table(n_sites, build_emery_pp_density_bonds(lx, ly)),
+        ),
+    )
+    push!(
+        terms,
+        JastrowProjectorTerm(
+            param_name=:vj_cuo,
+            v=vj_cuo,
+            site_to_neighbor_sites=build_emery_jastrow_neighbor_table(n_sites, build_emery_pd_density_bonds(lx, ly)),
+        ),
+    )
+    push!(
+        terms,
+        JastrowProjectorTerm(
+            param_name=:vj_cucu,
+            v=vj_cucu,
+            site_to_neighbor_sites=build_emery_jastrow_neighbor_table(n_sites, build_emery_dd_density_bonds(lx, ly)),
+        ),
+    )
+
+    return CompositeProjector(terms)
 end
 
 """
@@ -1370,6 +1483,15 @@ function parse_column_bf_commandline()
         "--g_p"
         arg_type = Float64
         default = 1.0
+        "--vj_oo"
+        arg_type = Float64
+        default = 0.0
+        "--vj_cuo"
+        arg_type = Float64
+        default = 0.0
+        "--vj_cucu"
+        arg_type = Float64
+        default = 0.0
         "--vj1"
         arg_type = Float64
         default = 0.0
@@ -1453,11 +1575,16 @@ function main_column_nonph_backflow()::Nothing
         error("Emery backflow source bonds are not migrated yet. Use --enable_backflow false for this step.")
     end
     backflow = NoBackflowTerm()
-    projector = if parse_column_bool_flag(args["enable_orbital_gutzwiller"], "--enable_orbital_gutzwiller")
-        build_emery_orbital_gutzwiller_projector(lx, ly; g_d=args["g_d"], g_p=args["g_p"])
-    else
-        CompositeProjector([NoProjectorTerm()])
-    end
+    projector = build_emery_density_jastrow_projector(
+        lx,
+        ly;
+        enable_orbital_gutzwiller=parse_column_bool_flag(args["enable_orbital_gutzwiller"], "--enable_orbital_gutzwiller"),
+        g_d=args["g_d"],
+        g_p=args["g_p"],
+        vj_oo=args["vj_oo"],
+        vj_cuo=args["vj_cuo"],
+        vj_cucu=args["vj_cucu"],
+    )
     proj_param_names = projector_param_names(projector)
     proj_init_params = projector_param_values(projector)
     nparams_proj = length(proj_param_names)
