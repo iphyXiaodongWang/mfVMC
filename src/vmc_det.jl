@@ -32,6 +32,7 @@ mutable struct R1R2WS{T}
     cached_affected_site_blocks::Matrix{T}
 
     backflow_chain_rule_buffer::Matrix{T}
+    orbital_log_derivative_row_buffer::Matrix{T}
     grad_buffer::Vector{T}
 end
 
@@ -130,6 +131,7 @@ function vwf_det(
         Matrix{T}(undef, 0, 0),
         Matrix{T}(undef, 0, 0),
         Matrix{T}(undef, 0, 0),
+        Matrix{T}(undef, 0, 0),
         T[],
     )
 
@@ -206,6 +208,7 @@ function ensure_ws!(v::vwf_det{T,S}) where {T,S}
             Matrix{T}(undef, 2, N),
             Matrix{T}(undef, 2 * n_sites, N),
             Matrix{T}(undef, 2 * n_sites, N),
+            Matrix{T}(undef, N, N),
             T[]
         )
         reset_cached_rankk_update!(ws)
@@ -214,6 +217,9 @@ function ensure_ws!(v::vwf_det{T,S}) where {T,S}
 
     if size(ws.backflow_chain_rule_buffer) != size(v.base_gs_U)
         ws.backflow_chain_rule_buffer = Matrix{T}(undef, size(v.base_gs_U))
+    end
+    if size(ws.orbital_log_derivative_row_buffer) != size(v.awf_inv)
+        ws.orbital_log_derivative_row_buffer = Matrix{T}(undef, size(v.awf_inv))
     end
 
     n_params = length(v.param_keys) + Projector.projector_param_count(v.projector) + Backflow.backflow_param_count(v.backflow)
@@ -527,11 +533,14 @@ function init_gswf!(vwf::vwf_det{T,S}) where {T,S}
 end
 
 function rebuild_inverse!(vwf::vwf_det)
-    if Backflow.uses_backflow(vwf.backflow)
-        rebuild_slater_state!(vwf)
+    return @timed "rebuild_inverse!" begin
+        if Backflow.uses_backflow(vwf.backflow)
+            rebuild_slater_state!(vwf)
+            return nothing
+        end
+        vwf.awf_inv = inv(transpose(vwf.awf_mat_t))
         return nothing
     end
-    vwf.awf_inv = inv(transpose(vwf.awf_mat_t))
 end
 
 @inline function rank1_update_blas!(A::Matrix{T}, alpha::T, x::Vector{T}, y::Vector{T}) where T<:Float64
@@ -902,7 +911,7 @@ function collect_backflow_local_column_updates_into_cache!(
     ws = ensure_ws!(vwf)
     backflow_term = vwf.backflow
 
-    affected_sites = Backflow.collect_affected_site_indices(
+    affected_sites = @timed "backflow_collect_affected_sites" Backflow.collect_affected_site_indices(
         vwf.sampler.state,
         backflow_term,
         proposal,
@@ -912,40 +921,42 @@ function collect_backflow_local_column_updates_into_cache!(
     changed_count = 0
     site_block_buffer = ws.cached_site_block_buffer
 
-    for (affected_offset, site_index) in enumerate(affected_sites)
-        ws.cached_affected_site_indices[affected_offset] = site_index
-        Backflow.fill_backflow_site_block_after_proposal!(
-            site_block_buffer,
-            vwf.base_gs_U,
-            vwf.sampler.state,
-            backflow_term,
-            proposal,
-            site_index,
-        )
-        cached_block_row = 2 * (affected_offset - 1) + 1
-        copyto!(
-            @view(ws.cached_affected_site_blocks[cached_block_row, :]),
-            @view(site_block_buffer[1, :]),
-        )
-        copyto!(
-            @view(ws.cached_affected_site_blocks[cached_block_row + 1, :]),
-            @view(site_block_buffer[2, :]),
-        )
-
-        for local_row_offset in 1:2
-            row_index = 2 * (site_index - 1) + local_row_offset
-            electron_id = get_postproposal_electron_id(vwf.sampler, proposal, row_index)
-            if electron_id == 0
-                continue
-            end
-
-            changed_count += 1
-            ws.cached_changed_electron_ids[changed_count] = electron_id
-            ws.cached_changed_row_indices[changed_count] = row_index
-            copyto!(
-                @view(ws.cached_c_matrix[:, changed_count]),
-                @view(site_block_buffer[local_row_offset, :]),
+    @timed "backflow_fill_site_blocks" begin
+        for (affected_offset, site_index) in enumerate(affected_sites)
+            ws.cached_affected_site_indices[affected_offset] = site_index
+            Backflow.fill_backflow_site_block_after_proposal!(
+                site_block_buffer,
+                vwf.base_gs_U,
+                vwf.sampler.state,
+                backflow_term,
+                proposal,
+                site_index,
             )
+            cached_block_row = 2 * (affected_offset - 1) + 1
+            copyto!(
+                @view(ws.cached_affected_site_blocks[cached_block_row, :]),
+                @view(site_block_buffer[1, :]),
+            )
+            copyto!(
+                @view(ws.cached_affected_site_blocks[cached_block_row + 1, :]),
+                @view(site_block_buffer[2, :]),
+            )
+
+            for local_row_offset in 1:2
+                row_index = 2 * (site_index - 1) + local_row_offset
+                electron_id = get_postproposal_electron_id(vwf.sampler, proposal, row_index)
+                if electron_id == 0
+                    continue
+                end
+
+                changed_count += 1
+                ws.cached_changed_electron_ids[changed_count] = electron_id
+                ws.cached_changed_row_indices[changed_count] = row_index
+                copyto!(
+                    @view(ws.cached_c_matrix[:, changed_count]),
+                    @view(site_block_buffer[local_row_offset, :]),
+                )
+            end
         end
     end
 
@@ -1006,7 +1017,7 @@ function cache_backflow_rankk_update!(vwf::vwf_det{T}, proposal::MoveProposal) w
     cached_c_matrix = @view ws.cached_c_matrix[:, 1:changed_count]
     cached_small_k_matrix = @view ws.cached_small_k_matrix[1:changed_count, 1:changed_count]
     cached_delta_columns = @view ws.cached_small_k_inverse[:, 1:changed_count]
-    compute_rankk_update_factors!(
+    @timed "backflow_rankk_factor" compute_rankk_update_factors!(
         cached_c_matrix,
         cached_small_k_matrix,
         cached_delta_columns,
@@ -1016,7 +1027,7 @@ function cache_backflow_rankk_update!(vwf::vwf_det{T}, proposal::MoveProposal) w
     )
 
     ws.has_cached_rankk_update = true
-    return det(cached_small_k_matrix)
+    return @timed "backflow_rankk_det" det(cached_small_k_matrix)
 end
 
 
@@ -1148,28 +1159,30 @@ end
 - `nothing`。
 """
 function update_rankk_from_cache!(vwf::vwf_det{T}, ratio::T) where {T}
-    ws = ensure_ws!(vwf)
-    if !ws.has_cached_rankk_update
-        error("Backflow rank-k cache is invalid. Call calc_backflow_ratio_local_update(vwf, proposal) before accept_backflow_local_update!(vwf, proposal, ratio).")
-    end
+    return @timed "backflow_rankk_accept_update" begin
+        ws = ensure_ws!(vwf)
+        if !ws.has_cached_rankk_update
+            error("Backflow rank-k cache is invalid. Call calc_backflow_ratio_local_update(vwf, proposal) before accept_backflow_local_update!(vwf, proposal, ratio).")
+        end
 
-    changed_count = ws.cached_changed_count
-    if changed_count == 0
+        changed_count = ws.cached_changed_count
+        if changed_count == 0
+            return nothing
+        end
+
+        changed_electron_ids = @view ws.cached_changed_electron_ids[1:changed_count]
+        new_columns = @view ws.cached_new_columns[:, 1:changed_count]
+        c_matrix = @view ws.cached_c_matrix[:, 1:changed_count]
+        small_k_matrix = @view ws.cached_small_k_matrix[1:changed_count, 1:changed_count]
+        small_k_inverse = @view ws.cached_small_k_inverse[1:changed_count, 1:changed_count]
+        small_k_inverse .= inv(small_k_matrix)
+
+        basis_columns = vwf.awf_inv[:, changed_electron_ids]
+        vwf.awf_inv .-= basis_columns * (small_k_inverse * transpose(c_matrix))
+        vwf.awf_mat_t[:, changed_electron_ids] .= new_columns
+        vwf.awf_val *= ratio
         return nothing
     end
-
-    changed_electron_ids = @view ws.cached_changed_electron_ids[1:changed_count]
-    new_columns = @view ws.cached_new_columns[:, 1:changed_count]
-    c_matrix = @view ws.cached_c_matrix[:, 1:changed_count]
-    small_k_matrix = @view ws.cached_small_k_matrix[1:changed_count, 1:changed_count]
-    small_k_inverse = @view ws.cached_small_k_inverse[1:changed_count, 1:changed_count]
-    small_k_inverse .= inv(small_k_matrix)
-
-    basis_columns = vwf.awf_inv[:, changed_electron_ids]
-    vwf.awf_inv .-= basis_columns * (small_k_inverse * transpose(c_matrix))
-    vwf.awf_mat_t[:, changed_electron_ids] .= new_columns
-    vwf.awf_val *= ratio
-    return nothing
 end
 
 
@@ -1217,13 +1230,15 @@ end
 - `T`: `Psi_new / Psi_old` 的 determinant 比值。
 """
 function calc_backflow_ratio_local_update(vwf::vwf_det{T}, proposal::MoveProposal) where {T}
-    fast_ratio = cache_backflow_rankk_update!(vwf, proposal)
+    return @timed "calc_backflow_ratio_local_update" begin
+        fast_ratio = cache_backflow_rankk_update!(vwf, proposal)
 
-    if vwf.backflow_debug_verify
-        verify_backflow_local_ratio(vwf, proposal, fast_ratio)
+        if vwf.backflow_debug_verify
+            verify_backflow_local_ratio(vwf, proposal, fast_ratio)
+        end
+
+        return fast_ratio
     end
-
-    return fast_ratio
 end
 
 
@@ -1239,21 +1254,22 @@ end
 - `nothing`。
 """
 function accept_backflow_local_update!(vwf::vwf_det{T}, proposal::MoveProposal, ratio::T) where {T}
-    ws = ensure_ws!(vwf)
-    if !ws.has_cached_rankk_update
-        error("Backflow rank-k cache is invalid. Call calc_backflow_ratio_local_update(vwf, proposal) before accept_backflow_local_update!(vwf, proposal, ratio).")
+    return @timed "accept_backflow_local_update!" begin
+        ws = ensure_ws!(vwf)
+        if !ws.has_cached_rankk_update
+            error("Backflow rank-k cache is invalid. Call calc_backflow_ratio_local_update(vwf, proposal) before accept_backflow_local_update!(vwf, proposal, ratio).")
+        end
+
+        update_rankk_from_cache!(vwf, ratio)
+        @timed "backflow_commit_move!" commit_move!(vwf.sampler, proposal)
+        @timed "backflow_apply_cached_rows" apply_cached_backflow_orbital_rows!(vwf)
+        reset_cached_rankk_update!(ws)
+
+        if vwf.backflow_debug_verify
+            verify_backflow_local_accept(vwf)
+        end
+        return nothing
     end
-
-    update_rankk_from_cache!(vwf, ratio)
-    commit_move!(vwf.sampler, proposal)
-    apply_cached_backflow_orbital_rows!(vwf)
-    reset_cached_rankk_update!(ws)
-
-    if vwf.backflow_debug_verify
-        verify_backflow_local_accept(vwf)
-    end
-
-    return nothing
 end
 
 
@@ -1387,6 +1403,50 @@ function _compute_dense_tensor_gradient!(o_vec::AbstractVector{T}, vwf::vwf_det{
     return o_vec
 end
 
+"""
+用途: 快速计算一个轨道导数矩阵对应的 determinant log-derivative。
+
+参数:
+- `selected_row_buffer::AbstractMatrix{T}`: 工作缓冲区, 尺寸必须等于 `a_inv`, 函数会原地覆盖。
+- `a_inv::AbstractMatrix{T}`: 当前 Slater 矩阵逆, 形状为 `N_e x N_e`。
+- `electron_locs::AbstractVector{Int}`: 第 `e` 个电子在内部轨道矩阵中的行号 `r_e`。
+- `derivative_orbitals::AbstractMatrix{T}`: 轨道导数矩阵 `partial U / partial p`, 行为空间/自旋轨道, 列为占据轨道。
+
+返回:
+- `T`: `sum_e sum_o A^{-1}_{o,e} * derivative_orbitals[r_e,o]`。
+
+公式:
+- determinant 波函数满足 `partial log det(A) / partial p = Tr(A^{-1} partial A / partial p)`。
+- 这里 `partial A[e,o] = derivative_orbitals[r_e,o]`, 因此把 `partial A^T` 写入
+  `selected_row_buffer[o,e]` 后, 结果就是 `dot(a_inv, selected_row_buffer)`。
+"""
+function _compute_orbital_log_derivative_from_selected_rows!(
+    selected_row_buffer::AbstractMatrix{T},
+    a_inv::AbstractMatrix{T},
+    electron_locs::AbstractVector{Int},
+    derivative_orbitals::AbstractMatrix{T},
+)::T where {T}
+    n_orb, n_elec = size(a_inv)
+    if size(selected_row_buffer) != size(a_inv)
+        throw(DimensionMismatch("selected_row_buffer size $(size(selected_row_buffer)) != a_inv size $(size(a_inv))"))
+    end
+    if length(electron_locs) != n_elec
+        throw(DimensionMismatch("electron_locs length $(length(electron_locs)) != electron count $(n_elec)"))
+    end
+    if size(derivative_orbitals, 2) < n_orb
+        throw(DimensionMismatch("derivative_orbitals column count $(size(derivative_orbitals, 2)) < orbital count $(n_orb)"))
+    end
+
+    @inbounds for elec in 1:n_elec
+        row_index = electron_locs[elec]
+        for orbital_index in 1:n_orb
+            selected_row_buffer[orbital_index, elec] = derivative_orbitals[row_index, orbital_index]
+        end
+    end
+
+    return dot(a_inv, selected_row_buffer)
+end
+
 function compute_grad_log_psi!(vwf::vwf_det{T}) where T
     return @timed "compute_grad_log_psi!" begin
         # 1. 准备 Workspace
@@ -1395,8 +1455,6 @@ function compute_grad_log_psi!(vwf::vwf_det{T}) where T
 
         A_inv = vwf.awf_inv   # Size: (N_orb, N_elec)
         # A_inv[orb, elec] -> 列优先存储，orb 变化最快
-
-        Norb, Nelec = size(A_inv)
 
         # 2. 获取 Buffer (O_vec)
         O_vec = ws.grad_buffer
@@ -1415,21 +1473,12 @@ function compute_grad_log_psi!(vwf::vwf_det{T}) where T
                     vwf.backflow,
                 )
                 derivative_orbitals = ws.backflow_chain_rule_buffer
-                total_sum = zero(T)
-
-                @inbounds for elec in 1:Nelec
-                    r = ss.electron_locs[elec]
-
-                    col_sum = zero(T)
-
-                    @simd for orb in 1:Norb
-                        col_sum += A_inv[orb, elec] * derivative_orbitals[r, orb]
-                    end
-
-                    total_sum += col_sum
-                end
-
-                O_vec[idx] = total_sum
+                O_vec[idx] = _compute_orbital_log_derivative_from_selected_rows!(
+                    ws.orbital_log_derivative_row_buffer,
+                    A_inv,
+                    ss.electron_locs,
+                    derivative_orbitals,
+                )
             end
         else
             _compute_dense_tensor_gradient!(O_vec, vwf)
@@ -1449,20 +1498,12 @@ function compute_grad_log_psi!(vwf::vwf_det{T}) where T
         if !isempty(backflow_pairs)
             start_idx = wf_param_count + projector_param_count + 1
             for (pair_offset, (_, derivative_orbitals)) in enumerate(backflow_pairs)
-                total_sum = zero(T)
-
-                @inbounds for elec in 1:Nelec
-                    row_idx = ss.electron_locs[elec]
-                    col_sum = zero(T)
-
-                    @simd for orb in 1:Norb
-                        col_sum += A_inv[orb, elec] * derivative_orbitals[row_idx, orb]
-                    end
-
-                    total_sum += col_sum
-                end
-
-                O_vec[start_idx + pair_offset - 1] = total_sum
+                O_vec[start_idx + pair_offset - 1] = _compute_orbital_log_derivative_from_selected_rows!(
+                    ws.orbital_log_derivative_row_buffer,
+                    A_inv,
+                    ss.electron_locs,
+                    derivative_orbitals,
+                )
             end
         end
 

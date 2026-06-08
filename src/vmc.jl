@@ -258,10 +258,12 @@ end
 - `Number`: projector 比值。若波函数未携带 projector, 返回 1.0。
 """
 function calc_projector_ratio(vwf, p::MoveProposal)
-    if hasproperty(vwf, :projector)
-        return Projector.projector_ratio(getproperty(vwf, :projector), vwf.sampler, p)
+    return @timed "calc_projector_ratio" begin
+        if hasproperty(vwf, :projector)
+            return Projector.projector_ratio(getproperty(vwf, :projector), vwf.sampler, p)
+        end
+        return 1.0
     end
-    return 1.0
 end
 
 
@@ -322,7 +324,7 @@ end
 
 function mcmc_step!(vwf, kernel::AbstractMCMCKernel, rng::AbstractRNG; detailed_balance::Bool=false)
     cfg = vwf.sampler
-    prop, s1, s2 = propose_move(kernel, cfg, rng)
+    prop, s1, s2 = @timed "propose_move" propose_move(kernel, cfg, rng)
 
     if prop.site1 == 0
         return false, 0.0, 1.0, prop
@@ -375,7 +377,7 @@ function mcmc_step!(runner::VMCRunner, rng::AbstractRNG; detailed_balance::Bool=
         kernel = runner.kernel
         cfg = vwf.sampler
 
-        prop, s1, s2 = propose_move(kernel, cfg, rng)
+        prop, s1, s2 = @timed "propose_move" propose_move(kernel, cfg, rng)
 
         if prop.site1 == 0
             (false, 0.0, 1.0, prop)

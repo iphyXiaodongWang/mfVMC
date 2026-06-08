@@ -119,7 +119,7 @@ function run_simulation(
     end
 
     # --- 2. 初始化 Runner & RNG ---
-    runner = VMCRunner(model, vwf; kernel=kernel, auto_fix=true)
+    runner = @timed "VMCRunner(auto_fix)" VMCRunner(model, vwf; kernel=kernel, auto_fix=true)
 
     rng = Random.default_rng()
     Random.seed!(rng, hash(rank, UInt(params.seed)))
@@ -137,12 +137,12 @@ function run_simulation(
                 steps_since_rebuild += 1
             end
             if steps_since_rebuild >= params.rebuild_every
-                rebuild_inverse!(vwf)
+                @timed "driver_rebuild_inverse!" rebuild_inverse!(vwf)
                 steps_since_rebuild = 0
             end
         end
     end
-    rebuild_inverse!(vwf)
+    @timed "driver_rebuild_inverse!" rebuild_inverse!(vwf)
     steps_since_rebuild = 0
 
     # --- 4. 准备测量 Buffer ---
@@ -169,7 +169,7 @@ function run_simulation(
                     steps_since_rebuild += 1
                 end
                 if steps_since_rebuild >= params.rebuild_every
-                    rebuild_inverse!(vwf)
+                    @timed "driver_rebuild_inverse!" rebuild_inverse!(vwf)
                     steps_since_rebuild = 0
                 end
             end
@@ -178,18 +178,18 @@ function run_simulation(
         # Measurement
         for name in obs_names
             func = observables[name]
-            val = func(model, vwf)
+            val = @timed "observable_eval" func(model, vwf)
 
             # 1. 累加到 Buffer (用于计算均值)
-            accumulate_sample!(obs_buf, name, val)
+            @timed "observable_accumulate_sample!" accumulate_sample!(obs_buf, name, val)
 
             # 2. 仅对指定观测量记录历史 (用于 Binning)
             if name in history_set
-                record_scalar!(obs_buf, name, real(val))
+                @timed "observable_record_scalar!" record_scalar!(obs_buf, name, real(val))
             end
         end
 
-        increment_counter!(obs_buf)
+        @timed "observable_increment_counter!" increment_counter!(obs_buf)
     end
 
     t_end = time()
@@ -202,7 +202,7 @@ function run_simulation(
     # --- 6. 数据收集 ---
 
     # A. 收集所有量的均值
-    means = mpi_reduce_all(obs_buf, session)
+    means = @timed "mpi_reduce_all" mpi_reduce_all(obs_buf, session)
 
     # B. 收集指定观测量的完整历史
     histories = Dict{Symbol,Vector{Float64}}()
@@ -212,7 +212,7 @@ function run_simulation(
             if !(name in history_set)
                 continue
             end
-            full_list = mpi_gather_scalar(obs_buf, session, name)
+            full_list = @timed "mpi_gather_scalar" mpi_gather_scalar(obs_buf, session, name)
 
             # 只有 Root 会收到数据，其他 Rank 收到 nothing
             if is_root && full_list !== nothing
@@ -311,7 +311,7 @@ function run_sr_optimization(model, vwf, kernel,
 
         # 3. [Safety] Re-create Runner
         # 确保 Runner 内部的 log_psi 缓存是基于新参数的
-        runner = VMCRunner(model, vwf; kernel=kernel, auto_fix=true)
+        runner = @timed "VMCRunner(auto_fix)" VMCRunner(model, vwf; kernel=kernel, auto_fix=true)
 
         # 4. Sampling Prep
         reset_buffers!(obs_buf)
@@ -329,12 +329,12 @@ function run_sr_optimization(model, vwf, kernel,
                     steps_since_rebuild += 1
                 end
                 if steps_since_rebuild >= vmc.rebuild_every
-                    rebuild_inverse!(vwf)
+                    @timed "driver_rebuild_inverse!" rebuild_inverse!(vwf)
                     steps_since_rebuild = 0
                 end
             end
         end
-        rebuild_inverse!(vwf)
+        @timed "driver_rebuild_inverse!" rebuild_inverse!(vwf)
 
         # 5. Measurement Loop
         for _ in 1:n_local
@@ -347,24 +347,24 @@ function run_sr_optimization(model, vwf, kernel,
                         steps_since_rebuild += 1
                     end
                     if steps_since_rebuild >= vmc.rebuild_every
-                        rebuild_inverse!(vwf)
+                        @timed "driver_rebuild_inverse!" rebuild_inverse!(vwf)
                         steps_since_rebuild = 0
                     end
                 end
             end
 
-            E_loc = local_energy(model, vwf)
-            accumulate_sr_stats!(obs_buf, vwf, E_loc)
-            increment_counter!(obs_buf)
+            E_loc = @timed "local_energy(call)" local_energy(model, vwf)
+            @timed "accumulate_sr_stats!" accumulate_sr_stats!(obs_buf, vwf, E_loc)
+            @timed "sr_increment_counter!" increment_counter!(obs_buf)
         end
 
         # 6. Collect & Solve
-        means, E_history = collect_sr_data(obs_buf, session)
+        means, E_history = @timed "collect_sr_data" collect_sr_data(obs_buf, session)
 
         if is_root
             @printf("Step %3d | Accept rate: %.2f %%\n", step, 100 * naccept / nstep)
             # [Fix] 使用泛型 Solver，自动处理类型
-            delta, grad_vec, E_err = solve_sr_update(means, E_history;
+            delta, grad_vec, E_err = @timed "solve_sr_update" solve_sr_update(means, E_history;
                 diag_shift=sr_params.diag_shift,
                 eigen_cutoff=sr_params.eigen_cutoff,
                 is_real_param=true)
@@ -413,17 +413,17 @@ end
 
 function accumulate_sr_stats!(obs_buf::ObservableBuffer{T}, vwf, E_loc::Number) where T
     O_vec = @timed "compute_grad_log_psi! (in SR)" compute_grad_log_psi!(vwf)
-    accumulate_sample!(obs_buf, :E, E_loc)
-    accumulate_sample!(obs_buf, :O_avg, O_vec)
-    accumulate_sample!(obs_buf, :EO_avg, E_loc .* O_vec)
-    accumulate_sr_matrix!(obs_buf, :S_mat, O_vec)
-    record_scalar!(obs_buf, :E, real(E_loc))
+    @timed "sr_accumulate_E" accumulate_sample!(obs_buf, :E, E_loc)
+    @timed "sr_accumulate_O_avg" accumulate_sample!(obs_buf, :O_avg, O_vec)
+    @timed "sr_accumulate_EO_avg" accumulate_sample!(obs_buf, :EO_avg, E_loc .* O_vec)
+    @timed "accumulate_sr_matrix!" accumulate_sr_matrix!(obs_buf, :S_mat, O_vec)
+    @timed "sr_record_scalar!" record_scalar!(obs_buf, :E, real(E_loc))
     return nothing
 end
 
 function collect_sr_data(obs_buf, session)
-    means = mpi_reduce_all(obs_buf, session)
-    E_history = mpi_gather_scalar(obs_buf, session, :E)
+    means = @timed "mpi_reduce_all" mpi_reduce_all(obs_buf, session)
+    E_history = @timed "mpi_gather_scalar" mpi_gather_scalar(obs_buf, session, :E)
     return means, E_history
 end
 
