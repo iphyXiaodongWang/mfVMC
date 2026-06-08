@@ -260,15 +260,125 @@ mutable struct BackflowEta3MixedVirtualHopTerm <: AbstractBackflowCorrectionTerm
 end
 
 """
+用途: 合并多个 backflow correction term 的 incoming source graph。
+
+参数:
+- `terms::Vector{<:AbstractBackflowCorrectionTerm}`: composite backflow 中的 correction terms。
+
+返回:
+- `Vector{Vector{Int}}`: `incoming_source_sites_by_target[target]` 保存所有会影响该 target 的 source site,
+  已按 target 分组并排序去重。
+"""
+function build_composite_incoming_source_sites_by_target(
+    terms::Vector{<:AbstractBackflowCorrectionTerm},
+)::Vector{Vector{Int}}
+    max_target_site = 0
+    for correction_term in terms
+        max_target_site = max(max_target_site, length(correction_term.incoming_source_sites_by_target))
+    end
+
+    incoming_source_sites_by_target = [Int[] for _ in 1:max_target_site]
+    for correction_term in terms
+        for target_site in eachindex(correction_term.incoming_source_sites_by_target)
+            target_sources = incoming_source_sites_by_target[target_site]
+            for source_site in correction_term.incoming_source_sites_by_target[target_site]
+                if !(source_site in target_sources)
+                    push!(target_sources, source_site)
+                end
+            end
+        end
+    end
+
+    for target_sources in incoming_source_sites_by_target
+        sort!(target_sources)
+    end
+    return incoming_source_sites_by_target
+end
+
+"""
+用途: 从 composite backflow terms 中取出指定类型的 correction term。
+
+参数:
+- `term_type::Type{T}`: 目标 correction term 类型。
+- `terms::Vector{AbstractBackflowCorrectionTerm}`: composite 中的 correction term 列表。
+
+返回:
+- `Union{Nothing, T}`: 若存在对应 correction term, 返回该对象, 否则返回 `nothing`。
+"""
+function find_composite_correction_term(
+    term_type::Type{T},
+    terms::Vector{AbstractBackflowCorrectionTerm},
+)::Union{Nothing,T} where {T<:AbstractBackflowCorrectionTerm}
+    for correction_term in terms
+        if correction_term isa T
+            return correction_term
+        end
+    end
+    return nothing
+end
+
+"""
+用途: 判断 composite backflow 的所有 correction terms 是否共享同一套 source 数据。
+
+参数:
+- `terms::Vector{AbstractBackflowCorrectionTerm}`: composite 中的 correction term 列表。
+
+返回:
+- `Bool`: 所有 correction terms 的 `source_data_signature` 相同时返回 `true`。
+"""
+function has_shared_backflow_source_data(
+    terms::Vector{AbstractBackflowCorrectionTerm},
+)::Bool
+    isempty(terms) && return false
+    reference_signature = terms[1].source_data_signature
+    for correction_term in terms
+        if correction_term.source_data_signature != reference_signature
+            return false
+        end
+    end
+    return true
+end
+
+"""
 用途: 组合多个 Eq.(5) backflow correction terms。
 
 字段:
 - `terms::Vector{AbstractBackflowCorrectionTerm}`: 按参数顺序保存的 backflow correction term 列表。
+- `incoming_source_sites_by_target::Vector{Vector{Int}}`: composite 级别合并后的 incoming source graph,
+  用于 proposal 局域更新时一次性收集 affected sites。
+- `has_shared_source_data::Bool`: 所有 correction terms 是否共享同一套 source 数据。
+- `shared_source_bonds, shared_source_amplitudes`: shared-source fast path 使用的有向键与振幅。
+- `shared_outgoing_bond_indices_by_source`: shared-source fast path 使用的 outgoing graph。
 """
 mutable struct CompositeBackflowTerm <: AbstractBackflowTerm
     terms::Vector{AbstractBackflowCorrectionTerm}
+    incoming_source_sites_by_target::Vector{Vector{Int}}
+    has_shared_source_data::Bool
+    shared_source_bonds::Vector{Tuple{Int,Int}}
+    shared_source_amplitudes::Vector{Float64}
+    shared_outgoing_bond_indices_by_source::Vector{Vector{Int}}
+    epsilon_term::Union{Nothing,BackflowEpsilonTerm}
+    eta1_term::Union{Nothing,BackflowEta1DoublonHoleTerm}
+    eta2_term::Union{Nothing,BackflowEta2SpinExchangeTerm}
+    eta3_term::Union{Nothing,BackflowEta3MixedVirtualHopTerm}
     function CompositeBackflowTerm(terms::Vector{<:AbstractBackflowCorrectionTerm})
-        return new(AbstractBackflowCorrectionTerm[terms...])
+        term_list = AbstractBackflowCorrectionTerm[terms...]
+        has_shared_source_data = has_shared_backflow_source_data(term_list)
+        shared_source_bonds = has_shared_source_data ? term_list[1].source_bonds : Tuple{Int,Int}[]
+        shared_source_amplitudes = has_shared_source_data ? term_list[1].source_amplitudes : Float64[]
+        shared_outgoing_bond_indices_by_source = has_shared_source_data ? term_list[1].outgoing_bond_indices_by_source : Vector{Int}[]
+        return new(
+            term_list,
+            build_composite_incoming_source_sites_by_target(term_list),
+            has_shared_source_data,
+            shared_source_bonds,
+            shared_source_amplitudes,
+            shared_outgoing_bond_indices_by_source,
+            find_composite_correction_term(BackflowEpsilonTerm, term_list),
+            find_composite_correction_term(BackflowEta1DoublonHoleTerm, term_list),
+            find_composite_correction_term(BackflowEta2SpinExchangeTerm, term_list),
+            find_composite_correction_term(BackflowEta3MixedVirtualHopTerm, term_list),
+        )
     end
 end
 
@@ -530,8 +640,10 @@ end
 
 规则:
 - 先包含 proposal 直接改变的站点。
-- 对每个 correction term, 若某个改变站点是有向键 `(i, j)` 的 target `j`,
-  则 source `i` 对应的轨道行也会依赖改变后的 `j`, 因而加入受影响列表。
+- 若某个改变站点是有向键 `(i, j)` 的 target `j`, 则 source `i` 对应的轨道行
+  也会依赖改变后的 `j`, 因而加入受影响列表。
+- 使用 `CompositeBackflowTerm` 预先合并的 incoming source graph, 避免对多个 correction term
+  重复收集同一组 source sites。
 - 返回结果按站点索引升序排列, 且不重复。
 
 参数:
@@ -556,19 +668,17 @@ function collect_affected_site_indices(
         end
     end
 
-    for correction_term in backflow_term.terms
-        max_target_site = min(n_sites, length(correction_term.incoming_source_sites_by_target))
-        for changed_site in (proposal.site1, proposal.site2)
-            if !(1 <= changed_site <= max_target_site)
-                continue
-            end
+    max_target_site = min(n_sites, length(backflow_term.incoming_source_sites_by_target))
+    for changed_site in (proposal.site1, proposal.site2)
+        if !(1 <= changed_site <= max_target_site)
+            continue
+        end
 
-            for source_site in correction_term.incoming_source_sites_by_target[changed_site]
-                if !(1 <= source_site <= n_sites)
-                    error("Backflow cache source site $source_site is out of bounds for a state vector with $n_sites sites.")
-                end
-                push_unique_site_index!(affected_sites, source_site)
+        for source_site in backflow_term.incoming_source_sites_by_target[changed_site]
+            if !(1 <= source_site <= n_sites)
+                error("Backflow cache source site $source_site is out of bounds for a state vector with $n_sites sites.")
             end
+            push_unique_site_index!(affected_sites, source_site)
         end
     end
 
@@ -818,6 +928,203 @@ function add_backflow_correction_site_block_after_proposal!(
 end
 
 """
+用途: 校验局域 site block 尺寸并写入裸轨道基准行。
+
+参数:
+- `site_block_buffer::AbstractMatrix{T}`: 输出 buffer, 形状必须为 `2 x N_orb`。
+- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
+- `state_vector::Vector{Int8}`: proposal 提交前的构型状态数组。
+- `site_index::Int`: 待写入的站点编号。
+
+返回:
+- `Tuple{Int, Int}`: `(row_up, row_down)`, 即该 site 在 spin-resolved 轨道矩阵中的两行。
+"""
+function initialize_site_block_base_after_proposal!(
+    site_block_buffer::AbstractMatrix{T},
+    base_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    site_index::Int,
+)::Tuple{Int,Int} where {T}
+    validate_orbital_dimensions(base_orbitals, length(state_vector))
+    if size(site_block_buffer, 1) != 2 || size(site_block_buffer, 2) != size(base_orbitals, 2)
+        error("Local site block buffer must have shape (2, $(size(base_orbitals, 2))), got $(size(site_block_buffer)).")
+    end
+    if !(1 <= site_index <= length(state_vector))
+        error("Affected site $site_index is out of bounds for a state vector with $(length(state_vector)) sites.")
+    end
+
+    row_up = 2 * (site_index - 1) + 1
+    row_down = row_up + 1
+    copyto!(@view(site_block_buffer[1, :]), @view(base_orbitals[row_up, :]))
+    copyto!(@view(site_block_buffer[2, :]), @view(base_orbitals[row_down, :]))
+    return row_up, row_down
+end
+
+"""
+用途: 使用逐 correction term 的旧逻辑写入 proposal 后的局域 site block。
+
+参数:
+- `site_block_buffer::AbstractMatrix{T}`: 输出 buffer, 形状必须为 `2 x N_orb`。
+- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
+- `state_vector::Vector{Int8}`: proposal 提交前的构型状态数组。
+- `backflow_term::CompositeBackflowTerm`: 组合式 Eq.(5) backflow 对象。
+- `proposal::MoveProposal`: Monte Carlo proposal。
+- `site_index::Int`: 待写入的站点编号。
+
+返回:
+- `nothing`。
+"""
+function fill_backflow_site_block_after_proposal_by_terms!(
+    site_block_buffer::AbstractMatrix{T},
+    base_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    backflow_term::CompositeBackflowTerm,
+    proposal::MoveProposal,
+    site_index::Int,
+) where {T}
+    initialize_site_block_base_after_proposal!(
+        site_block_buffer,
+        base_orbitals,
+        state_vector,
+        site_index,
+    )
+    for correction_term in backflow_term.terms
+        add_backflow_correction_site_block_after_proposal!(
+            site_block_buffer,
+            base_orbitals,
+            state_vector,
+            correction_term,
+            proposal,
+            site_index,
+        )
+    end
+
+    return nothing
+end
+
+"""
+用途: 对共享 source 数据的 composite backflow 使用 fused 逻辑写入 proposal 后的局域 site block。
+
+参数:
+- `site_block_buffer::AbstractMatrix{T}`: 输出 buffer, 形状必须为 `2 x N_orb`。
+- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
+- `state_vector::Vector{Int8}`: proposal 提交前的构型状态数组。
+- `backflow_term::CompositeBackflowTerm`: 组合式 Eq.(5) backflow 对象, 需满足 `has_shared_source_data == true`。
+- `proposal::MoveProposal`: Monte Carlo proposal。
+- `site_index::Int`: 待写入的站点编号。
+
+返回:
+- `nothing`。
+
+公式:
+- 对同一条有向键 `(i,j)` 一次性计算 Eq.(5) 中 `epsilon`, `eta1`, `eta2`, `eta3`
+  对 site `i` 的贡献, 避免四个 correction term 分别扫描同一套 outgoing bonds。
+"""
+function fill_shared_source_composite_site_block_after_proposal!(
+    site_block_buffer::AbstractMatrix{T},
+    base_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    backflow_term::CompositeBackflowTerm,
+    proposal::MoveProposal,
+    site_index::Int,
+) where {T}
+    row_up, row_down = initialize_site_block_base_after_proposal!(
+        site_block_buffer,
+        base_orbitals,
+        state_vector,
+        site_index,
+    )
+    if !backflow_term.has_shared_source_data ||
+       site_index > length(backflow_term.shared_outgoing_bond_indices_by_source)
+        return nothing
+    end
+
+    state_i = get_site_state_after_proposal(state_vector, proposal, site_index)
+    epsilon_term = backflow_term.epsilon_term
+    eta1_term = backflow_term.eta1_term
+    eta2_term = backflow_term.eta2_term
+    eta3_term = backflow_term.eta3_term
+    epsilon_shift = epsilon_term === nothing ? zero(T) : T(epsilon_term.epsilon_bf - 1.0)
+    eta1_value = eta1_term === nothing ? zero(T) : T(eta1_term.eta1_bf)
+    eta2_value = eta2_term === nothing ? zero(T) : T(eta2_term.eta2_bf)
+    eta3_value = eta3_term === nothing ? zero(T) : T(eta3_term.eta3_bf)
+    epsilon_up_is_active = false
+    epsilon_down_is_active = false
+
+    for bond_index in backflow_term.shared_outgoing_bond_indices_by_source[site_index]
+        (_, target_site) = backflow_term.shared_source_bonds[bond_index]
+        state_j = get_site_state_after_proposal(state_vector, proposal, target_site)
+        bond_amplitude = T(backflow_term.shared_source_amplitudes[bond_index])
+        target_row_up = 2 * (target_site - 1) + 1
+        target_row_down = target_row_up + 1
+
+        if epsilon_term !== nothing && epsilon_shift != zero(T)
+            if !epsilon_up_is_active &&
+               is_backflow_epsilon_row_active(
+                   state_i,
+                   state_j,
+                   UP,
+                   epsilon_term.epsilon_mask_terms,
+               )
+                epsilon_up_is_active = true
+            end
+            if !epsilon_down_is_active &&
+               is_backflow_epsilon_row_active(
+                   state_i,
+                   state_j,
+                   DN,
+                   epsilon_term.epsilon_mask_terms,
+               )
+                epsilon_down_is_active = true
+            end
+        end
+
+        eta1_factor = state_i == DB && state_j == HOLE ? one(T) : zero(T)
+        if eta1_value != zero(T) && eta1_factor != zero(T)
+            coefficient = eta1_value * bond_amplitude
+            @views site_block_buffer[1, :] .+= coefficient .* base_orbitals[target_row_up, :]
+            @views site_block_buffer[2, :] .+= coefficient .* base_orbitals[target_row_down, :]
+        end
+
+        for row_offset in 1:2
+            spin = backflow_spin_from_row_offset(row_offset)
+            opposite_spin = backflow_opposite_spin(spin)
+            eta2_factor =
+                backflow_n_sigma(state_i, spin) *
+                backflow_h_sigma(state_i, opposite_spin) *
+                backflow_n_sigma(state_j, opposite_spin) *
+                backflow_h_sigma(state_j, spin)
+            eta3_factor =
+                (state_i == DB ? 1.0 : 0.0) *
+                backflow_n_sigma(state_j, opposite_spin) *
+                backflow_h_sigma(state_j, spin) +
+                backflow_n_sigma(state_i, spin) *
+                backflow_h_sigma(state_i, opposite_spin) *
+                (state_j == HOLE ? 1.0 : 0.0)
+            coefficient =
+                eta2_value * bond_amplitude * T(eta2_factor) +
+                eta3_value * bond_amplitude * T(eta3_factor)
+            if coefficient == zero(T)
+                continue
+            end
+            target_row = row_offset == 1 ? target_row_up : target_row_down
+            @views site_block_buffer[row_offset, :] .+= coefficient .* base_orbitals[target_row, :]
+        end
+    end
+
+    if epsilon_shift != zero(T)
+        if epsilon_up_is_active
+            @views site_block_buffer[1, :] .+= epsilon_shift .* base_orbitals[row_up, :]
+        end
+        if epsilon_down_is_active
+            @views site_block_buffer[2, :] .+= epsilon_shift .* base_orbitals[row_down, :]
+        end
+    end
+
+    return nothing
+end
+
+"""
 用途: 写入组合式 Eq.(5) backflow 在 proposal 提交后的局域站点行块。
 
 数学公式:
@@ -843,31 +1150,24 @@ function fill_backflow_site_block_after_proposal!(
     proposal::MoveProposal,
     site_index::Int,
 ) where {T}
-    validate_orbital_dimensions(base_orbitals, length(state_vector))
-    if size(site_block_buffer, 1) != 2 || size(site_block_buffer, 2) != size(base_orbitals, 2)
-        error("Local site block buffer must have shape (2, $(size(base_orbitals, 2))), got $(size(site_block_buffer)).")
-    end
-    if !(1 <= site_index <= length(state_vector))
-        error("Affected site $site_index is out of bounds for a state vector with $(length(state_vector)) sites.")
-    end
-
-    row_up = 2 * (site_index - 1) + 1
-    row_down = row_up + 1
-    copyto!(@view(site_block_buffer[1, :]), @view(base_orbitals[row_up, :]))
-    copyto!(@view(site_block_buffer[2, :]), @view(base_orbitals[row_down, :]))
-
-    for correction_term in backflow_term.terms
-        add_backflow_correction_site_block_after_proposal!(
+    if backflow_term.has_shared_source_data
+        return fill_shared_source_composite_site_block_after_proposal!(
             site_block_buffer,
             base_orbitals,
             state_vector,
-            correction_term,
+            backflow_term,
             proposal,
             site_index,
         )
     end
-
-    return nothing
+    return fill_backflow_site_block_after_proposal_by_terms!(
+        site_block_buffer,
+        base_orbitals,
+        state_vector,
+        backflow_term,
+        proposal,
+        site_index,
+    )
 end
 
 
