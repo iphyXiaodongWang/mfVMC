@@ -11,8 +11,10 @@ push!(LOAD_PATH, joinpath(@__DIR__, "src"))
 push!(LOAD_PATH, @__DIR__)
 
 using mfVMC
-import mfVMC.Timing: @timed, timing_reset!, timing_report
+import mfVMC.Timing: @timed, ENABLE_TIMING, timing_reset!, timing_report
 using Utils: add_term_ij_nonPH, compute_eig_and_dU_reg1
+
+ENABLE_TIMING[] = false
 
 const EMERY_ORB_D = 1
 const EMERY_ORB_PY = 2
@@ -412,10 +414,10 @@ function build_emery_general_model(
     end
 
     for bond in build_emery_pd_bonds(lx, ly; amplitude=Float64(tpd))
-        add_emery_general_model_hopping_terms!(terms, bond.i, bond.j, -bond.coef)
+        add_emery_general_model_hopping_terms!(terms, bond.i, bond.j, bond.coef)
     end
     for bond in build_emery_pp_bonds(lx, ly; amplitude=Float64(tpp))
-        tpp == 0 || add_emery_general_model_hopping_terms!(terms, bond.i, bond.j, -bond.coef)
+        tpp == 0 || add_emery_general_model_hopping_terms!(terms, bond.i, bond.j, bond.coef)
     end
     for (site_i, site_j) in build_emery_pd_density_bonds(lx, ly)
         Vpd == 0 || push!(terms, OperatorTerm([:n, :n], [site_i, site_j], Float64(Vpd)))
@@ -679,8 +681,8 @@ end
 用途: 构造 column-resolved nonPH Emery number-conserving mean-field Hamiltonian。
 
 数学公式:
-- hopping: 对每条 `EmeryBond(i,j,coef)`, 加入 `H_{ij} += -coef` 和 `H_{ji} += -coef`,
-  使 `chi1_dp=tpd`, `chi1_pp=tpp` 时 mean-field one-body 符号与物理 Hamiltonian 对齐。
+- hopping: 对每条 `EmeryBond(i,j,coef)`, 加入 `H_{ij} += coef` 和 `H_{ji} += coef`,
+  使 `chi1_dp=tpd`, `chi1_pp=tpp` 时 mean-field one-body 符号与物理 Hamiltonian 及 mj 约定对齐。
 - onsite field:
   `H_{i up,i up} += mu_i + (-1)^(x+y) mz_i`,
   `H_{i down,i down} += mu_i - (-1)^(x+y) mz_i`。
@@ -700,13 +702,13 @@ function build_column_emery_nonph_hamiltonian(
     hamiltonian = zeros(Float64, 2 * n_sites, 2 * n_sites)
 
     for bond in build_emery_dd_bonds(lx, ly; amplitude=params.chi1_dd, bcy=params.bcy)
-        add_emery_spinful_hopping!(hamiltonian, bond.i, bond.j, -bond.coef)
+        add_emery_spinful_hopping!(hamiltonian, bond.i, bond.j, bond.coef)
     end
     for bond in build_emery_pd_bonds(lx, ly; amplitude=params.chi1_dp, bcy=params.bcy)
-        add_emery_spinful_hopping!(hamiltonian, bond.i, bond.j, -bond.coef)
+        add_emery_spinful_hopping!(hamiltonian, bond.i, bond.j, bond.coef)
     end
     for bond in build_emery_pp_bonds(lx, ly; amplitude=params.chi1_pp, bcy=params.bcy)
-        add_emery_spinful_hopping!(hamiltonian, bond.i, bond.j, -bond.coef)
+        add_emery_spinful_hopping!(hamiltonian, bond.i, bond.j, bond.coef)
     end
 
     for x in 1:lx, y in 1:ly
@@ -933,7 +935,8 @@ end
 - `stripe_spin_peak_x::Float64`: spin envelope 峰值位置, `NaN` 时使用 `stripe_center` 相位。
 
 返回:
-- `Float64`: `mu_uniform + stripe_mu_amp * cos(Q * (x_coordinate - x0))`, 其中 `Q = 2π / λ`。
+- `Float64`: `mu_uniform - stripe_mu_amp * cos(Q * (x_coordinate - x0))`, 其中 `Q = 2π / λ`。
+  在 hole 表象下, spin peak 处 `cos(...)=-1`, 因此 `mu` 较大, hole density 较小。
 """
 function compute_emery_stripe_mu_value(
     x_coordinate::Float64,
@@ -950,7 +953,7 @@ function compute_emery_stripe_mu_value(
         stripe_spin_peak_x - lambda / 2.0
     end
     stripe_wave_vector = 2.0 * pi / lambda
-    return mu_uniform + stripe_mu_amp * cos(stripe_wave_vector * (x_coordinate - stripe_center_offset))
+    return mu_uniform - stripe_mu_amp * cos(stripe_wave_vector * (x_coordinate - stripe_center_offset))
 end
 
 """
@@ -1110,30 +1113,79 @@ function build_emery_backflow_source_data(
     tpp::Real,
     bcy::Real=1.0,
 )::Tuple{Vector{Tuple{Int,Int}},Vector{Float64}}
-    source_bonds = Tuple{Int,Int}[]
-    source_amplitudes = Float64[]
+    dp_source_bonds, dp_source_amplitudes, pp_source_bonds, pp_source_amplitudes =
+        build_emery_backflow_source_data_by_bond_type(lx, ly; tpd=tpd, tpp=tpp, bcy=bcy)
+    return vcat(dp_source_bonds, pp_source_bonds), vcat(dp_source_amplitudes, pp_source_amplitudes)
+end
+
+"""
+用途: 把单条 Emery hopping bond 以两个方向加入 backflow source 列表。
+
+参数:
+- `source_bonds::Vector{Tuple{Int, Int}}`: 待写入的有向 source bond 列表。
+- `source_amplitudes::Vector{Float64}`: 与 `source_bonds` 对齐的 hopping 振幅。
+- `bond::EmeryBond`: 一条 Emery hopping bond, `bond.coef` 为物理 hopping 矩阵元。
+
+返回:
+- `nothing`。若 `bond.coef == 0`, 不写入任何 source。
+
+公式:
+- 对无向 hopping `H_ij = t_ij`, backflow 同时加入 `(i,j)` 与 `(j,i)`,
+  两个方向使用同一个 `t_ij`, 使 `D_i H_j` 和 `D_j H_i` 分别由两个有向通道表示。
+"""
+function append_emery_backflow_source_bond!(
+    source_bonds::Vector{Tuple{Int,Int}},
+    source_amplitudes::Vector{Float64},
+    bond::EmeryBond,
+)::Nothing
+    if bond.coef == 0.0
+        return nothing
+    end
+    push!(source_bonds, (bond.i, bond.j))
+    push!(source_amplitudes, bond.coef)
+    push!(source_bonds, (bond.j, bond.i))
+    push!(source_amplitudes, bond.coef)
+    return nothing
+end
+
+"""
+用途: 按 Emery bond 类型分别构造 Cu-O(`dp`) 和 O-O(`pp`) backflow source 数据。
+
+参数:
+- `lx, ly::Int`: Cu 晶胞尺寸。
+- `tpd::Real`: Cu-O hopping 振幅。
+- `tpp::Real`: O-O hopping 振幅。
+- `bcy::Real`: y 方向周期边界因子。
+
+返回:
+- `(dp_source_bonds, dp_source_amplitudes, pp_source_bonds, pp_source_amplitudes)`。
+  每个 bond list 均为有向列表, 每条物理 bond 同时包含正反两个方向。
+
+公式:
+- `dp` 组只包含 `build_emery_pd_bonds` 生成的 Cu-O hopping。
+- `pp` 组只包含 `build_emery_pp_bonds` 生成的 O-O hopping。
+"""
+function build_emery_backflow_source_data_by_bond_type(
+    lx::Int,
+    ly::Int;
+    tpd::Real,
+    tpp::Real,
+    bcy::Real=1.0,
+)::Tuple{Vector{Tuple{Int,Int}},Vector{Float64},Vector{Tuple{Int,Int}},Vector{Float64}}
+    dp_source_bonds = Tuple{Int,Int}[]
+    dp_source_amplitudes = Float64[]
+    pp_source_bonds = Tuple{Int,Int}[]
+    pp_source_amplitudes = Float64[]
 
     for bond in build_emery_pd_bonds(lx, ly; amplitude=Float64(tpd), bcy=Float64(bcy))
-        if bond.coef == 0.0
-            continue
-        end
-        push!(source_bonds, (bond.i, bond.j))
-        push!(source_amplitudes, bond.coef)
-        push!(source_bonds, (bond.j, bond.i))
-        push!(source_amplitudes, bond.coef)
+        append_emery_backflow_source_bond!(dp_source_bonds, dp_source_amplitudes, bond)
     end
 
     for bond in build_emery_pp_bonds(lx, ly; amplitude=Float64(tpp), bcy=Float64(bcy))
-        if bond.coef == 0.0
-            continue
-        end
-        push!(source_bonds, (bond.i, bond.j))
-        push!(source_amplitudes, bond.coef)
-        push!(source_bonds, (bond.j, bond.i))
-        push!(source_amplitudes, bond.coef)
+        append_emery_backflow_source_bond!(pp_source_bonds, pp_source_amplitudes, bond)
     end
 
-    return source_bonds, source_amplitudes
+    return dp_source_bonds, dp_source_amplitudes, pp_source_bonds, pp_source_amplitudes
 end
 
 """
@@ -1184,6 +1236,86 @@ function build_column_composite_backflow(
 end
 
 """
+用途: 构造 Emery `dp` 和 `pp` bond 解耦的 column nonPH Eq.(5) composite backflow。
+
+参数:
+- `dp_source_bonds, dp_source_amplitudes`: Cu-O hopping source 数据。
+- `pp_source_bonds, pp_source_amplitudes`: O-O hopping source 数据。
+- `bf_epsilon::Float64`: 共享的 epsilon prefactor 参数。
+- `bf_eta1_dp, bf_eta2_dp, bf_eta3_dp::Float64`: Cu-O source 使用的 Eq.(5) 参数。
+- `bf_eta1_pp, bf_eta2_pp, bf_eta3_pp::Float64`: O-O source 使用的 Eq.(5) 参数。
+
+返回:
+- `CompositeBackflowTerm`: 参数顺序为
+  `bf_epsilon, bf_eta1_dp, bf_eta2_dp, bf_eta3_dp, bf_eta1_pp, bf_eta2_pp, bf_eta3_pp`。
+
+公式:
+- `delta U_eta_m = eta_m^dp * sum_{(i,j) in dp} t_ij mask_m(i,j) U_0(j)
+                 + eta_m^pp * sum_{(i,j) in pp} t_ij mask_m(i,j) U_0(j)`。
+"""
+function build_column_decoupled_emery_backflow(
+    dp_source_bonds::Vector{Tuple{Int,Int}},
+    dp_source_amplitudes::Vector{Float64},
+    pp_source_bonds::Vector{Tuple{Int,Int}},
+    pp_source_amplitudes::Vector{Float64},
+    bf_epsilon::Float64,
+    bf_eta1_dp::Float64,
+    bf_eta2_dp::Float64,
+    bf_eta3_dp::Float64,
+    bf_eta1_pp::Float64,
+    bf_eta2_pp::Float64,
+    bf_eta3_pp::Float64,
+)
+    all_source_bonds = vcat(dp_source_bonds, pp_source_bonds)
+    all_source_amplitudes = vcat(dp_source_amplitudes, pp_source_amplitudes)
+    return CompositeBackflowTerm([
+        BackflowEpsilonTerm(
+            param_name=:bf_epsilon,
+            epsilon_bf=bf_epsilon,
+            epsilon_mask_terms=Symbol[:eta1, :eta2, :eta3],
+            source_bonds=all_source_bonds,
+            source_amplitudes=all_source_amplitudes,
+        ),
+        BackflowEta1DoublonHoleTerm(
+            param_name=:bf_eta1_dp,
+            eta1_bf=bf_eta1_dp,
+            source_bonds=dp_source_bonds,
+            source_amplitudes=dp_source_amplitudes,
+        ),
+        BackflowEta2SpinExchangeTerm(
+            param_name=:bf_eta2_dp,
+            eta2_bf=bf_eta2_dp,
+            source_bonds=dp_source_bonds,
+            source_amplitudes=dp_source_amplitudes,
+        ),
+        BackflowEta3MixedVirtualHopTerm(
+            param_name=:bf_eta3_dp,
+            eta3_bf=bf_eta3_dp,
+            source_bonds=dp_source_bonds,
+            source_amplitudes=dp_source_amplitudes,
+        ),
+        BackflowEta1DoublonHoleTerm(
+            param_name=:bf_eta1_pp,
+            eta1_bf=bf_eta1_pp,
+            source_bonds=pp_source_bonds,
+            source_amplitudes=pp_source_amplitudes,
+        ),
+        BackflowEta2SpinExchangeTerm(
+            param_name=:bf_eta2_pp,
+            eta2_bf=bf_eta2_pp,
+            source_bonds=pp_source_bonds,
+            source_amplitudes=pp_source_amplitudes,
+        ),
+        BackflowEta3MixedVirtualHopTerm(
+            param_name=:bf_eta3_pp,
+            eta3_bf=bf_eta3_pp,
+            source_bonds=pp_source_bonds,
+            source_amplitudes=pp_source_amplitudes,
+        ),
+    ])
+end
+
+"""
 用途: 根据开关构造 column nonPH backflow 对象。
 
 参数:
@@ -1216,6 +1348,50 @@ function build_column_optional_backflow(
 end
 
 """
+用途: 根据开关构造 Emery `dp/pp` 解耦 backflow 对象。
+
+参数:
+- `enable_backflow::Bool`: 是否启用 backflow。
+- `dp_source_bonds, dp_source_amplitudes`: Cu-O source 数据。
+- `pp_source_bonds, pp_source_amplitudes`: O-O source 数据。
+- 其余参数同 `build_column_decoupled_emery_backflow`。
+
+返回:
+- `AbstractBackflowTerm`: 关闭时为 `NoBackflowTerm()`, 开启时为 dp/pp 解耦的 `CompositeBackflowTerm`。
+"""
+function build_column_optional_decoupled_emery_backflow(
+    enable_backflow::Bool,
+    dp_source_bonds::Vector{Tuple{Int,Int}},
+    dp_source_amplitudes::Vector{Float64},
+    pp_source_bonds::Vector{Tuple{Int,Int}},
+    pp_source_amplitudes::Vector{Float64},
+    bf_epsilon::Float64,
+    bf_eta1_dp::Float64,
+    bf_eta2_dp::Float64,
+    bf_eta3_dp::Float64,
+    bf_eta1_pp::Float64,
+    bf_eta2_pp::Float64,
+    bf_eta3_pp::Float64,
+)
+    if !enable_backflow
+        return NoBackflowTerm()
+    end
+    return build_column_decoupled_emery_backflow(
+        dp_source_bonds,
+        dp_source_amplitudes,
+        pp_source_bonds,
+        pp_source_amplitudes,
+        bf_epsilon,
+        bf_eta1_dp,
+        bf_eta2_dp,
+        bf_eta3_dp,
+        bf_eta1_pp,
+        bf_eta2_pp,
+        bf_eta3_pp,
+    )
+end
+
+"""
 用途: 解析布尔命令行字符串。
 
 参数:
@@ -1233,6 +1409,73 @@ function parse_column_bool_flag(raw_value::AbstractString, option_name::Abstract
         return false
     end
     error("Invalid value for $(option_name): $(raw_value).")
+end
+
+"""
+用途: 解析 dp/pp 解耦 backflow 参数的初值。
+
+参数:
+- `specific_value::Float64`: 新的 bond-type-specific 参数, 如 `bf_eta1_dp`。
+- `legacy_value::Float64`: 旧的共享参数, 如 `bf_eta1`。
+
+返回:
+- `Float64`: 若 `specific_value` 为 `NaN`, 返回 `legacy_value`; 否则返回 `specific_value`。
+"""
+function resolve_decoupled_backflow_initial_value(
+    specific_value::Float64,
+    legacy_value::Float64,
+)::Float64
+    return isnan(specific_value) ? legacy_value : specific_value
+end
+
+"""
+用途: 从 JSON 构造初始参数, 并兼容旧的共享 backflow 参数名。
+
+参数:
+- `json_path::AbstractString`: 参数 JSON 路径。
+- `param_names::Vector{Symbol}`: 当前 ansatz 的参数名顺序。
+
+返回:
+- `Vector{Float64}`: 按 `param_names` 顺序排列的初始参数。
+
+兼容规则:
+- 若当前需要 `bf_eta1_dp` 或 `bf_eta1_pp`, 但 JSON 中缺失, 则尝试读取旧键 `bf_eta1`。
+- `bf_eta2_*` 和 `bf_eta3_*` 同理。
+"""
+function build_column_init_params_from_json(
+    json_path::AbstractString,
+    param_names::Vector{Symbol},
+)::Vector{Float64}
+    isfile(json_path) || error("JSON file not found: $(json_path)")
+    raw_dict = JSON.parsefile(json_path)
+    init_params = Float64[]
+    missing_keys = String[]
+
+    for param_name in param_names
+        key = String(param_name)
+        fallback_key = if key in ("bf_eta1_dp", "bf_eta1_pp")
+            "bf_eta1"
+        elseif key in ("bf_eta2_dp", "bf_eta2_pp")
+            "bf_eta2"
+        elseif key in ("bf_eta3_dp", "bf_eta3_pp")
+            "bf_eta3"
+        else
+            ""
+        end
+
+        if haskey(raw_dict, key)
+            push!(init_params, Float64(raw_dict[key]))
+        elseif !isempty(fallback_key) && haskey(raw_dict, fallback_key)
+            push!(init_params, Float64(raw_dict[fallback_key]))
+        else
+            push!(missing_keys, key)
+        end
+    end
+
+    if !isempty(missing_keys)
+        error("Missing parameters in json: $(join(missing_keys, ", "))")
+    end
+    return init_params
 end
 
 """
@@ -1550,6 +1793,9 @@ function parse_column_bf_commandline()
         "--enable_backflow"
         arg_type = String
         default = "true"
+        "--enable_timing"
+        arg_type = String
+        default = "false"
         "--bf_epsilon"
         arg_type = Float64
         default = 1.0
@@ -1562,6 +1808,24 @@ function parse_column_bf_commandline()
         "--bf_eta3"
         arg_type = Float64
         default = 0.0
+        "--bf_eta1_dp"
+        arg_type = Float64
+        default = NaN
+        "--bf_eta2_dp"
+        arg_type = Float64
+        default = NaN
+        "--bf_eta3_dp"
+        arg_type = Float64
+        default = NaN
+        "--bf_eta1_pp"
+        arg_type = Float64
+        default = NaN
+        "--bf_eta2_pp"
+        arg_type = Float64
+        default = NaN
+        "--bf_eta3_pp"
+        arg_type = Float64
+        default = NaN
     end
     return parse_args(settings)
 end
@@ -1577,6 +1841,8 @@ end
 """
 function main_column_nonph_backflow()::Nothing
     args = parse_column_bf_commandline()
+    enable_timing = parse_column_bool_flag(args["enable_timing"], "--enable_timing")
+    ENABLE_TIMING[] = enable_timing
     session = init_mpi_session()
     rank = session.rank
     is_root = rank == session.root
@@ -1593,7 +1859,7 @@ function main_column_nonph_backflow()::Nothing
     job = args["job"]
 
     # Reset timing at start (for measure mode, one-shot; for SR, we accumulate per step)
-    timing_reset!()
+    enable_timing && timing_reset!()
 
     mean_field_setup = build_column_emery_nonph_mean_field_parameter_setup(
         args["ansatz"],
@@ -1620,21 +1886,27 @@ function main_column_nonph_backflow()::Nothing
         seed=args["seed"] + rank,
     )
 
-    source_bonds, source_amplitudes = build_emery_backflow_source_data(
+    dp_source_bonds, dp_source_amplitudes, pp_source_bonds, pp_source_amplitudes =
+        build_emery_backflow_source_data_by_bond_type(
         lx,
         ly;
         tpd=args["tpd"],
         tpp=args["tpp"],
         bcy=bcy,
     )
-    backflow = build_column_optional_backflow(
+    backflow = build_column_optional_decoupled_emery_backflow(
         parse_column_bool_flag(args["enable_backflow"], "--enable_backflow"),
-        source_bonds,
-        source_amplitudes,
+        dp_source_bonds,
+        dp_source_amplitudes,
+        pp_source_bonds,
+        pp_source_amplitudes,
         args["bf_epsilon"],
-        args["bf_eta1"],
-        args["bf_eta2"],
-        args["bf_eta3"],
+        resolve_decoupled_backflow_initial_value(args["bf_eta1_dp"], args["bf_eta1"]),
+        resolve_decoupled_backflow_initial_value(args["bf_eta2_dp"], args["bf_eta2"]),
+        resolve_decoupled_backflow_initial_value(args["bf_eta3_dp"], args["bf_eta3"]),
+        resolve_decoupled_backflow_initial_value(args["bf_eta1_pp"], args["bf_eta1"]),
+        resolve_decoupled_backflow_initial_value(args["bf_eta2_pp"], args["bf_eta2"]),
+        resolve_decoupled_backflow_initial_value(args["bf_eta3_pp"], args["bf_eta3"]),
     )
     projector = build_emery_density_jastrow_projector(
         lx,
@@ -1656,7 +1928,7 @@ function main_column_nonph_backflow()::Nothing
     param_names = vcat(wf_param_names, proj_param_names, backflow_param_name_list)
 
     if !isempty(args["init_params_json"])
-        init_params = build_init_params_from_json(args["init_params_json"], param_names)
+        init_params = build_column_init_params_from_json(args["init_params_json"], param_names)
         if is_root
             println("Loaded initial parameters from json: $(args["init_params_json"])")
         end
@@ -1745,12 +2017,14 @@ function main_column_nonph_backflow()::Nothing
         )
         if is_root
             extract_min_energy(joinpath(folder, "sr_history.txt"))
-            println("[Timing] SR optimization complete. Printing timing report...")
-            timing_report()
-            open(joinpath(folder, "timing_report.txt"), "w") do io
-                timing_report(io)
+            if enable_timing
+                println("[Timing] SR optimization complete. Printing timing report...")
+                timing_report()
+                open(joinpath(folder, "timing_report.txt"), "w") do io
+                    timing_report(io)
+                end
+                println("[Timing] Timing report saved to $(joinpath(folder, "timing_report.txt")).")
             end
-            println("[Timing] Timing report saved to $(joinpath(folder, "timing_report.txt")).")
         end
     elseif job == "measure"
         results = run_simulation(
@@ -1763,12 +2037,14 @@ function main_column_nonph_backflow()::Nothing
         )
         if is_root && results !== nothing
             write_column_measure_outputs(folder, results)
-            println("[Timing] Measurement complete. Printing timing report...")
-            timing_report()
-            open(joinpath(folder, "timing_report.txt"), "w") do io
-                timing_report(io)
+            if enable_timing
+                println("[Timing] Measurement complete. Printing timing report...")
+                timing_report()
+                open(joinpath(folder, "timing_report.txt"), "w") do io
+                    timing_report(io)
+                end
+                println("[Timing] Timing report saved to $(joinpath(folder, "timing_report.txt")).")
             end
-            println("[Timing] Timing report saved to $(joinpath(folder, "timing_report.txt")).")
         end
     else
         error("Unknown job: $(job)")
