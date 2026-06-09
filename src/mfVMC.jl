@@ -37,6 +37,7 @@ export AbstractBackflowTerm, AbstractBackflowCorrectionTerm
 export NoBackflowTerm, Eq4BackflowTerm, CompositeBackflowTerm
 export BackflowEpsilonTerm, BackflowEta1DoublonHoleTerm
 export BackflowEta2SpinExchangeTerm, BackflowEta3MixedVirtualHopTerm
+export BackflowEta3DoublonSingleTerm, BackflowEta4SingleHoleTerm
 export uses_backflow
 export backflow_param_names, backflow_param_values, backflow_param_count
 export update_backflow_params!

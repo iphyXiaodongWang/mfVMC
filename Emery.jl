@@ -1189,6 +1189,167 @@ function build_emery_backflow_source_data_by_bond_type(
 end
 
 """
+用途: 按 directed orbital 类型追加一条 Emery backflow source bond。
+
+参数:
+- `dp_source_bonds, dp_source_amplitudes`: source 为 Cu `d`, target 为 O `p` 的有向通道。
+- `pd_source_bonds, pd_source_amplitudes`: source 为 O `p`, target 为 Cu `d` 的有向通道。
+- `pp_source_bonds, pp_source_amplitudes`: source 为 O `p`, target 为 O `p` 的有向通道。
+- `source_site, target_site::Int`: 有向 source bond `(source_site, target_site)`。
+- `bond_amplitude::Float64`: 该有向通道使用的 hopping 矩阵元。
+- `lx, ly::Int`: Emery 晶格尺寸。
+
+返回:
+- `nothing`。
+"""
+function append_emery_directed_backflow_source_bond!(
+    dp_source_bonds::Vector{Tuple{Int,Int}},
+    dp_source_amplitudes::Vector{Float64},
+    pd_source_bonds::Vector{Tuple{Int,Int}},
+    pd_source_amplitudes::Vector{Float64},
+    pp_source_bonds::Vector{Tuple{Int,Int}},
+    pp_source_amplitudes::Vector{Float64},
+    source_site::Int,
+    target_site::Int,
+    bond_amplitude::Float64,
+    lx::Int,
+    ly::Int,
+)::Nothing
+    source_orbital = emery_orbital_of_site(source_site, lx, ly)
+    target_orbital = emery_orbital_of_site(target_site, lx, ly)
+    source_is_d = source_orbital == EMERY_ORB_D
+    target_is_d = target_orbital == EMERY_ORB_D
+    source_is_p = source_orbital == EMERY_ORB_PX || source_orbital == EMERY_ORB_PY
+    target_is_p = target_orbital == EMERY_ORB_PX || target_orbital == EMERY_ORB_PY
+
+    if source_is_d && target_is_p
+        push!(dp_source_bonds, (source_site, target_site))
+        push!(dp_source_amplitudes, bond_amplitude)
+    elseif source_is_p && target_is_d
+        push!(pd_source_bonds, (source_site, target_site))
+        push!(pd_source_amplitudes, bond_amplitude)
+    elseif source_is_p && target_is_p
+        push!(pp_source_bonds, (source_site, target_site))
+        push!(pp_source_amplitudes, bond_amplitude)
+    else
+        error("Unsupported Emery backflow directed source from orbital $(source_orbital) to $(target_orbital).")
+    end
+    return nothing
+end
+
+"""
+用途: 按 directed orbital 类型构造 Emery backflow source 数据。
+
+参数:
+- `lx, ly::Int`: Cu 晶胞尺寸。
+- `tpd::Real`: Cu-O hopping 振幅。
+- `tpp::Real`: O-O hopping 振幅。
+- `bcy::Real`: y 方向周期边界因子。
+
+返回:
+- `(dp_source_bonds, dp_source_amplitudes, pd_source_bonds, pd_source_amplitudes,
+   pp_source_bonds, pp_source_amplitudes)`。
+
+公式:
+- `dp` 表示 source `d` -> target `p`。
+- `pd` 表示 source `p` -> target `d`。
+- `pp` 表示 source `p` -> target `p`。
+- 每条物理 hopping bond 仍加入两个方向, 但两个方向按 source/target orbital
+  分别进入 `dp` 或 `pd`。
+"""
+function build_emery_backflow_source_data_by_directed_orbital_type(
+    lx::Int,
+    ly::Int;
+    tpd::Real,
+    tpp::Real,
+    bcy::Real=1.0,
+)::Tuple{
+    Vector{Tuple{Int,Int}},Vector{Float64},
+    Vector{Tuple{Int,Int}},Vector{Float64},
+    Vector{Tuple{Int,Int}},Vector{Float64},
+}
+    dp_source_bonds = Tuple{Int,Int}[]
+    dp_source_amplitudes = Float64[]
+    pd_source_bonds = Tuple{Int,Int}[]
+    pd_source_amplitudes = Float64[]
+    pp_source_bonds = Tuple{Int,Int}[]
+    pp_source_amplitudes = Float64[]
+
+    for bond in build_emery_pd_bonds(lx, ly; amplitude=Float64(tpd), bcy=Float64(bcy))
+        if bond.coef == 0.0
+            continue
+        end
+        append_emery_directed_backflow_source_bond!(
+            dp_source_bonds,
+            dp_source_amplitudes,
+            pd_source_bonds,
+            pd_source_amplitudes,
+            pp_source_bonds,
+            pp_source_amplitudes,
+            bond.i,
+            bond.j,
+            bond.coef,
+            lx,
+            ly,
+        )
+        append_emery_directed_backflow_source_bond!(
+            dp_source_bonds,
+            dp_source_amplitudes,
+            pd_source_bonds,
+            pd_source_amplitudes,
+            pp_source_bonds,
+            pp_source_amplitudes,
+            bond.j,
+            bond.i,
+            bond.coef,
+            lx,
+            ly,
+        )
+    end
+
+    for bond in build_emery_pp_bonds(lx, ly; amplitude=Float64(tpp), bcy=Float64(bcy))
+        if bond.coef == 0.0
+            continue
+        end
+        append_emery_directed_backflow_source_bond!(
+            dp_source_bonds,
+            dp_source_amplitudes,
+            pd_source_bonds,
+            pd_source_amplitudes,
+            pp_source_bonds,
+            pp_source_amplitudes,
+            bond.i,
+            bond.j,
+            bond.coef,
+            lx,
+            ly,
+        )
+        append_emery_directed_backflow_source_bond!(
+            dp_source_bonds,
+            dp_source_amplitudes,
+            pd_source_bonds,
+            pd_source_amplitudes,
+            pp_source_bonds,
+            pp_source_amplitudes,
+            bond.j,
+            bond.i,
+            bond.coef,
+            lx,
+            ly,
+        )
+    end
+
+    return (
+        dp_source_bonds,
+        dp_source_amplitudes,
+        pd_source_bonds,
+        pd_source_amplitudes,
+        pp_source_bonds,
+        pp_source_amplitudes,
+    )
+end
+
+"""
 用途: 构造 column nonPH 使用的 Eq.(5) composite backflow。
 
 参数:
@@ -1316,6 +1477,132 @@ function build_column_decoupled_emery_backflow(
 end
 
 """
+用途: 构造 Emery `dp/pd/pp` directed orbital class 解耦的 split backflow。
+
+参数:
+- `dp_source_bonds, dp_source_amplitudes`: source `d` -> target `p` 的 source 数据。
+- `pd_source_bonds, pd_source_amplitudes`: source `p` -> target `d` 的 source 数据。
+- `pp_source_bonds, pp_source_amplitudes`: source `p` -> target `p` 的 source 数据。
+- `bf_epsilon::Float64`: 共享的 epsilon prefactor 参数。
+- `bf_eta1_*, bf_eta2_*, bf_eta3_*, bf_eta4_*::Float64`: 各 directed class 的 backflow 参数。
+
+返回:
+- `CompositeBackflowTerm`: 参数顺序为 `bf_epsilon`, 然后 `dp`, `pd`, `pp`
+  三组, 每组按 `eta1, eta2, eta3, eta4` 排列。
+
+公式:
+- `eta1`: `D_i H_j`。
+- `eta2`: `n_i_sigma h_i_-sigma n_j_-sigma h_j_sigma`。
+- `eta3`: `D_i n_j_-sigma h_j_sigma`。
+- `eta4`: `n_i_sigma h_i_-sigma H_j`。
+"""
+function build_column_directed_emery_backflow(
+    dp_source_bonds::Vector{Tuple{Int,Int}},
+    dp_source_amplitudes::Vector{Float64},
+    pd_source_bonds::Vector{Tuple{Int,Int}},
+    pd_source_amplitudes::Vector{Float64},
+    pp_source_bonds::Vector{Tuple{Int,Int}},
+    pp_source_amplitudes::Vector{Float64},
+    bf_epsilon::Float64,
+    bf_eta1_dp::Float64,
+    bf_eta2_dp::Float64,
+    bf_eta3_dp::Float64,
+    bf_eta4_dp::Float64,
+    bf_eta1_pd::Float64,
+    bf_eta2_pd::Float64,
+    bf_eta3_pd::Float64,
+    bf_eta4_pd::Float64,
+    bf_eta1_pp::Float64,
+    bf_eta2_pp::Float64,
+    bf_eta3_pp::Float64,
+    bf_eta4_pp::Float64,
+)
+    all_source_bonds = vcat(dp_source_bonds, pd_source_bonds, pp_source_bonds)
+    all_source_amplitudes = vcat(dp_source_amplitudes, pd_source_amplitudes, pp_source_amplitudes)
+    return CompositeBackflowTerm([
+        BackflowEpsilonTerm(
+            param_name=:bf_epsilon,
+            epsilon_bf=bf_epsilon,
+            epsilon_mask_terms=Symbol[:eta1, :eta2, :eta3_doublon_single, :eta4],
+            source_bonds=all_source_bonds,
+            source_amplitudes=all_source_amplitudes,
+        ),
+        BackflowEta1DoublonHoleTerm(
+            param_name=:bf_eta1_dp,
+            eta1_bf=bf_eta1_dp,
+            source_bonds=dp_source_bonds,
+            source_amplitudes=dp_source_amplitudes,
+        ),
+        BackflowEta2SpinExchangeTerm(
+            param_name=:bf_eta2_dp,
+            eta2_bf=bf_eta2_dp,
+            source_bonds=dp_source_bonds,
+            source_amplitudes=dp_source_amplitudes,
+        ),
+        BackflowEta3DoublonSingleTerm(
+            param_name=:bf_eta3_dp,
+            eta3_bf=bf_eta3_dp,
+            source_bonds=dp_source_bonds,
+            source_amplitudes=dp_source_amplitudes,
+        ),
+        BackflowEta4SingleHoleTerm(
+            param_name=:bf_eta4_dp,
+            eta4_bf=bf_eta4_dp,
+            source_bonds=dp_source_bonds,
+            source_amplitudes=dp_source_amplitudes,
+        ),
+        BackflowEta1DoublonHoleTerm(
+            param_name=:bf_eta1_pd,
+            eta1_bf=bf_eta1_pd,
+            source_bonds=pd_source_bonds,
+            source_amplitudes=pd_source_amplitudes,
+        ),
+        BackflowEta2SpinExchangeTerm(
+            param_name=:bf_eta2_pd,
+            eta2_bf=bf_eta2_pd,
+            source_bonds=pd_source_bonds,
+            source_amplitudes=pd_source_amplitudes,
+        ),
+        BackflowEta3DoublonSingleTerm(
+            param_name=:bf_eta3_pd,
+            eta3_bf=bf_eta3_pd,
+            source_bonds=pd_source_bonds,
+            source_amplitudes=pd_source_amplitudes,
+        ),
+        BackflowEta4SingleHoleTerm(
+            param_name=:bf_eta4_pd,
+            eta4_bf=bf_eta4_pd,
+            source_bonds=pd_source_bonds,
+            source_amplitudes=pd_source_amplitudes,
+        ),
+        BackflowEta1DoublonHoleTerm(
+            param_name=:bf_eta1_pp,
+            eta1_bf=bf_eta1_pp,
+            source_bonds=pp_source_bonds,
+            source_amplitudes=pp_source_amplitudes,
+        ),
+        BackflowEta2SpinExchangeTerm(
+            param_name=:bf_eta2_pp,
+            eta2_bf=bf_eta2_pp,
+            source_bonds=pp_source_bonds,
+            source_amplitudes=pp_source_amplitudes,
+        ),
+        BackflowEta3DoublonSingleTerm(
+            param_name=:bf_eta3_pp,
+            eta3_bf=bf_eta3_pp,
+            source_bonds=pp_source_bonds,
+            source_amplitudes=pp_source_amplitudes,
+        ),
+        BackflowEta4SingleHoleTerm(
+            param_name=:bf_eta4_pp,
+            eta4_bf=bf_eta4_pp,
+            source_bonds=pp_source_bonds,
+            source_amplitudes=pp_source_amplitudes,
+        ),
+    ])
+end
+
+"""
 用途: 根据开关构造 column nonPH backflow 对象。
 
 参数:
@@ -1392,6 +1679,65 @@ function build_column_optional_decoupled_emery_backflow(
 end
 
 """
+用途: 根据开关构造 Emery `dp/pd/pp` directed split backflow 对象。
+
+参数:
+- `enable_backflow::Bool`: 是否启用 backflow。
+- `dp/pd/pp_source_bonds, dp/pd/pp_source_amplitudes`: directed orbital class source 数据。
+- 其余参数同 `build_column_directed_emery_backflow`。
+
+返回:
+- `AbstractBackflowTerm`: 关闭时为 `NoBackflowTerm()`, 开启时为 directed split `CompositeBackflowTerm`。
+"""
+function build_column_optional_directed_emery_backflow(
+    enable_backflow::Bool,
+    dp_source_bonds::Vector{Tuple{Int,Int}},
+    dp_source_amplitudes::Vector{Float64},
+    pd_source_bonds::Vector{Tuple{Int,Int}},
+    pd_source_amplitudes::Vector{Float64},
+    pp_source_bonds::Vector{Tuple{Int,Int}},
+    pp_source_amplitudes::Vector{Float64},
+    bf_epsilon::Float64,
+    bf_eta1_dp::Float64,
+    bf_eta2_dp::Float64,
+    bf_eta3_dp::Float64,
+    bf_eta4_dp::Float64,
+    bf_eta1_pd::Float64,
+    bf_eta2_pd::Float64,
+    bf_eta3_pd::Float64,
+    bf_eta4_pd::Float64,
+    bf_eta1_pp::Float64,
+    bf_eta2_pp::Float64,
+    bf_eta3_pp::Float64,
+    bf_eta4_pp::Float64,
+)
+    if !enable_backflow
+        return NoBackflowTerm()
+    end
+    return build_column_directed_emery_backflow(
+        dp_source_bonds,
+        dp_source_amplitudes,
+        pd_source_bonds,
+        pd_source_amplitudes,
+        pp_source_bonds,
+        pp_source_amplitudes,
+        bf_epsilon,
+        bf_eta1_dp,
+        bf_eta2_dp,
+        bf_eta3_dp,
+        bf_eta4_dp,
+        bf_eta1_pd,
+        bf_eta2_pd,
+        bf_eta3_pd,
+        bf_eta4_pd,
+        bf_eta1_pp,
+        bf_eta2_pp,
+        bf_eta3_pp,
+        bf_eta4_pp,
+    )
+end
+
+"""
 用途: 解析布尔命令行字符串。
 
 参数:
@@ -1429,6 +1775,69 @@ function resolve_decoupled_backflow_initial_value(
 end
 
 """
+用途: 从一组候选 backflow 初值中选择第一个非 `NaN` 的值。
+
+参数:
+- `candidate_values::Float64...`: 按优先级排列的候选初值。
+
+返回:
+- `Float64`: 第一个非 `NaN` 的候选值。若全部为 `NaN`, 返回 `NaN`。
+"""
+function first_non_nan_backflow_initial_value(candidate_values::Float64...)::Float64
+    for candidate_value in candidate_values
+        if !isnan(candidate_value)
+            return candidate_value
+        end
+    end
+    return NaN
+end
+
+"""
+用途: 返回当前参数名对应的旧 JSON 参数名候选列表。
+
+参数:
+- `param_name::Symbol`: 当前 ansatz 的参数名。
+
+返回:
+- `Vector{String}`: 按优先级排列的 fallback key 列表。
+
+兼容规则:
+- 新的 `pd` 方向优先继承旧的 `dp` 参数, 因为旧 `dp` 组曾同时包含
+  `d -> p` 与 `p -> d` 两个方向。
+- 新的 `eta4` 优先继承同 class 的旧 `eta3`, 因为旧 mixed `eta3`
+  等价于 split `eta3 + eta4` 共用同一个初值。
+"""
+function column_backflow_json_fallback_keys(param_name::Symbol)::Vector{String}
+    key = String(param_name)
+    if key == "bf_eta1_dp"
+        return ["bf_eta1"]
+    elseif key == "bf_eta2_dp"
+        return ["bf_eta2"]
+    elseif key == "bf_eta3_dp"
+        return ["bf_eta3"]
+    elseif key == "bf_eta4_dp"
+        return ["bf_eta4", "bf_eta3_dp", "bf_eta3"]
+    elseif key == "bf_eta1_pd"
+        return ["bf_eta1_dp", "bf_eta1"]
+    elseif key == "bf_eta2_pd"
+        return ["bf_eta2_dp", "bf_eta2"]
+    elseif key == "bf_eta3_pd"
+        return ["bf_eta3_dp", "bf_eta3"]
+    elseif key == "bf_eta4_pd"
+        return ["bf_eta4_pd", "bf_eta4_dp", "bf_eta4", "bf_eta3_dp", "bf_eta3"]
+    elseif key == "bf_eta1_pp"
+        return ["bf_eta1"]
+    elseif key == "bf_eta2_pp"
+        return ["bf_eta2"]
+    elseif key == "bf_eta3_pp"
+        return ["bf_eta3"]
+    elseif key == "bf_eta4_pp"
+        return ["bf_eta4", "bf_eta3_pp", "bf_eta3"]
+    end
+    return String[]
+end
+
+"""
 用途: 从 JSON 构造初始参数, 并兼容旧的共享 backflow 参数名。
 
 参数:
@@ -1439,8 +1848,8 @@ end
 - `Vector{Float64}`: 按 `param_names` 顺序排列的初始参数。
 
 兼容规则:
-- 若当前需要 `bf_eta1_dp` 或 `bf_eta1_pp`, 但 JSON 中缺失, 则尝试读取旧键 `bf_eta1`。
-- `bf_eta2_*` 和 `bf_eta3_*` 同理。
+- 新 directed `dp/pd/pp` 参数缺失时, 按 `column_backflow_json_fallback_keys`
+  使用旧共享参数或旧 `dp/pp` 解耦参数。
 """
 function build_column_init_params_from_json(
     json_path::AbstractString,
@@ -1453,22 +1862,22 @@ function build_column_init_params_from_json(
 
     for param_name in param_names
         key = String(param_name)
-        fallback_key = if key in ("bf_eta1_dp", "bf_eta1_pp")
-            "bf_eta1"
-        elseif key in ("bf_eta2_dp", "bf_eta2_pp")
-            "bf_eta2"
-        elseif key in ("bf_eta3_dp", "bf_eta3_pp")
-            "bf_eta3"
-        else
-            ""
-        end
 
         if haskey(raw_dict, key)
             push!(init_params, Float64(raw_dict[key]))
-        elseif !isempty(fallback_key) && haskey(raw_dict, fallback_key)
-            push!(init_params, Float64(raw_dict[fallback_key]))
         else
-            push!(missing_keys, key)
+            fallback_value = nothing
+            for fallback_key in column_backflow_json_fallback_keys(param_name)
+                if haskey(raw_dict, fallback_key)
+                    fallback_value = Float64(raw_dict[fallback_key])
+                    break
+                end
+            end
+            if fallback_value === nothing
+                push!(missing_keys, key)
+            else
+                push!(init_params, fallback_value)
+            end
         end
     end
 
@@ -1808,6 +2217,9 @@ function parse_column_bf_commandline()
         "--bf_eta3"
         arg_type = Float64
         default = 0.0
+        "--bf_eta4"
+        arg_type = Float64
+        default = NaN
         "--bf_eta1_dp"
         arg_type = Float64
         default = NaN
@@ -1817,6 +2229,21 @@ function parse_column_bf_commandline()
         "--bf_eta3_dp"
         arg_type = Float64
         default = NaN
+        "--bf_eta4_dp"
+        arg_type = Float64
+        default = NaN
+        "--bf_eta1_pd"
+        arg_type = Float64
+        default = NaN
+        "--bf_eta2_pd"
+        arg_type = Float64
+        default = NaN
+        "--bf_eta3_pd"
+        arg_type = Float64
+        default = NaN
+        "--bf_eta4_pd"
+        arg_type = Float64
+        default = NaN
         "--bf_eta1_pp"
         arg_type = Float64
         default = NaN
@@ -1824,6 +2251,9 @@ function parse_column_bf_commandline()
         arg_type = Float64
         default = NaN
         "--bf_eta3_pp"
+        arg_type = Float64
+        default = NaN
+        "--bf_eta4_pp"
         arg_type = Float64
         default = NaN
     end
@@ -1886,27 +2316,39 @@ function main_column_nonph_backflow()::Nothing
         seed=args["seed"] + rank,
     )
 
-    dp_source_bonds, dp_source_amplitudes, pp_source_bonds, pp_source_amplitudes =
-        build_emery_backflow_source_data_by_bond_type(
+    dp_source_bonds,
+    dp_source_amplitudes,
+    pd_source_bonds,
+    pd_source_amplitudes,
+    pp_source_bonds,
+    pp_source_amplitudes = build_emery_backflow_source_data_by_directed_orbital_type(
         lx,
         ly;
         tpd=args["tpd"],
         tpp=args["tpp"],
         bcy=bcy,
     )
-    backflow = build_column_optional_decoupled_emery_backflow(
+    backflow = build_column_optional_directed_emery_backflow(
         parse_column_bool_flag(args["enable_backflow"], "--enable_backflow"),
         dp_source_bonds,
         dp_source_amplitudes,
+        pd_source_bonds,
+        pd_source_amplitudes,
         pp_source_bonds,
         pp_source_amplitudes,
         args["bf_epsilon"],
-        resolve_decoupled_backflow_initial_value(args["bf_eta1_dp"], args["bf_eta1"]),
-        resolve_decoupled_backflow_initial_value(args["bf_eta2_dp"], args["bf_eta2"]),
-        resolve_decoupled_backflow_initial_value(args["bf_eta3_dp"], args["bf_eta3"]),
-        resolve_decoupled_backflow_initial_value(args["bf_eta1_pp"], args["bf_eta1"]),
-        resolve_decoupled_backflow_initial_value(args["bf_eta2_pp"], args["bf_eta2"]),
-        resolve_decoupled_backflow_initial_value(args["bf_eta3_pp"], args["bf_eta3"]),
+        first_non_nan_backflow_initial_value(args["bf_eta1_dp"], args["bf_eta1"]),
+        first_non_nan_backflow_initial_value(args["bf_eta2_dp"], args["bf_eta2"]),
+        first_non_nan_backflow_initial_value(args["bf_eta3_dp"], args["bf_eta3"]),
+        first_non_nan_backflow_initial_value(args["bf_eta4_dp"], args["bf_eta4"], args["bf_eta3_dp"], args["bf_eta3"]),
+        first_non_nan_backflow_initial_value(args["bf_eta1_pd"], args["bf_eta1_dp"], args["bf_eta1"]),
+        first_non_nan_backflow_initial_value(args["bf_eta2_pd"], args["bf_eta2_dp"], args["bf_eta2"]),
+        first_non_nan_backflow_initial_value(args["bf_eta3_pd"], args["bf_eta3_dp"], args["bf_eta3"]),
+        first_non_nan_backflow_initial_value(args["bf_eta4_pd"], args["bf_eta4_dp"], args["bf_eta4"], args["bf_eta3_dp"], args["bf_eta3"]),
+        first_non_nan_backflow_initial_value(args["bf_eta1_pp"], args["bf_eta1"]),
+        first_non_nan_backflow_initial_value(args["bf_eta2_pp"], args["bf_eta2"]),
+        first_non_nan_backflow_initial_value(args["bf_eta3_pp"], args["bf_eta3"]),
+        first_non_nan_backflow_initial_value(args["bf_eta4_pp"], args["bf_eta4"], args["bf_eta3_pp"], args["bf_eta3"]),
     )
     projector = build_emery_density_jastrow_projector(
         lx,

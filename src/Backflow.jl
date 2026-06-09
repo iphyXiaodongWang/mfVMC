@@ -7,6 +7,7 @@ export NoBackflowTerm
 export CompositeBackflowTerm
 export BackflowEpsilonTerm, BackflowEta1DoublonHoleTerm
 export BackflowEta2SpinExchangeTerm, BackflowEta3MixedVirtualHopTerm
+export BackflowEta3DoublonSingleTerm, BackflowEta4SingleHoleTerm
 export uses_backflow
 export backflow_param_names, backflow_param_values, backflow_param_count
 export update_backflow_params!
@@ -52,7 +53,7 @@ export build_backflow_derivative_orbitals
 abstract type AbstractBackflowTerm end
 abstract type AbstractBackflowCorrectionTerm end
 
-const BACKFLOW_EPSILON_MASK_TERMS = (:eta1, :eta2, :eta3)
+const BACKFLOW_EPSILON_MASK_TERMS = (:eta1, :eta2, :eta3, :eta3_doublon_single, :eta4, :eta4_single_hole)
 
 
 """
@@ -105,7 +106,7 @@ function normalize_backflow_epsilon_mask_terms(
     normalized_terms = Symbol[]
     for mask_term in epsilon_mask_terms
         if !(mask_term in BACKFLOW_EPSILON_MASK_TERMS)
-            error("Unknown epsilon mask term $(mask_term). Allowed terms are :eta1, :eta2, and :eta3.")
+            error("Unknown epsilon mask term $(mask_term). Allowed terms are :eta1, :eta2, :eta3, :eta3_doublon_single, :eta4, and :eta4_single_hole.")
         end
         if !(mask_term in normalized_terms)
             push!(normalized_terms, mask_term)
@@ -260,6 +261,52 @@ mutable struct BackflowEta3MixedVirtualHopTerm <: AbstractBackflowCorrectionTerm
 end
 
 """
+用途: 三带 Emery split backflow 中的 `eta3` doublon-single correction term。
+
+数学公式:
+- `delta U_eta3(i, sigma) = eta3_bf * sum_j t_ij *
+   D_i n_j_-sigma h_j_sigma * U_0(j, sigma)`。
+
+字段:
+- `param_name::Symbol`: 参数名。
+- `eta3_bf::Float64`: split `eta3` 参数值。
+- `source_bonds::Vector{Tuple{Int, Int}}`: 有向键 `(i, j)` 列表。
+- `source_amplitudes::Vector{Float64}`: 与有向键对齐的 hopping 振幅。
+"""
+mutable struct BackflowEta3DoublonSingleTerm <: AbstractBackflowCorrectionTerm
+    param_name::Symbol
+    eta3_bf::Float64
+    source_bonds::Vector{Tuple{Int, Int}}
+    source_amplitudes::Vector{Float64}
+    source_data_signature::UInt
+    outgoing_bond_indices_by_source::Vector{Vector{Int}}
+    incoming_source_sites_by_target::Vector{Vector{Int}}
+end
+
+"""
+用途: 三带 Emery split backflow 中的 `eta4` single-hole correction term。
+
+数学公式:
+- `delta U_eta4(i, sigma) = eta4_bf * sum_j t_ij *
+   n_i_sigma h_i_-sigma H_j * U_0(j, sigma)`。
+
+字段:
+- `param_name::Symbol`: 参数名。
+- `eta4_bf::Float64`: split `eta4` 参数值。
+- `source_bonds::Vector{Tuple{Int, Int}}`: 有向键 `(i, j)` 列表。
+- `source_amplitudes::Vector{Float64}`: 与有向键对齐的 hopping 振幅。
+"""
+mutable struct BackflowEta4SingleHoleTerm <: AbstractBackflowCorrectionTerm
+    param_name::Symbol
+    eta4_bf::Float64
+    source_bonds::Vector{Tuple{Int, Int}}
+    source_amplitudes::Vector{Float64}
+    source_data_signature::UInt
+    outgoing_bond_indices_by_source::Vector{Vector{Int}}
+    incoming_source_sites_by_target::Vector{Vector{Int}}
+end
+
+"""
 用途: 合并多个 backflow correction term 的 incoming source graph。
 
 参数:
@@ -337,6 +384,40 @@ function has_shared_backflow_source_data(
         end
     end
     return true
+end
+
+"""
+用途: 判断单个 correction term 是否被 shared-source fused 局域快路径支持。
+
+参数:
+- `correction_term::AbstractBackflowCorrectionTerm`: 待判断的 backflow correction term。
+
+返回:
+- `Bool`: 只有旧 Eq.(5) 的 `epsilon/eta1/eta2/mixed eta3` 返回 `true`。
+"""
+function supports_shared_source_fused_site_block(
+    correction_term::AbstractBackflowCorrectionTerm,
+)::Bool
+    return correction_term isa BackflowEpsilonTerm ||
+           correction_term isa BackflowEta1DoublonHoleTerm ||
+           correction_term isa BackflowEta2SpinExchangeTerm ||
+           correction_term isa BackflowEta3MixedVirtualHopTerm
+end
+
+"""
+用途: 判断 composite backflow 是否可以使用 shared-source fused 局域快路径。
+
+参数:
+- `backflow_term::CompositeBackflowTerm`: 组合式 backflow 对象。
+
+返回:
+- `Bool`: source 数据共享且所有 term 都属于旧 Eq.(5) fused 支持集合时返回 `true`。
+"""
+function can_use_shared_source_fused_site_block(
+    backflow_term,
+)::Bool
+    return backflow_term.has_shared_source_data &&
+           all(supports_shared_source_fused_site_block, backflow_term.terms)
 end
 
 """
@@ -535,6 +616,66 @@ function BackflowEta3MixedVirtualHopTerm(;
     )
 end
 
+"""
+用途: 构造 split 版本的 `eta3` doublon-single backflow correction term。
+
+参数:
+- `param_name::Symbol`: 参数名, 默认 `:bf_eta3`。
+- `eta3_bf::Real`: split `eta3` 参数值。
+- `source_bonds::Vector{Tuple{Int, Int}}`: 有向键 `(i, j)` 列表。
+- `source_amplitudes::Vector{<:Real}`: 每条有向键对应的 hopping 振幅。
+
+返回:
+- `BackflowEta3DoublonSingleTerm`: 带 source 缓存的 correction term。
+"""
+function BackflowEta3DoublonSingleTerm(;
+    param_name::Symbol=:bf_eta3,
+    eta3_bf::Real=0.0,
+    source_bonds::Vector{Tuple{Int, Int}}=Tuple{Int, Int}[],
+    source_amplitudes::Vector{<:Real}=ones(Float64, length(source_bonds)),
+)
+    source_cache = build_backflow_correction_source_cache(source_bonds, source_amplitudes)
+    return BackflowEta3DoublonSingleTerm(
+        param_name,
+        Float64(eta3_bf),
+        source_cache.source_bonds,
+        source_cache.source_amplitudes,
+        source_cache.source_data_signature,
+        source_cache.outgoing_bond_indices_by_source,
+        source_cache.incoming_source_sites_by_target,
+    )
+end
+
+"""
+用途: 构造 split 版本的 `eta4` single-hole backflow correction term。
+
+参数:
+- `param_name::Symbol`: 参数名, 默认 `:bf_eta4`。
+- `eta4_bf::Real`: split `eta4` 参数值。
+- `source_bonds::Vector{Tuple{Int, Int}}`: 有向键 `(i, j)` 列表。
+- `source_amplitudes::Vector{<:Real}`: 每条有向键对应的 hopping 振幅。
+
+返回:
+- `BackflowEta4SingleHoleTerm`: 带 source 缓存的 correction term。
+"""
+function BackflowEta4SingleHoleTerm(;
+    param_name::Symbol=:bf_eta4,
+    eta4_bf::Real=0.0,
+    source_bonds::Vector{Tuple{Int, Int}}=Tuple{Int, Int}[],
+    source_amplitudes::Vector{<:Real}=ones(Float64, length(source_bonds)),
+)
+    source_cache = build_backflow_correction_source_cache(source_bonds, source_amplitudes)
+    return BackflowEta4SingleHoleTerm(
+        param_name,
+        Float64(eta4_bf),
+        source_cache.source_bonds,
+        source_cache.source_amplitudes,
+        source_cache.source_data_signature,
+        source_cache.outgoing_bond_indices_by_source,
+        source_cache.incoming_source_sites_by_target,
+    )
+end
+
 
 """
 用途: 判断是否真的启用了非平凡 backflow。
@@ -579,6 +720,12 @@ function backflow_correction_param_value(correction_term::BackflowEta2SpinExchan
 end
 function backflow_correction_param_value(correction_term::BackflowEta3MixedVirtualHopTerm)::Float64
     return correction_term.eta3_bf
+end
+function backflow_correction_param_value(correction_term::BackflowEta3DoublonSingleTerm)::Float64
+    return correction_term.eta3_bf
+end
+function backflow_correction_param_value(correction_term::BackflowEta4SingleHoleTerm)::Float64
+    return correction_term.eta4_bf
 end
 
 
@@ -928,6 +1075,106 @@ function add_backflow_correction_site_block_after_proposal!(
 end
 
 """
+用途: 将 split `eta3` doublon-single correction term 在 proposal 后对单个站点行块的贡献累加到 buffer。
+
+数学公式:
+- `delta U_eta3(i, sigma; x') = eta3_bf * sum_j t_ij *
+   D_i(x') n_{j,-sigma}(x') h_{j,sigma}(x') U_0(j, sigma)`。
+
+参数:
+- `site_block_buffer::AbstractMatrix{T}`: 待累加的 `2 x N_orb` 站点行块。
+- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
+- `state_vector::Vector{Int8}`: proposal 提交前的构型状态数组。
+- `correction_term::BackflowEta3DoublonSingleTerm`: split `eta3` correction term。
+- `proposal::MoveProposal`: Monte Carlo proposal。
+- `site_index::Int`: 待写入的站点编号。
+
+返回:
+- `nothing`。
+"""
+function add_backflow_correction_site_block_after_proposal!(
+    site_block_buffer::AbstractMatrix{T},
+    base_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    correction_term::BackflowEta3DoublonSingleTerm,
+    proposal::MoveProposal,
+    site_index::Int,
+) where {T}
+    if site_index > length(correction_term.outgoing_bond_indices_by_source)
+        return nothing
+    end
+
+    state_i = get_site_state_after_proposal(state_vector, proposal, site_index)
+    eta3_value = T(correction_term.eta3_bf)
+    for bond_index in correction_term.outgoing_bond_indices_by_source[site_index]
+        (_, target_site) = correction_term.source_bonds[bond_index]
+        state_j = get_site_state_after_proposal(state_vector, proposal, target_site)
+        bond_amplitude = T(correction_term.source_amplitudes[bond_index])
+        for row_offset in 1:2
+            spin = backflow_spin_from_row_offset(row_offset)
+            eta3_factor = compute_eta3_doublon_single_factor(state_i, state_j, spin)
+            if eta3_factor == 0.0
+                continue
+            end
+            target_row = 2 * (target_site - 1) + row_offset
+            @views site_block_buffer[row_offset, :] .+= eta3_value * bond_amplitude * T(eta3_factor) .* base_orbitals[target_row, :]
+        end
+    end
+
+    return nothing
+end
+
+"""
+用途: 将 split `eta4` single-hole correction term 在 proposal 后对单个站点行块的贡献累加到 buffer。
+
+数学公式:
+- `delta U_eta4(i, sigma; x') = eta4_bf * sum_j t_ij *
+   n_{i,sigma}(x') h_{i,-sigma}(x') H_j(x') U_0(j, sigma)`。
+
+参数:
+- `site_block_buffer::AbstractMatrix{T}`: 待累加的 `2 x N_orb` 站点行块。
+- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
+- `state_vector::Vector{Int8}`: proposal 提交前的构型状态数组。
+- `correction_term::BackflowEta4SingleHoleTerm`: split `eta4` correction term。
+- `proposal::MoveProposal`: Monte Carlo proposal。
+- `site_index::Int`: 待写入的站点编号。
+
+返回:
+- `nothing`。
+"""
+function add_backflow_correction_site_block_after_proposal!(
+    site_block_buffer::AbstractMatrix{T},
+    base_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    correction_term::BackflowEta4SingleHoleTerm,
+    proposal::MoveProposal,
+    site_index::Int,
+) where {T}
+    if site_index > length(correction_term.outgoing_bond_indices_by_source)
+        return nothing
+    end
+
+    state_i = get_site_state_after_proposal(state_vector, proposal, site_index)
+    eta4_value = T(correction_term.eta4_bf)
+    for bond_index in correction_term.outgoing_bond_indices_by_source[site_index]
+        (_, target_site) = correction_term.source_bonds[bond_index]
+        state_j = get_site_state_after_proposal(state_vector, proposal, target_site)
+        bond_amplitude = T(correction_term.source_amplitudes[bond_index])
+        for row_offset in 1:2
+            spin = backflow_spin_from_row_offset(row_offset)
+            eta4_factor = compute_eta4_single_hole_factor(state_i, state_j, spin)
+            if eta4_factor == 0.0
+                continue
+            end
+            target_row = 2 * (target_site - 1) + row_offset
+            @views site_block_buffer[row_offset, :] .+= eta4_value * bond_amplitude * T(eta4_factor) .* base_orbitals[target_row, :]
+        end
+    end
+
+    return nothing
+end
+
+"""
 用途: 校验局域 site block 尺寸并写入裸轨道基准行。
 
 参数:
@@ -1150,7 +1397,7 @@ function fill_backflow_site_block_after_proposal!(
     proposal::MoveProposal,
     site_index::Int,
 ) where {T}
-    if backflow_term.has_shared_source_data
+    if can_use_shared_source_fused_site_block(backflow_term)
         return fill_shared_source_composite_site_block_after_proposal!(
             site_block_buffer,
             base_orbitals,
@@ -1260,6 +1507,28 @@ function update_backflow_correction_param!(
         return false
     end
     correction_term.eta3_bf = Float64(param_value)
+    return true
+end
+function update_backflow_correction_param!(
+    correction_term::BackflowEta3DoublonSingleTerm,
+    param_name::Symbol,
+    param_value::Real,
+)::Bool
+    if param_name != correction_term.param_name
+        return false
+    end
+    correction_term.eta3_bf = Float64(param_value)
+    return true
+end
+function update_backflow_correction_param!(
+    correction_term::BackflowEta4SingleHoleTerm,
+    param_name::Symbol,
+    param_value::Real,
+)::Bool
+    if param_name != correction_term.param_name
+        return false
+    end
+    correction_term.eta4_bf = Float64(param_value)
     return true
 end
 
@@ -1493,11 +1762,56 @@ function compute_eta3_virtual_hopping_factor(
     state_j::Int8,
     spin::Int8,
 )::Float64
+    return compute_eta3_doublon_single_factor(state_i, state_j, spin) +
+           compute_eta4_single_hole_factor(state_i, state_j, spin)
+end
+
+"""
+用途: 计算 split Eq.(5) 中 `eta3` 对给定 `(i, j, sigma)` 的 doublon-single 因子。
+
+数学公式:
+- `eta3_factor = D_i n_{j,-sigma} h_{j,sigma}`。
+
+参数:
+- `state_i::Int8`: source site `i` 的物理状态编码。
+- `state_j::Int8`: target site `j` 的物理状态编码。
+- `spin::Int8`: 当前行对应的物理自旋 `sigma`。
+
+返回:
+- `Float64`: 因子取值, 当前实现中为 `0.0` 或 `1.0`。
+"""
+function compute_eta3_doublon_single_factor(
+    state_i::Int8,
+    state_j::Int8,
+    spin::Int8,
+)::Float64
     opposite_spin = backflow_opposite_spin(spin)
     return (state_i == DB ? 1.0 : 0.0) *
            backflow_n_sigma(state_j, opposite_spin) *
-           backflow_h_sigma(state_j, spin) +
-           backflow_n_sigma(state_i, spin) *
+           backflow_h_sigma(state_j, spin)
+end
+
+"""
+用途: 计算 split Eq.(5) 中 `eta4` 对给定 `(i, j, sigma)` 的 single-hole 因子。
+
+数学公式:
+- `eta4_factor = n_{i,sigma} h_{i,-sigma} H_j`。
+
+参数:
+- `state_i::Int8`: source site `i` 的物理状态编码。
+- `state_j::Int8`: target site `j` 的物理状态编码。
+- `spin::Int8`: 当前行对应的物理自旋 `sigma`。
+
+返回:
+- `Float64`: 因子取值, 当前实现中为 `0.0` 或 `1.0`。
+"""
+function compute_eta4_single_hole_factor(
+    state_i::Int8,
+    state_j::Int8,
+    spin::Int8,
+)::Float64
+    opposite_spin = backflow_opposite_spin(spin)
+    return backflow_n_sigma(state_i, spin) *
            backflow_h_sigma(state_i, opposite_spin) *
            (state_j == HOLE ? 1.0 : 0.0)
 end
@@ -1538,6 +1852,14 @@ function is_backflow_epsilon_row_active(
             end
         elseif mask_term == :eta3
             if compute_eta3_virtual_hopping_factor(state_i, state_j, spin) != 0.0
+                return true
+            end
+        elseif mask_term == :eta3_doublon_single
+            if compute_eta3_doublon_single_factor(state_i, state_j, spin) != 0.0
+                return true
+            end
+        elseif mask_term == :eta4 || mask_term == :eta4_single_hole
+            if compute_eta4_single_hole_factor(state_i, state_j, spin) != 0.0
                 return true
             end
         else
@@ -1750,6 +2072,92 @@ function add_backflow_correction_orbitals!(
             row_i = 2 * (site_i - 1) + row_offset
             row_j = 2 * (site_j - 1) + row_offset
             @views backflow_orbitals[row_i, :] .+= eta3_value * bond_amplitude * T(eta3_factor) .* base_orbitals[row_j, :]
+        end
+    end
+
+    return nothing
+end
+
+"""
+用途: 将 split `eta3` doublon-single correction term 加到 backflow 轨道矩阵。
+
+数学公式:
+- `delta U_eta3(i, sigma) = eta3_bf * sum_j t_ij *
+   D_i n_j_-sigma h_j_sigma * U_0(j, sigma)`。
+
+参数:
+- `backflow_orbitals::AbstractMatrix{T}`: 待累加的 backflow 轨道矩阵。
+- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵。
+- `state_vector::Vector{Int8}`: 当前构型。
+- `correction_term::BackflowEta3DoublonSingleTerm`: split `eta3` correction term。
+
+返回:
+- `nothing`。
+"""
+function add_backflow_correction_orbitals!(
+    backflow_orbitals::AbstractMatrix{T},
+    base_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    correction_term::BackflowEta3DoublonSingleTerm,
+) where {T}
+    validate_backflow_correction_source_data!(correction_term)
+    eta3_value = T(correction_term.eta3_bf)
+    for (bond_index, (site_i, site_j)) in enumerate(correction_term.source_bonds)
+        state_i = state_vector[site_i]
+        state_j = state_vector[site_j]
+        bond_amplitude = T(correction_term.source_amplitudes[bond_index])
+        for row_offset in 1:2
+            spin = backflow_spin_from_row_offset(row_offset)
+            eta3_factor = compute_eta3_doublon_single_factor(state_i, state_j, spin)
+            if eta3_factor == 0.0
+                continue
+            end
+            row_i = 2 * (site_i - 1) + row_offset
+            row_j = 2 * (site_j - 1) + row_offset
+            @views backflow_orbitals[row_i, :] .+= eta3_value * bond_amplitude * T(eta3_factor) .* base_orbitals[row_j, :]
+        end
+    end
+
+    return nothing
+end
+
+"""
+用途: 将 split `eta4` single-hole correction term 加到 backflow 轨道矩阵。
+
+数学公式:
+- `delta U_eta4(i, sigma) = eta4_bf * sum_j t_ij *
+   n_i_sigma h_i_-sigma H_j * U_0(j, sigma)`。
+
+参数:
+- `backflow_orbitals::AbstractMatrix{T}`: 待累加的 backflow 轨道矩阵。
+- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵。
+- `state_vector::Vector{Int8}`: 当前构型。
+- `correction_term::BackflowEta4SingleHoleTerm`: split `eta4` correction term。
+
+返回:
+- `nothing`。
+"""
+function add_backflow_correction_orbitals!(
+    backflow_orbitals::AbstractMatrix{T},
+    base_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    correction_term::BackflowEta4SingleHoleTerm,
+) where {T}
+    validate_backflow_correction_source_data!(correction_term)
+    eta4_value = T(correction_term.eta4_bf)
+    for (bond_index, (site_i, site_j)) in enumerate(correction_term.source_bonds)
+        state_i = state_vector[site_i]
+        state_j = state_vector[site_j]
+        bond_amplitude = T(correction_term.source_amplitudes[bond_index])
+        for row_offset in 1:2
+            spin = backflow_spin_from_row_offset(row_offset)
+            eta4_factor = compute_eta4_single_hole_factor(state_i, state_j, spin)
+            if eta4_factor == 0.0
+                continue
+            end
+            row_i = 2 * (site_i - 1) + row_offset
+            row_j = 2 * (site_j - 1) + row_offset
+            @views backflow_orbitals[row_i, :] .+= eta4_value * bond_amplitude * T(eta4_factor) .* base_orbitals[row_j, :]
         end
     end
 
@@ -2056,6 +2464,90 @@ function add_backflow_correction_derivative_orbitals!(
             row_i = 2 * (site_i - 1) + row_offset
             row_j = 2 * (site_j - 1) + row_offset
             @views derivative_orbitals[row_i, :] .+= bond_amplitude * T(eta3_factor) .* base_orbitals[row_j, :]
+        end
+    end
+
+    return nothing
+end
+
+"""
+用途: 将 split `eta3` correction term 对 `eta3_bf` 的导数累加到导数轨道矩阵。
+
+数学公式:
+- `partial U_b(i, sigma) / partial eta3_bf =
+   sum_j t_ij * D_i n_j_-sigma h_j_sigma * U_0(j, sigma)`。
+
+参数:
+- `derivative_orbitals::AbstractMatrix{T}`: 待累加的导数轨道矩阵。
+- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
+- `state_vector::Vector{Int8}`: 当前 Monte Carlo 构型。
+- `correction_term::BackflowEta3DoublonSingleTerm`: split `eta3` correction term。
+
+返回:
+- `nothing`。
+"""
+function add_backflow_correction_derivative_orbitals!(
+    derivative_orbitals::AbstractMatrix{T},
+    base_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    correction_term::BackflowEta3DoublonSingleTerm,
+) where {T}
+    validate_backflow_correction_source_data!(correction_term)
+    for (bond_index, (site_i, site_j)) in enumerate(correction_term.source_bonds)
+        state_i = state_vector[site_i]
+        state_j = state_vector[site_j]
+        bond_amplitude = T(correction_term.source_amplitudes[bond_index])
+        for row_offset in 1:2
+            spin = backflow_spin_from_row_offset(row_offset)
+            eta3_factor = compute_eta3_doublon_single_factor(state_i, state_j, spin)
+            if eta3_factor == 0.0
+                continue
+            end
+            row_i = 2 * (site_i - 1) + row_offset
+            row_j = 2 * (site_j - 1) + row_offset
+            @views derivative_orbitals[row_i, :] .+= bond_amplitude * T(eta3_factor) .* base_orbitals[row_j, :]
+        end
+    end
+
+    return nothing
+end
+
+"""
+用途: 将 split `eta4` correction term 对 `eta4_bf` 的导数累加到导数轨道矩阵。
+
+数学公式:
+- `partial U_b(i, sigma) / partial eta4_bf =
+   sum_j t_ij * n_i_sigma h_i_-sigma H_j * U_0(j, sigma)`。
+
+参数:
+- `derivative_orbitals::AbstractMatrix{T}`: 待累加的导数轨道矩阵。
+- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
+- `state_vector::Vector{Int8}`: 当前 Monte Carlo 构型。
+- `correction_term::BackflowEta4SingleHoleTerm`: split `eta4` correction term。
+
+返回:
+- `nothing`。
+"""
+function add_backflow_correction_derivative_orbitals!(
+    derivative_orbitals::AbstractMatrix{T},
+    base_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    correction_term::BackflowEta4SingleHoleTerm,
+) where {T}
+    validate_backflow_correction_source_data!(correction_term)
+    for (bond_index, (site_i, site_j)) in enumerate(correction_term.source_bonds)
+        state_i = state_vector[site_i]
+        state_j = state_vector[site_j]
+        bond_amplitude = T(correction_term.source_amplitudes[bond_index])
+        for row_offset in 1:2
+            spin = backflow_spin_from_row_offset(row_offset)
+            eta4_factor = compute_eta4_single_hole_factor(state_i, state_j, spin)
+            if eta4_factor == 0.0
+                continue
+            end
+            row_i = 2 * (site_i - 1) + row_offset
+            row_j = 2 * (site_j - 1) + row_offset
+            @views derivative_orbitals[row_i, :] .+= bond_amplitude * T(eta4_factor) .* base_orbitals[row_j, :]
         end
     end
 
