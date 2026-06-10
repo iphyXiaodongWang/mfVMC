@@ -307,6 +307,25 @@ mutable struct BackflowEta4SingleHoleTerm <: AbstractBackflowCorrectionTerm
 end
 
 """
+用途: 缓存一个 directed split backflow 组内共享 source graph 的 `eta1/eta2/eta3/eta4` term。
+
+字段:
+- `suffix::Symbol`: directed 组名, 例如 `:dp`, `:pd`, `:pp`。
+- `eta1_term/eta2_term/eta3_term/eta4_term`: 该组内四个 split backflow correction term。
+
+说明:
+- 该结构只在 `CompositeBackflowTerm` 构造阶段建立一次, 用于避免 MCMC 热循环中反复通过
+  参数名字符串匹配查找同一组 term。
+"""
+struct DirectedSplitBackflowGroup
+    suffix::Symbol
+    eta1_term::BackflowEta1DoublonHoleTerm
+    eta2_term::BackflowEta2SpinExchangeTerm
+    eta3_term::BackflowEta3DoublonSingleTerm
+    eta4_term::BackflowEta4SingleHoleTerm
+end
+
+"""
 用途: 合并多个 backflow correction term 的 incoming source graph。
 
 参数:
@@ -421,6 +440,144 @@ function can_use_shared_source_fused_site_block(
 end
 
 """
+用途: 判断参数名是否属于指定 directed backflow 后缀组。
+
+参数:
+- `param_name::Symbol`: backflow 参数名, 例如 `:bf_eta1_dp`。
+- `suffix::Symbol`: directed 组名, 例如 `:dp`, `:pd`, `:pp`。
+
+返回:
+- `Bool`: 参数名以 `_<suffix>` 结尾时返回 `true`。
+"""
+function backflow_param_name_has_suffix(param_name::Symbol, suffix::Symbol)::Bool
+    return endswith(String(param_name), "_" * String(suffix))
+end
+
+"""
+用途: 按 directed 后缀查找某一类 split backflow correction term。
+
+参数:
+- `term_type::Type{T}`: 目标 correction term 类型。
+- `terms::Vector{AbstractBackflowCorrectionTerm}`: composite 中的 term 列表。
+- `suffix::Symbol`: directed 组名, 例如 `:dp`, `:pd`, `:pp`。
+
+返回:
+- `Union{Nothing, T}`: 找到唯一匹配 term 时返回该 term, 否则返回 `nothing`。
+"""
+function find_composite_correction_term_by_suffix(
+    term_type::Type{T},
+    terms::Vector{AbstractBackflowCorrectionTerm},
+    suffix::Symbol,
+)::Union{Nothing,T} where {T<:AbstractBackflowCorrectionTerm}
+    matched_term = nothing
+    for correction_term in terms
+        if correction_term isa T && backflow_param_name_has_suffix(correction_term.param_name, suffix)
+            matched_term !== nothing && return nothing
+            matched_term = correction_term
+        end
+    end
+    return matched_term
+end
+
+"""
+用途: 从 term 列表中收集一个 directed split backflow 组内的 `eta1/eta2/eta3/eta4` term。
+
+参数:
+- `terms::Vector{AbstractBackflowCorrectionTerm}`: composite 中的 term 列表。
+- `suffix::Symbol`: directed 组名, 例如 `:dp`, `:pd`, `:pp`。
+
+返回:
+- `Union{Nothing, DirectedSplitBackflowGroup}`: 若四个 term 都存在且共享同一 source 数据,
+  返回缓存后的 directed group, 否则返回 `nothing`。
+"""
+function collect_directed_split_backflow_group(
+    terms::Vector{AbstractBackflowCorrectionTerm},
+    suffix::Symbol,
+)::Union{Nothing,DirectedSplitBackflowGroup}
+    eta1_term = find_composite_correction_term_by_suffix(
+        BackflowEta1DoublonHoleTerm,
+        terms,
+        suffix,
+    )
+    eta2_term = find_composite_correction_term_by_suffix(
+        BackflowEta2SpinExchangeTerm,
+        terms,
+        suffix,
+    )
+    eta3_term = find_composite_correction_term_by_suffix(
+        BackflowEta3DoublonSingleTerm,
+        terms,
+        suffix,
+    )
+    eta4_term = find_composite_correction_term_by_suffix(
+        BackflowEta4SingleHoleTerm,
+        terms,
+        suffix,
+    )
+    if eta1_term === nothing || eta2_term === nothing || eta3_term === nothing || eta4_term === nothing
+        return nothing
+    end
+
+    reference_signature = eta1_term.source_data_signature
+    if eta2_term.source_data_signature != reference_signature ||
+       eta3_term.source_data_signature != reference_signature ||
+       eta4_term.source_data_signature != reference_signature
+        return nothing
+    end
+
+    return DirectedSplitBackflowGroup(suffix, eta1_term, eta2_term, eta3_term, eta4_term)
+end
+
+"""
+用途: 在 `CompositeBackflowTerm` 构造阶段建立 directed split backflow 组缓存。
+
+参数:
+- `terms::Vector{AbstractBackflowCorrectionTerm}`: composite 中的 term 列表。
+
+返回:
+- `Tuple{Bool, Vector{DirectedSplitBackflowGroup}}`: 第一项表示是否可以使用 grouped fused
+  site-block path, 第二项为按 `dp/pd/pp` 顺序保存的组缓存。
+"""
+function build_directed_split_backflow_groups(
+    terms::Vector{AbstractBackflowCorrectionTerm},
+)::Tuple{Bool,Vector{DirectedSplitBackflowGroup}}
+    groups = DirectedSplitBackflowGroup[]
+    for suffix in (:dp, :pd, :pp)
+        group = collect_directed_split_backflow_group(terms, suffix)
+        group === nothing && return false, DirectedSplitBackflowGroup[]
+        push!(groups, group)
+    end
+
+    epsilon_count = count(correction_term -> correction_term isa BackflowEpsilonTerm, terms)
+    if epsilon_count > 1
+        return false, DirectedSplitBackflowGroup[]
+    end
+
+    expected_term_count = 4 * length(groups) + epsilon_count
+    if length(terms) != expected_term_count
+        return false, DirectedSplitBackflowGroup[]
+    end
+
+    return true, groups
+end
+
+"""
+用途: 判断 composite backflow 是否可以使用 directed grouped fused 局域快路径。
+
+参数:
+- `backflow_term::CompositeBackflowTerm`: 组合式 backflow 对象。
+
+返回:
+- `Bool`: 当对象由可选 `epsilon` 加上 `dp/pd/pp` 三组 split `eta1..eta4` 组成,
+  且每组内部 source 数据一致时返回 `true`。
+"""
+function can_use_grouped_source_fused_site_block(
+    backflow_term,
+)::Bool
+    return backflow_term.has_grouped_source_data
+end
+
+"""
 用途: 组合多个 Eq.(5) backflow correction terms。
 
 字段:
@@ -430,6 +587,8 @@ end
 - `has_shared_source_data::Bool`: 所有 correction terms 是否共享同一套 source 数据。
 - `shared_source_bonds, shared_source_amplitudes`: shared-source fast path 使用的有向键与振幅。
 - `shared_outgoing_bond_indices_by_source`: shared-source fast path 使用的 outgoing graph。
+- `has_grouped_source_data::Bool`: 是否存在可用于 directed grouped fused path 的 `dp/pd/pp` 组缓存。
+- `grouped_source_groups::Vector{DirectedSplitBackflowGroup}`: directed grouped fused path 使用的组缓存。
 """
 mutable struct CompositeBackflowTerm <: AbstractBackflowTerm
     terms::Vector{AbstractBackflowCorrectionTerm}
@@ -438,6 +597,8 @@ mutable struct CompositeBackflowTerm <: AbstractBackflowTerm
     shared_source_bonds::Vector{Tuple{Int,Int}}
     shared_source_amplitudes::Vector{Float64}
     shared_outgoing_bond_indices_by_source::Vector{Vector{Int}}
+    has_grouped_source_data::Bool
+    grouped_source_groups::Vector{DirectedSplitBackflowGroup}
     epsilon_term::Union{Nothing,BackflowEpsilonTerm}
     eta1_term::Union{Nothing,BackflowEta1DoublonHoleTerm}
     eta2_term::Union{Nothing,BackflowEta2SpinExchangeTerm}
@@ -448,6 +609,7 @@ mutable struct CompositeBackflowTerm <: AbstractBackflowTerm
         shared_source_bonds = has_shared_source_data ? term_list[1].source_bonds : Tuple{Int,Int}[]
         shared_source_amplitudes = has_shared_source_data ? term_list[1].source_amplitudes : Float64[]
         shared_outgoing_bond_indices_by_source = has_shared_source_data ? term_list[1].outgoing_bond_indices_by_source : Vector{Int}[]
+        has_grouped_source_data, grouped_source_groups = build_directed_split_backflow_groups(term_list)
         return new(
             term_list,
             build_composite_incoming_source_sites_by_target(term_list),
@@ -455,6 +617,8 @@ mutable struct CompositeBackflowTerm <: AbstractBackflowTerm
             shared_source_bonds,
             shared_source_amplitudes,
             shared_outgoing_bond_indices_by_source,
+            has_grouped_source_data,
+            grouped_source_groups,
             find_composite_correction_term(BackflowEpsilonTerm, term_list),
             find_composite_correction_term(BackflowEta1DoublonHoleTerm, term_list),
             find_composite_correction_term(BackflowEta2SpinExchangeTerm, term_list),
@@ -1372,6 +1536,135 @@ function fill_shared_source_composite_site_block_after_proposal!(
 end
 
 """
+用途: 对 directed split backflow 使用 grouped fused 逻辑写入 proposal 后的局域 site block。
+
+数学公式:
+- 对每个 directed 组 `g in {dp, pd, pp}` 和有向键 `(i,j)` 一次性计算
+  `eta1_g D_i H_j U_0(j,sigma)`,
+  `eta2_g n_{i,sigma} h_{i,-sigma} n_{j,-sigma} h_{j,sigma} U_0(j,sigma)`,
+  `eta3_g D_i n_{j,-sigma} h_{j,sigma} U_0(j,sigma)`,
+  `eta4_g n_{i,sigma} h_{i,-sigma} H_j U_0(j,sigma)`。
+- `epsilon` 项仍按自己的 source graph 判断 `xi_{i,sigma}`, 因为 Emery 中它通常是
+  `dp/pd/pp` source graph 的并集。
+
+参数:
+- `site_block_buffer::AbstractMatrix{T}`: 输出 buffer, 形状必须为 `2 x N_orb`。
+- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
+- `state_vector::Vector{Int8}`: proposal 提交前的构型状态数组。
+- `backflow_term::CompositeBackflowTerm`: directed split 组合式 backflow 对象。
+- `proposal::MoveProposal`: Monte Carlo proposal。
+- `site_index::Int`: 待写入的站点编号。
+
+返回:
+- `nothing`。
+"""
+function fill_grouped_source_composite_site_block_after_proposal!(
+    site_block_buffer::AbstractMatrix{T},
+    base_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    backflow_term::CompositeBackflowTerm,
+    proposal::MoveProposal,
+    site_index::Int,
+) where {T}
+    row_up, row_down = initialize_site_block_base_after_proposal!(
+        site_block_buffer,
+        base_orbitals,
+        state_vector,
+        site_index,
+    )
+    state_i = get_site_state_after_proposal(state_vector, proposal, site_index)
+
+    epsilon_term = backflow_term.epsilon_term
+    if epsilon_term !== nothing && site_index <= length(epsilon_term.outgoing_bond_indices_by_source)
+        epsilon_shift = T(epsilon_term.epsilon_bf - 1.0)
+        if epsilon_shift != zero(T)
+            epsilon_up_is_active = false
+            epsilon_down_is_active = false
+            for bond_index in epsilon_term.outgoing_bond_indices_by_source[site_index]
+                (_, target_site) = epsilon_term.source_bonds[bond_index]
+                state_j = get_site_state_after_proposal(state_vector, proposal, target_site)
+                if !epsilon_up_is_active &&
+                   is_backflow_epsilon_row_active(
+                       state_i,
+                       state_j,
+                       UP,
+                       epsilon_term.epsilon_mask_terms,
+                   )
+                    epsilon_up_is_active = true
+                end
+                if !epsilon_down_is_active &&
+                   is_backflow_epsilon_row_active(
+                       state_i,
+                       state_j,
+                       DN,
+                       epsilon_term.epsilon_mask_terms,
+                   )
+                    epsilon_down_is_active = true
+                end
+                epsilon_up_is_active && epsilon_down_is_active && break
+            end
+
+            if epsilon_up_is_active
+                @views site_block_buffer[1, :] .+= epsilon_shift .* base_orbitals[row_up, :]
+            end
+            if epsilon_down_is_active
+                @views site_block_buffer[2, :] .+= epsilon_shift .* base_orbitals[row_down, :]
+            end
+        end
+    end
+
+    for grouped_terms in backflow_term.grouped_source_groups
+        eta1_term = grouped_terms.eta1_term
+        eta2_term = grouped_terms.eta2_term
+        eta3_term = grouped_terms.eta3_term
+        eta4_term = grouped_terms.eta4_term
+        if site_index > length(eta1_term.outgoing_bond_indices_by_source)
+            continue
+        end
+
+        eta1_value = T(eta1_term.eta1_bf)
+        eta2_value = T(eta2_term.eta2_bf)
+        eta3_value = T(eta3_term.eta3_bf)
+        eta4_value = T(eta4_term.eta4_bf)
+        for bond_index in eta1_term.outgoing_bond_indices_by_source[site_index]
+            (_, target_site) = eta1_term.source_bonds[bond_index]
+            state_j = get_site_state_after_proposal(state_vector, proposal, target_site)
+            bond_amplitude = T(eta1_term.source_amplitudes[bond_index])
+            target_row_up = 2 * (target_site - 1) + 1
+            target_row_down = target_row_up + 1
+
+            if eta1_value != zero(T) && state_i == DB && state_j == HOLE
+                coefficient = eta1_value * bond_amplitude
+                @views site_block_buffer[1, :] .+= coefficient .* base_orbitals[target_row_up, :]
+                @views site_block_buffer[2, :] .+= coefficient .* base_orbitals[target_row_down, :]
+            end
+
+            for row_offset in 1:2
+                spin = backflow_spin_from_row_offset(row_offset)
+                eta2_factor = compute_eta2_virtual_hopping_factor(state_i, state_j, spin)
+                eta3_factor = compute_eta3_doublon_single_factor(state_i, state_j, spin)
+                eta4_factor = compute_eta4_single_hole_factor(state_i, state_j, spin)
+                coefficient =
+                    bond_amplitude *
+                    (
+                        eta2_value * T(eta2_factor) +
+                        eta3_value * T(eta3_factor) +
+                        eta4_value * T(eta4_factor)
+                    )
+                if coefficient == zero(T)
+                    continue
+                end
+
+                target_row = row_offset == 1 ? target_row_up : target_row_down
+                @views site_block_buffer[row_offset, :] .+= coefficient .* base_orbitals[target_row, :]
+            end
+        end
+    end
+
+    return nothing
+end
+
+"""
 用途: 写入组合式 Eq.(5) backflow 在 proposal 提交后的局域站点行块。
 
 数学公式:
@@ -1399,6 +1692,16 @@ function fill_backflow_site_block_after_proposal!(
 ) where {T}
     if can_use_shared_source_fused_site_block(backflow_term)
         return fill_shared_source_composite_site_block_after_proposal!(
+            site_block_buffer,
+            base_orbitals,
+            state_vector,
+            backflow_term,
+            proposal,
+            site_index,
+        )
+    end
+    if can_use_grouped_source_fused_site_block(backflow_term)
+        return fill_grouped_source_composite_site_block_after_proposal!(
             site_block_buffer,
             base_orbitals,
             state_vector,
