@@ -187,7 +187,7 @@ def extract_szz_qx_pi_line(
     - `lx, ly`: int, Cu cell 尺寸.
 
     返回:
-    - `Tuple[List[float], List[float]]`: `(qx_over_pi, szz_values)`, 均按 `nx=0..lx-1` 排序.
+    - `Tuple[List[float], List[float]]`: `(qx_over_pi, szz_values)`, 只包含 `0 <= qx <= pi`.
     """
     if ly % 2 != 0:
         raise ValueError(f"qy=pi 需要偶数 ly, 当前 ly={ly}.")
@@ -196,7 +196,7 @@ def extract_szz_qx_pi_line(
     qx_over_pi: List[float] = []
     szz_values: List[float] = []
     missing_keys: List[str] = []
-    for nx in range(lx):
+    for nx in range(lx // 2 + 1):
         key = (nx, target_ny)
         if key not in value_by_index:
             missing_keys.append(f"Szzq_{nx}_{target_ny}")

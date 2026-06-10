@@ -536,29 +536,30 @@ end
 
 返回:
 - `Tuple{Bool, Vector{DirectedSplitBackflowGroup}}`: 第一项表示是否可以使用 grouped fused
-  site-block path, 第二项为按 `dp/pd/pp` 顺序保存的组缓存。
+  site-block path, 第二项为按 `dd/dp/pd/pp` 或旧 `dp/pd/pp` 顺序保存的组缓存。
 """
 function build_directed_split_backflow_groups(
     terms::Vector{AbstractBackflowCorrectionTerm},
 )::Tuple{Bool,Vector{DirectedSplitBackflowGroup}}
-    groups = DirectedSplitBackflowGroup[]
-    for suffix in (:dp, :pd, :pp)
-        group = collect_directed_split_backflow_group(terms, suffix)
-        group === nothing && return false, DirectedSplitBackflowGroup[]
-        push!(groups, group)
-    end
-
     epsilon_count = count(correction_term -> correction_term isa BackflowEpsilonTerm, terms)
-    if epsilon_count > 1
-        return false, DirectedSplitBackflowGroup[]
+    for suffixes in ((:dd, :dp, :pd, :pp), (:dp, :pd, :pp))
+        groups = DirectedSplitBackflowGroup[]
+        for suffix in suffixes
+            group = collect_directed_split_backflow_group(terms, suffix)
+            group === nothing && break
+            push!(groups, group)
+        end
+        if length(groups) != length(suffixes)
+            continue
+        end
+
+        expected_term_count = 4 * length(groups) + epsilon_count
+        if length(terms) == expected_term_count
+            return true, groups
+        end
     end
 
-    expected_term_count = 4 * length(groups) + epsilon_count
-    if length(terms) != expected_term_count
-        return false, DirectedSplitBackflowGroup[]
-    end
-
-    return true, groups
+    return false, DirectedSplitBackflowGroup[]
 end
 
 """
@@ -568,7 +569,7 @@ end
 - `backflow_term::CompositeBackflowTerm`: 组合式 backflow 对象。
 
 返回:
-- `Bool`: 当对象由可选 `epsilon` 加上 `dp/pd/pp` 三组 split `eta1..eta4` 组成,
+- `Bool`: 当对象由可选 `epsilon` 加上 `dd/dp/pd/pp` 四组 split `eta1..eta4` 组成,
   且每组内部 source 数据一致时返回 `true`。
 """
 function can_use_grouped_source_fused_site_block(
@@ -587,8 +588,10 @@ end
 - `has_shared_source_data::Bool`: 所有 correction terms 是否共享同一套 source 数据。
 - `shared_source_bonds, shared_source_amplitudes`: shared-source fast path 使用的有向键与振幅。
 - `shared_outgoing_bond_indices_by_source`: shared-source fast path 使用的 outgoing graph。
-- `has_grouped_source_data::Bool`: 是否存在可用于 directed grouped fused path 的 `dp/pd/pp` 组缓存。
+- `has_grouped_source_data::Bool`: 是否存在可用于 directed grouped fused path 的 `dd/dp/pd/pp` 或旧 `dp/pd/pp` 组缓存。
 - `grouped_source_groups::Vector{DirectedSplitBackflowGroup}`: directed grouped fused path 使用的组缓存。
+- `epsilon_terms::Vector{BackflowEpsilonTerm}`: composite 中所有 epsilon correction term, 允许不同
+  source 子图使用不同 epsilon 参数。
 """
 mutable struct CompositeBackflowTerm <: AbstractBackflowTerm
     terms::Vector{AbstractBackflowCorrectionTerm}
@@ -599,6 +602,7 @@ mutable struct CompositeBackflowTerm <: AbstractBackflowTerm
     shared_outgoing_bond_indices_by_source::Vector{Vector{Int}}
     has_grouped_source_data::Bool
     grouped_source_groups::Vector{DirectedSplitBackflowGroup}
+    epsilon_terms::Vector{BackflowEpsilonTerm}
     epsilon_term::Union{Nothing,BackflowEpsilonTerm}
     eta1_term::Union{Nothing,BackflowEta1DoublonHoleTerm}
     eta2_term::Union{Nothing,BackflowEta2SpinExchangeTerm}
@@ -619,6 +623,7 @@ mutable struct CompositeBackflowTerm <: AbstractBackflowTerm
             shared_outgoing_bond_indices_by_source,
             has_grouped_source_data,
             grouped_source_groups,
+            BackflowEpsilonTerm[correction_term for correction_term in term_list if correction_term isa BackflowEpsilonTerm],
             find_composite_correction_term(BackflowEpsilonTerm, term_list),
             find_composite_correction_term(BackflowEta1DoublonHoleTerm, term_list),
             find_composite_correction_term(BackflowEta2SpinExchangeTerm, term_list),
@@ -1539,7 +1544,7 @@ end
 用途: 对 directed split backflow 使用 grouped fused 逻辑写入 proposal 后的局域 site block。
 
 数学公式:
-- 对每个 directed 组 `g in {dp, pd, pp}` 和有向键 `(i,j)` 一次性计算
+- 对每个 directed 组 `g in {dd, dp, pd, pp}` 和有向键 `(i,j)` 一次性计算
   `eta1_g D_i H_j U_0(j,sigma)`,
   `eta2_g n_{i,sigma} h_{i,-sigma} n_{j,-sigma} h_{j,sigma} U_0(j,sigma)`,
   `eta3_g D_i n_{j,-sigma} h_{j,sigma} U_0(j,sigma)`,
@@ -1574,42 +1579,45 @@ function fill_grouped_source_composite_site_block_after_proposal!(
     )
     state_i = get_site_state_after_proposal(state_vector, proposal, site_index)
 
-    epsilon_term = backflow_term.epsilon_term
-    if epsilon_term !== nothing && site_index <= length(epsilon_term.outgoing_bond_indices_by_source)
+    for epsilon_term in backflow_term.epsilon_terms
+        if site_index > length(epsilon_term.outgoing_bond_indices_by_source)
+            continue
+        end
         epsilon_shift = T(epsilon_term.epsilon_bf - 1.0)
-        if epsilon_shift != zero(T)
-            epsilon_up_is_active = false
-            epsilon_down_is_active = false
-            for bond_index in epsilon_term.outgoing_bond_indices_by_source[site_index]
-                (_, target_site) = epsilon_term.source_bonds[bond_index]
-                state_j = get_site_state_after_proposal(state_vector, proposal, target_site)
-                if !epsilon_up_is_active &&
-                   is_backflow_epsilon_row_active(
-                       state_i,
-                       state_j,
-                       UP,
-                       epsilon_term.epsilon_mask_terms,
-                   )
-                    epsilon_up_is_active = true
-                end
-                if !epsilon_down_is_active &&
-                   is_backflow_epsilon_row_active(
-                       state_i,
-                       state_j,
-                       DN,
-                       epsilon_term.epsilon_mask_terms,
-                   )
-                    epsilon_down_is_active = true
-                end
-                epsilon_up_is_active && epsilon_down_is_active && break
+        if epsilon_shift == zero(T)
+            continue
+        end
+        epsilon_up_is_active = false
+        epsilon_down_is_active = false
+        for bond_index in epsilon_term.outgoing_bond_indices_by_source[site_index]
+            (_, target_site) = epsilon_term.source_bonds[bond_index]
+            state_j = get_site_state_after_proposal(state_vector, proposal, target_site)
+            if !epsilon_up_is_active &&
+               is_backflow_epsilon_row_active(
+                   state_i,
+                   state_j,
+                   UP,
+                   epsilon_term.epsilon_mask_terms,
+               )
+                epsilon_up_is_active = true
             end
+            if !epsilon_down_is_active &&
+               is_backflow_epsilon_row_active(
+                   state_i,
+                   state_j,
+                   DN,
+                   epsilon_term.epsilon_mask_terms,
+               )
+                epsilon_down_is_active = true
+            end
+            epsilon_up_is_active && epsilon_down_is_active && break
+        end
 
-            if epsilon_up_is_active
-                @views site_block_buffer[1, :] .+= epsilon_shift .* base_orbitals[row_up, :]
-            end
-            if epsilon_down_is_active
-                @views site_block_buffer[2, :] .+= epsilon_shift .* base_orbitals[row_down, :]
-            end
+        if epsilon_up_is_active
+            @views site_block_buffer[1, :] .+= epsilon_shift .* base_orbitals[row_up, :]
+        end
+        if epsilon_down_is_active
+            @views site_block_buffer[2, :] .+= epsilon_shift .* base_orbitals[row_down, :]
         end
     end
 

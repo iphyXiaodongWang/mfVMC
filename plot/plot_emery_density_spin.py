@@ -28,6 +28,7 @@ from matplotlib.colors import Normalize, TwoSlopeNorm
 EMERY_KEY_PATTERN = re.compile(r"^(n|Sz)_(d|px|py)_(-?\d+)_(\d+)$")
 ORBITAL_MARKERS = {"d": "o", "px": "s", "py": "^"}
 ORBITAL_LABELS = {"d": "Cu d", "px": "O px", "py": "O py"}
+ORBITAL_BASE_MARKER_SIZES = {"d": 130.0, "px": 95.0, "py": 95.0}
 
 
 class EmeryObservableValue(NamedTuple):
@@ -272,7 +273,7 @@ def setup_emery_axis(axis: plt.Axes, lx: int, ly: int, title_text: str) -> None:
     axis.set_xlabel("x")
     axis.set_ylabel("y")
     axis.set_title(title_text)
-    axis.set_xticks(np.arange(0.5, lx + 1.0, 0.5))
+    axis.set_xticks(np.arange(0, lx + 1, 1))
     axis.set_yticks(np.arange(1.0, ly + 1.0, 1.0))
     axis.grid(color="#d0d0d0", linewidth=0.6, alpha=0.7)
 
@@ -301,6 +302,61 @@ def annotate_values(axis: plt.Axes, values: list[EmeryObservableValue], fmt: str
         )
 
 
+def compute_orbital_mean_relative_values(
+    values: list[EmeryObservableValue],
+) -> list[float]:
+    """用途: 计算按同一 orbital 平均值归一化的 observable 相对值.
+
+    参数:
+    - `values`: list[EmeryObservableValue], 通常为 density observable `n` 的数据.
+
+    返回:
+    - `list[float]`: 与输入 `values` 顺序一一对应的相对 observable 值.
+
+    公式:
+    - 对 orbital `a` 上的第 `i` 个点, 使用
+      `r_i = n_i / mean_a(n)`.
+    - 若某个 orbital 的平均值接近 0, 则退回 `r_i = 1`, 避免除以 0.
+    """
+    orbital_means: dict[str, float] = {}
+    for orbital in ORBITAL_MARKERS:
+        orbital_values = [item.value for item in values if item.orbital == orbital]
+        if orbital_values:
+            orbital_means[orbital] = float(np.mean(orbital_values))
+
+    relative_values: list[float] = []
+    for item in values:
+        orbital_mean = orbital_means.get(item.orbital, 0.0)
+        if not np.isfinite(orbital_mean) or abs(orbital_mean) <= 1e-12:
+            relative_values.append(1.0)
+            continue
+        relative_values.append(max(item.value / orbital_mean, 0.0))
+    return relative_values
+
+
+def compute_orbital_mean_relative_marker_sizes(
+    values: list[EmeryObservableValue],
+) -> list[float]:
+    """用途: 计算按同一 orbital 平均 density 归一化的 marker 面积.
+
+    参数:
+    - `values`: list[EmeryObservableValue], 通常为 density observable `n` 的数据.
+
+    返回:
+    - `list[float]`: 与输入 `values` 顺序一一对应的 matplotlib scatter marker 面积.
+
+    公式:
+    - 先计算相对 density `r_i = n_i / mean_a(n)`;
+    - 再使用 `s_i = s0_a * r_i`, 其中 `s0_a` 是该 orbital 的基础 marker 面积.
+    """
+    relative_values = compute_orbital_mean_relative_values(values)
+    marker_sizes: list[float] = []
+    for item, relative_value in zip(values, relative_values):
+        base_size = ORBITAL_BASE_MARKER_SIZES[item.orbital]
+        marker_sizes.append(base_size * relative_value)
+    return marker_sizes
+
+
 def plot_emery_observable_map(
     values: list[EmeryObservableValue],
     lx: int,
@@ -312,6 +368,8 @@ def plot_emery_observable_map(
     use_diverging_norm: bool,
     annotate: bool,
     dpi: int,
+    scale_marker_size_by_orbital_mean: bool = False,
+    scale_color_by_orbital_mean: bool = False,
 ) -> None:
     """用途: 绘制 Emery orbital-resolved observable 分布图.
 
@@ -325,6 +383,8 @@ def plot_emery_observable_map(
     - `use_diverging_norm`: bool, True 时以 0 为中心使用发散色标.
     - `annotate`: bool, 是否标注数值.
     - `dpi`: int, 输出图片 dpi.
+    - `scale_marker_size_by_orbital_mean`: bool, True 时 marker 面积按同 orbital 平均值归一化.
+    - `scale_color_by_orbital_mean`: bool, True 时颜色值按同 orbital 平均值归一化.
 
     返回:
     - None.
@@ -337,7 +397,13 @@ def plot_emery_observable_map(
     figure, axis = plt.subplots(figsize=(figure_width, figure_height))
     setup_emery_axis(axis, lx, ly, title_text)
 
-    raw_values = np.array([item.value for item in values], dtype=float)
+    if scale_color_by_orbital_mean:
+        plot_color_values = compute_orbital_mean_relative_values(values)
+    else:
+        plot_color_values = [item.value for item in values]
+    color_value_by_item = {id(item): value for item, value in zip(values, plot_color_values)}
+
+    raw_values = np.array(plot_color_values, dtype=float)
     if use_diverging_norm:
         vmax_abs = float(np.max(np.abs(raw_values)))
         vmax_abs = max(vmax_abs, 1e-12)
@@ -357,14 +423,18 @@ def plot_emery_observable_map(
             continue
         x_values = [item.x_plot for item in orbital_values]
         y_values = [item.y_plot for item in orbital_values]
-        color_values = [item.value for item in orbital_values]
+        color_values = [color_value_by_item[id(item)] for item in orbital_values]
+        if scale_marker_size_by_orbital_mean:
+            marker_sizes = compute_orbital_mean_relative_marker_sizes(orbital_values)
+        else:
+            marker_sizes = ORBITAL_BASE_MARKER_SIZES[orbital]
         scatter = axis.scatter(
             x_values,
             y_values,
             c=color_values,
             cmap=cmap_name,
             norm=norm,
-            s=130 if orbital == "d" else 95,
+            s=marker_sizes,
             marker=ORBITAL_MARKERS[orbital],
             edgecolors="black",
             linewidths=0.65,
@@ -424,11 +494,13 @@ def main() -> None:
         ly=ly,
         output_path=density_output,
         title_text="Emery density <n>",
-        colorbar_label="<n>",
+        colorbar_label="<n> / orbital mean(<n>)",
         cmap_name="viridis",
         use_diverging_norm=False,
         annotate=args.annotate_values,
         dpi=args.dpi,
+        scale_marker_size_by_orbital_mean=True,
+        scale_color_by_orbital_mean=True,
     )
     plot_emery_observable_map(
         values=spin_values,
