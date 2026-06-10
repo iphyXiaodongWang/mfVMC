@@ -485,6 +485,101 @@ function add_emery_site_observables!(
 end
 
 """
+用途: 返回 Emery 晶格中所有 Cu d 轨道的 site index 和晶胞坐标。
+
+参数:
+- `lx, ly::Int`: Cu 晶胞尺寸。
+
+返回:
+- `Vector{Tuple{Int, Int, Int}}`: 每个元素为 `(site, x, y)`, 其中 `site` 是 sampler site index,
+  `(x, y)` 是 Cu 晶胞坐标。
+"""
+function build_emery_cu_site_coordinates(lx::Int, ly::Int)::Vector{Tuple{Int,Int,Int}}
+    cu_site_coordinates = Tuple{Int,Int,Int}[]
+    for x in 1:lx, y in 1:ly
+        site = Emery_xyo_to_site_index(x, y, EMERY_ORB_D, lx, ly)
+        push!(cu_site_coordinates, (site, x, y))
+    end
+    return cu_site_coordinates
+end
+
+"""
+用途: 计算 Cu-only longitudinal spin structure factor `Szz(q)`。
+
+数学公式:
+- `Szz(q) = (1 / N_Cu) * sum_{i,j in Cu} cos(qx * (x_i - x_j) + qy * (y_i - y_j))
+   * Sz_i * Sz_j`。
+- 这里 `qx = 2π * nx / lx`, `qy = 2π * ny / ly`。虽然 x 方向是 OBC, 这里仍采用
+  有限 Cu 晶胞坐标上的 Fourier 分析, 用于观察 stripe 的主要波矢。
+
+参数:
+- `vwf`: determinant 波函数, 需要提供 `vwf.sampler.state`。
+- `cu_site_coordinates::Vector{Tuple{Int, Int, Int}}`: Cu site 和坐标列表。
+- `lx, ly::Int`: Cu 晶胞尺寸。
+- `nx, ny::Int`: momentum index, 对应 `2π * n / L`。
+
+返回:
+- `Float64`: 当前 Monte Carlo 构型上的 `Szz(q)` estimator。
+"""
+function measure_emery_cu_szz_structure_factor(
+    vwf,
+    cu_site_coordinates::Vector{Tuple{Int,Int,Int}},
+    lx::Int,
+    ly::Int,
+    nx::Int,
+    ny::Int,
+)::Float64
+    n_cu = length(cu_site_coordinates)
+    n_cu > 0 || error("Emery Cu site list must not be empty.")
+    qx = 2.0 * pi * nx / lx
+    qy = 2.0 * pi * ny / ly
+    state = vwf.sampler.state
+
+    szz_value = 0.0
+    for (site_i, x_i, y_i) in cu_site_coordinates
+        sz_i = get_Sz(state[site_i])
+        for (site_j, x_j, y_j) in cu_site_coordinates
+            sz_j = get_Sz(state[site_j])
+            phase = qx * (x_i - x_j) + qy * (y_i - y_j)
+            szz_value += cos(phase) * sz_i * sz_j
+        end
+    end
+    return szz_value / n_cu
+end
+
+"""
+用途: 向 Emery measure observable 字典加入 Cu-only `Szz(q)`。
+
+参数:
+- `observables::Dict{Symbol, Function}`: 待写入的观测量字典。
+- `lx, ly::Int`: Cu 晶胞尺寸。
+
+返回:
+- `nothing`。
+"""
+function add_emery_cu_szz_structure_factor_observables!(
+    observables::Dict{Symbol,Function},
+    lx::Int,
+    ly::Int,
+)::Nothing
+    cu_site_coordinates = build_emery_cu_site_coordinates(lx, ly)
+    for nx in 0:(lx - 1), ny in 0:(ly - 1)
+        nx_local = nx
+        ny_local = ny
+        observable_key = Symbol("Szzq_$(nx_local)_$(ny_local)")
+        observables[observable_key] = (model, vwf) -> measure_emery_cu_szz_structure_factor(
+            vwf,
+            cu_site_coordinates,
+            lx,
+            ly,
+            nx_local,
+            ny_local,
+        )
+    end
+    return nothing
+end
+
+"""
 用途: 构造 Emery stripe measure 使用的 orbital-resolved observables。
 
 参数:
@@ -496,6 +591,7 @@ end
 function build_emery_observables(lx::Int, ly::Int)::Dict{Symbol,Function}
     observables = Dict{Symbol,Function}()
     observables[:E] = local_energy
+    add_emery_cu_szz_structure_factor_observables!(observables, lx, ly)
 
     for y in 1:ly
         site = Emery_xyo_to_site_index(0, y, EMERY_ORB_PX, lx, ly)

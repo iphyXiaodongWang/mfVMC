@@ -472,6 +472,128 @@ function write_column_measure_outputs(output_dir::AbstractString, results)::Noth
 end
 
 """
+用途: 返回 `Hubbard_bf.jl` column nonPH 晶格中所有 site index 和晶胞坐标。
+
+参数:
+- `lx, ly::Int`: 晶格尺寸。
+
+返回:
+- `Vector{Tuple{Int, Int, Int}}`: 每个元素为 `(site, x, y)`, 其中 `site` 是 sampler site index,
+  `(x, y)` 是晶格坐标。
+"""
+function build_column_nonph_site_coordinates(lx::Int, ly::Int)::Vector{Tuple{Int,Int,Int}}
+    site_coordinates = Tuple{Int,Int,Int}[]
+    for x in 1:lx, y in 1:ly
+        site = hubbard_column_site_index(x, y, lx, ly)
+        push!(site_coordinates, (site, x, y))
+    end
+    return site_coordinates
+end
+
+"""
+用途: 计算 `Hubbard_bf.jl` column nonPH 的 longitudinal spin structure factor `Szz(q)`。
+
+数学公式:
+- `Szz(q) = (1 / N) * sum_{i,j} cos(qx * (x_i - x_j) + qy * (y_i - y_j))
+   * Sz_i * Sz_j`。
+- `qx = 2π * nx / lx`, `qy = 2π * ny / ly`。
+
+参数:
+- `vwf`: determinant 波函数, 需要提供 `vwf.sampler.state`。
+- `site_coordinates::Vector{Tuple{Int, Int, Int}}`: site 和坐标列表。
+- `lx, ly::Int`: 晶格尺寸。
+- `nx, ny::Int`: momentum index, 对应 `2π * n / L`。
+
+返回:
+- `Float64`: 当前 Monte Carlo 构型上的 `Szz(q)` estimator。
+"""
+function measure_column_nonph_szz_structure_factor(
+    vwf,
+    site_coordinates::Vector{Tuple{Int,Int,Int}},
+    lx::Int,
+    ly::Int,
+    nx::Int,
+    ny::Int,
+)::Float64
+    n_sites = length(site_coordinates)
+    n_sites > 0 || error("Column nonPH site list must not be empty.")
+    qx = 2.0 * pi * nx / lx
+    qy = 2.0 * pi * ny / ly
+    state = vwf.sampler.state
+
+    szz_value = 0.0
+    for (site_i, x_i, y_i) in site_coordinates
+        sz_i = get_Sz(state[site_i])
+        for (site_j, x_j, y_j) in site_coordinates
+            sz_j = get_Sz(state[site_j])
+            phase = qx * (x_i - x_j) + qy * (y_i - y_j)
+            szz_value += cos(phase) * sz_i * sz_j
+        end
+    end
+    return szz_value / n_sites
+end
+
+"""
+用途: 向 `Hubbard_bf.jl` measure observable 字典加入 `Szz(q)`。
+
+参数:
+- `observables::Dict{Symbol, Function}`: 待写入的观测量字典。
+- `lx, ly::Int`: 晶格尺寸。
+
+返回:
+- `nothing`。
+"""
+function add_column_nonph_szz_structure_factor_observables!(
+    observables::Dict{Symbol,Function},
+    lx::Int,
+    ly::Int,
+)::Nothing
+    site_coordinates = build_column_nonph_site_coordinates(lx, ly)
+    for nx in 0:(lx - 1), ny in 0:(ly - 1)
+        nx_local = nx
+        ny_local = ny
+        observable_key = Symbol("Szzq_$(nx_local)_$(ny_local)")
+        observables[observable_key] = (model, vwf) -> measure_column_nonph_szz_structure_factor(
+            vwf,
+            site_coordinates,
+            lx,
+            ly,
+            nx_local,
+            ny_local,
+        )
+    end
+    return nothing
+end
+
+"""
+用途: 构造 `Hubbard_bf.jl` column nonPH measure 使用的 observables。
+
+参数:
+- `lx, ly::Int`: 晶格尺寸。
+
+返回:
+- `Dict{Symbol, Function}`: 包含 `:E`, 每个 site 的 `n/Sz`, 以及所有 `Szzq_nx_ny`。
+"""
+function defination_column_nonph_observabels(lx::Int, ly::Int)::Dict{Symbol,Function}
+    observables = Dict{Symbol,Function}()
+    observables[:E] = local_energy
+    add_column_nonph_szz_structure_factor_observables!(observables, lx, ly)
+    for x in 1:lx, y in 1:ly
+        site = hubbard_column_site_index(x, y, lx, ly)
+        spin_key = Symbol("Sz_$(x)_$(y)")
+        density_key = Symbol("n_$(x)_$(y)")
+        observables[spin_key] = (model, vwf) -> get_Sz(vwf.sampler.state[site])
+        observables[density_key] = (model, vwf) -> begin
+            site_state = vwf.sampler.state[site]
+            n_up = (site_state & UP) != 0 ? 1.0 : 0.0
+            n_down = (site_state & DN) != 0 ? 1.0 : 0.0
+            return n_up + n_down
+        end
+    end
+    return observables
+end
+
+"""
 用途: 更新 column nonPH determinant 波函数和参数导数。
 
 参数:
@@ -866,7 +988,7 @@ function main_column_nonph_backflow()::Nothing
             ham,
             vwf,
             kernel,
-            defination_observabels(lx, ly),
+            defination_column_nonph_observabels(lx, ly),
             meas_params;
             history_observables=[:E],
         )
