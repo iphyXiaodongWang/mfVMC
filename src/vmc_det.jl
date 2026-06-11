@@ -33,6 +33,8 @@ mutable struct R1R2WS{T}
 
     backflow_chain_rule_buffer::Matrix{T}
     orbital_log_derivative_row_buffer::Matrix{T}
+    backflow_chain_rule_source_rows::Vector{Int}
+    backflow_chain_rule_source_weights::Vector{T}
     grad_buffer::Vector{T}
 end
 
@@ -132,6 +134,8 @@ function vwf_det(
         Matrix{T}(undef, 0, 0),
         Matrix{T}(undef, 0, 0),
         Matrix{T}(undef, 0, 0),
+        Int[],
+        T[],
         T[],
     )
 
@@ -209,6 +213,8 @@ function ensure_ws!(v::vwf_det{T,S}) where {T,S}
             Matrix{T}(undef, 2 * n_sites, N),
             Matrix{T}(undef, 2 * n_sites, N),
             Matrix{T}(undef, N, N),
+            Vector{Int}(undef, 2 * n_sites),
+            Vector{T}(undef, 2 * n_sites),
             T[]
         )
         reset_cached_rankk_update!(ws)
@@ -220,6 +226,12 @@ function ensure_ws!(v::vwf_det{T,S}) where {T,S}
     end
     if size(ws.orbital_log_derivative_row_buffer) != size(v.awf_inv)
         ws.orbital_log_derivative_row_buffer = Matrix{T}(undef, size(v.awf_inv))
+    end
+    if length(ws.backflow_chain_rule_source_rows) != size(v.base_gs_U, 1)
+        resize!(ws.backflow_chain_rule_source_rows, size(v.base_gs_U, 1))
+    end
+    if length(ws.backflow_chain_rule_source_weights) != size(v.base_gs_U, 1)
+        resize!(ws.backflow_chain_rule_source_weights, size(v.base_gs_U, 1))
     end
 
     n_params = length(v.param_keys) + Projector.projector_param_count(v.projector) + Backflow.backflow_param_count(v.backflow)
@@ -1505,6 +1517,135 @@ function _compute_orbital_log_derivative_from_selected_rows!(
     return dot(a_inv, selected_row_buffer)
 end
 
+"""
+用途: 只通过 occupied rows 计算 backflow chain-rule 后的 determinant log-derivative。
+
+参数:
+- `chain_rule_row_buffer::AbstractVector{T}`: 单行工作缓冲区, 长度必须等于轨道数 `N_orb`。
+- `a_inv::AbstractMatrix{T}`: 当前 Slater 矩阵逆, 形状为 `N_orb x N_elec`。
+- `electron_locs::AbstractVector{Int}`: 第 `e` 个电子在 spin-resolved 轨道矩阵中的行号 `r_e`。
+- `input_derivative_orbitals::AbstractMatrix{T}`: 裸 mean-field 导数矩阵 `dU_0 / dp`, 行为空间/自旋轨道, 列为占据轨道。
+- `state_vector::Vector{Int8}`: 当前 Monte Carlo 构型。
+- `backflow_term::Backflow.AbstractBackflowTerm`: 当前 backflow 项。
+
+返回:
+- `T`: `sum_e sum_o A^{-1}_{o,e} * (B_x[dU_0 / dp])[r_e,o]`。
+
+公式:
+- 若 `U_b = B_x[U_0]`, 固定构型 `x` 时 backflow 对 `U_0` 是线性变换,
+  因此 `dU_b / dp = B_x[dU_0 / dp]`。
+- determinant 波函数满足
+  `partial log det(A) / partial p = Tr(A^{-1} partial A / partial p)`。
+- 这里不显式构造完整 `dU_b / dp`, 而是逐个电子只计算 occupied row `r_e`。
+"""
+function _compute_backflow_orbital_log_derivative_from_selected_rows!(
+    chain_rule_row_buffer::AbstractVector{T},
+    a_inv::AbstractMatrix{T},
+    electron_locs::AbstractVector{Int},
+    input_derivative_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    backflow_term::Backflow.AbstractBackflowTerm,
+)::T where {T}
+    n_orb, n_elec = size(a_inv)
+    if length(chain_rule_row_buffer) != n_orb
+        throw(DimensionMismatch("chain_rule_row_buffer length $(length(chain_rule_row_buffer)) != orbital count $n_orb"))
+    end
+    if length(electron_locs) != n_elec
+        throw(DimensionMismatch("electron_locs length $(length(electron_locs)) != electron count $(n_elec)"))
+    end
+    if size(input_derivative_orbitals, 2) < n_orb
+        throw(DimensionMismatch("input_derivative_orbitals column count $(size(input_derivative_orbitals, 2)) < orbital count $(n_orb)"))
+    end
+
+    log_derivative = zero(T)
+    @inbounds for elec in 1:n_elec
+        row_index = electron_locs[elec]
+        Backflow.fill_backflow_chain_rule_row!(
+            chain_rule_row_buffer,
+            input_derivative_orbitals,
+            state_vector,
+            backflow_term,
+            row_index,
+        )
+        for orbital_index in 1:n_orb
+            log_derivative += a_inv[orbital_index, elec] * chain_rule_row_buffer[orbital_index]
+        end
+    end
+
+    return log_derivative
+end
+
+"""
+用途: 按 occupied rows 一次性计算所有 mean-field 参数的 backflow chain-rule log-derivative。
+
+参数:
+- `o_vec::AbstractVector{T}`: 输出向量, 前 `size(derivative_tensor, 3)` 个位置累加 mean-field 参数导数。
+- `source_row_indices::AbstractVector{Int}`: source row 编号工作缓冲区。
+- `source_row_weights::AbstractVector{T}`: source row 权重工作缓冲区。
+- `a_inv::AbstractMatrix{T}`: 当前 Slater 矩阵逆, 形状为 `N_orb x N_elec`。
+- `electron_locs::AbstractVector{Int}`: 第 `e` 个电子在 spin-resolved 轨道矩阵中的行号 `r_e`。
+- `derivative_tensor::AbstractArray{T,3}`: 裸 mean-field 导数张量, 形状为 `N_orb x N_rows x N_params`。
+- `state_vector::Vector{Int8}`: 当前 Monte Carlo 构型。
+- `backflow_term::Backflow.AbstractBackflowTerm`: 当前 backflow 项。
+
+返回:
+- `AbstractVector{T}`: 原地更新后的 `o_vec`。
+
+公式:
+- 若 `(B_x[dU_0 / dp])(r_e,:) = sum_s w_{e,s} dU_0(s,:)`, 则
+  `partial_p log det(A) = sum_e sum_s w_{e,s} dot(A^{-1}[:,e], dU_0[:,s,p])`。
+- 本函数固定 `e` 与 `s`, 用 `mul!` 同时累加所有参数 `p`。
+"""
+function _compute_backflow_meanfield_gradient_from_selected_rows!(
+    o_vec::AbstractVector{T},
+    source_row_indices::AbstractVector{Int},
+    source_row_weights::AbstractVector{T},
+    a_inv::AbstractMatrix{T},
+    electron_locs::AbstractVector{Int},
+    derivative_tensor::AbstractArray{T,3},
+    state_vector::Vector{Int8},
+    backflow_term::Backflow.AbstractBackflowTerm,
+) where {T}
+    n_orb, n_elec = size(a_inv)
+    n_params = size(derivative_tensor, 3)
+    if size(derivative_tensor, 1) != n_orb
+        throw(DimensionMismatch("derivative_tensor first dimension $(size(derivative_tensor, 1)) != orbital count $n_orb"))
+    end
+    if size(derivative_tensor, 2) != 2 * length(state_vector)
+        throw(DimensionMismatch("derivative_tensor row count $(size(derivative_tensor, 2)) != 2 * state length $(2 * length(state_vector))"))
+    end
+    if length(electron_locs) != n_elec
+        throw(DimensionMismatch("electron_locs length $(length(electron_locs)) != electron count $(n_elec)"))
+    end
+    if length(o_vec) < n_params
+        throw(DimensionMismatch("gradient buffer length $(length(o_vec)) < parameter count $n_params"))
+    end
+
+    dense_grad = @view o_vec[1:n_params]
+    @inbounds for elec in 1:n_elec
+        row_index = electron_locs[elec]
+        source_count = Backflow.fill_backflow_chain_rule_source_weights!(
+            source_row_indices,
+            source_row_weights,
+            state_vector,
+            backflow_term,
+            row_index,
+        )
+        inv_col = @view a_inv[:, elec]
+        for source_offset in 1:source_count
+            source_weight = source_row_weights[source_offset]
+            if source_weight == zero(T)
+                continue
+            end
+            source_row = source_row_indices[source_offset]
+            d_ut_row = @view derivative_tensor[:, source_row, 1:n_params]
+            mul!(dense_grad, transpose(d_ut_row), inv_col, source_weight, one(T))
+        end
+    end
+
+    return o_vec
+end
+
 function compute_grad_log_psi!(vwf::vwf_det{T}) where T
     return @timed "compute_grad_log_psi!" begin
         # 1. 准备 Workspace
@@ -1522,46 +1663,48 @@ function compute_grad_log_psi!(vwf::vwf_det{T}) where T
         wf_param_count = length(vwf.param_keys)
         has_active_backflow = Backflow.uses_backflow(vwf.backflow)
         if has_active_backflow
-            for idx in 1:wf_param_count
-                dU_t = @view vwf.dUt_matrix[:, :, idx]
-                Backflow.fill_backflow_chain_rule_orbitals!(
-                    ws.backflow_chain_rule_buffer,
-                    transpose(dU_t),
-                    ss.state,
-                    vwf.backflow,
-                )
-                derivative_orbitals = ws.backflow_chain_rule_buffer
-                O_vec[idx] = _compute_orbital_log_derivative_from_selected_rows!(
-                    ws.orbital_log_derivative_row_buffer,
-                    A_inv,
-                    ss.electron_locs,
-                    derivative_orbitals,
-                )
-            end
+            @timed "grad_meanfield_backflow_chain_rule" _compute_backflow_meanfield_gradient_from_selected_rows!(
+                O_vec,
+                ws.backflow_chain_rule_source_rows,
+                ws.backflow_chain_rule_source_weights,
+                A_inv,
+                ss.electron_locs,
+                vwf.dUt_matrix,
+                ss.state,
+                vwf.backflow,
+            )
         else
-            _compute_dense_tensor_gradient!(O_vec, vwf)
+            @timed "grad_meanfield_no_backflow" _compute_dense_tensor_gradient!(O_vec, vwf)
         end
 
         # 4. 再拼接 projector 参数梯度部分
         projector_param_count = Projector.projector_param_count(vwf.projector)
         if projector_param_count > 0
-            start_idx = wf_param_count + 1
-            end_idx = wf_param_count + projector_param_count
-            projector_view = @view O_vec[start_idx:end_idx]
-            Projector.projector_log_derivative!(projector_view, vwf.projector, ss)
+            @timed "grad_projector_log_derivative" begin
+                start_idx = wf_param_count + 1
+                end_idx = wf_param_count + projector_param_count
+                projector_view = @view O_vec[start_idx:end_idx]
+                Projector.projector_log_derivative!(projector_view, vwf.projector, ss)
+            end
         end
 
         # 5. 最后拼接 backflow 参数梯度部分
-        backflow_pairs = Backflow.build_backflow_derivative_orbitals(vwf.base_gs_U, ss.state, vwf.backflow)
+        backflow_pairs = @timed "grad_backflow_param_build_orbitals" Backflow.build_backflow_derivative_orbitals(
+            vwf.base_gs_U,
+            ss.state,
+            vwf.backflow,
+        )
         if !isempty(backflow_pairs)
-            start_idx = wf_param_count + projector_param_count + 1
-            for (pair_offset, (_, derivative_orbitals)) in enumerate(backflow_pairs)
-                O_vec[start_idx + pair_offset - 1] = _compute_orbital_log_derivative_from_selected_rows!(
-                    ws.orbital_log_derivative_row_buffer,
-                    A_inv,
-                    ss.electron_locs,
-                    derivative_orbitals,
-                )
+            @timed "grad_backflow_param_log_derivative" begin
+                start_idx = wf_param_count + projector_param_count + 1
+                for (pair_offset, (_, derivative_orbitals)) in enumerate(backflow_pairs)
+                    O_vec[start_idx + pair_offset - 1] = _compute_orbital_log_derivative_from_selected_rows!(
+                        ws.orbital_log_derivative_row_buffer,
+                        A_inv,
+                        ss.electron_locs,
+                        derivative_orbitals,
+                    )
+                end
             end
         end
 
