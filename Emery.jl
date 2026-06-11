@@ -1500,133 +1500,6 @@ function build_emery_backflow_source_data_by_directed_orbital_type(
 end
 
 """
-用途: 构造 column nonPH 使用的 Eq.(5) composite backflow。
-
-参数:
-- `source_bonds, source_amplitudes`: backflow source 数据。
-- `bf_epsilon, bf_eta1, bf_eta2, bf_eta3::Float64`: Eq.(5) 参数。
-
-返回:
-- `CompositeBackflowTerm`: 按 `epsilon, eta1, eta2, eta3` 排列。
-"""
-function build_column_composite_backflow(
-    source_bonds::Vector{Tuple{Int,Int}},
-    source_amplitudes::Vector{Float64},
-    bf_epsilon::Float64,
-    bf_eta1::Float64,
-    bf_eta2::Float64,
-    bf_eta3::Float64,
-)
-    return CompositeBackflowTerm([
-        BackflowEpsilonTerm(
-            param_name=:bf_epsilon,
-            epsilon_bf=bf_epsilon,
-            epsilon_mask_terms=Symbol[:eta1, :eta2, :eta3],
-            source_bonds=source_bonds,
-            source_amplitudes=source_amplitudes,
-        ),
-        BackflowEta1DoublonHoleTerm(
-            param_name=:bf_eta1,
-            eta1_bf=bf_eta1,
-            source_bonds=source_bonds,
-            source_amplitudes=source_amplitudes,
-        ),
-        BackflowEta2SpinExchangeTerm(
-            param_name=:bf_eta2,
-            eta2_bf=bf_eta2,
-            source_bonds=source_bonds,
-            source_amplitudes=source_amplitudes,
-        ),
-        BackflowEta3MixedVirtualHopTerm(
-            param_name=:bf_eta3,
-            eta3_bf=bf_eta3,
-            source_bonds=source_bonds,
-            source_amplitudes=source_amplitudes,
-        ),
-    ])
-end
-
-"""
-用途: 构造 Emery `dp` 和 `pp` bond 解耦的 column nonPH Eq.(5) composite backflow。
-
-参数:
-- `dp_source_bonds, dp_source_amplitudes`: Cu-O hopping source 数据。
-- `pp_source_bonds, pp_source_amplitudes`: O-O hopping source 数据。
-- `bf_epsilon::Float64`: 共享的 epsilon prefactor 参数。
-- `bf_eta1_dp, bf_eta2_dp, bf_eta3_dp::Float64`: Cu-O source 使用的 Eq.(5) 参数。
-- `bf_eta1_pp, bf_eta2_pp, bf_eta3_pp::Float64`: O-O source 使用的 Eq.(5) 参数。
-
-返回:
-- `CompositeBackflowTerm`: 参数顺序为
-  `bf_epsilon, bf_eta1_dp, bf_eta2_dp, bf_eta3_dp, bf_eta1_pp, bf_eta2_pp, bf_eta3_pp`。
-
-公式:
-- `delta U_eta_m = eta_m^dp * sum_{(i,j) in dp} t_ij mask_m(i,j) U_0(j)
-                 + eta_m^pp * sum_{(i,j) in pp} t_ij mask_m(i,j) U_0(j)`。
-"""
-function build_column_decoupled_emery_backflow(
-    dp_source_bonds::Vector{Tuple{Int,Int}},
-    dp_source_amplitudes::Vector{Float64},
-    pp_source_bonds::Vector{Tuple{Int,Int}},
-    pp_source_amplitudes::Vector{Float64},
-    bf_epsilon::Float64,
-    bf_eta1_dp::Float64,
-    bf_eta2_dp::Float64,
-    bf_eta3_dp::Float64,
-    bf_eta1_pp::Float64,
-    bf_eta2_pp::Float64,
-    bf_eta3_pp::Float64,
-)
-    all_source_bonds = vcat(dp_source_bonds, pp_source_bonds)
-    all_source_amplitudes = vcat(dp_source_amplitudes, pp_source_amplitudes)
-    return CompositeBackflowTerm([
-        BackflowEpsilonTerm(
-            param_name=:bf_epsilon,
-            epsilon_bf=bf_epsilon,
-            epsilon_mask_terms=Symbol[:eta1, :eta2, :eta3],
-            source_bonds=all_source_bonds,
-            source_amplitudes=all_source_amplitudes,
-        ),
-        BackflowEta1DoublonHoleTerm(
-            param_name=:bf_eta1_dp,
-            eta1_bf=bf_eta1_dp,
-            source_bonds=dp_source_bonds,
-            source_amplitudes=dp_source_amplitudes,
-        ),
-        BackflowEta2SpinExchangeTerm(
-            param_name=:bf_eta2_dp,
-            eta2_bf=bf_eta2_dp,
-            source_bonds=dp_source_bonds,
-            source_amplitudes=dp_source_amplitudes,
-        ),
-        BackflowEta3MixedVirtualHopTerm(
-            param_name=:bf_eta3_dp,
-            eta3_bf=bf_eta3_dp,
-            source_bonds=dp_source_bonds,
-            source_amplitudes=dp_source_amplitudes,
-        ),
-        BackflowEta1DoublonHoleTerm(
-            param_name=:bf_eta1_pp,
-            eta1_bf=bf_eta1_pp,
-            source_bonds=pp_source_bonds,
-            source_amplitudes=pp_source_amplitudes,
-        ),
-        BackflowEta2SpinExchangeTerm(
-            param_name=:bf_eta2_pp,
-            eta2_bf=bf_eta2_pp,
-            source_bonds=pp_source_bonds,
-            source_amplitudes=pp_source_amplitudes,
-        ),
-        BackflowEta3MixedVirtualHopTerm(
-            param_name=:bf_eta3_pp,
-            eta3_bf=bf_eta3_pp,
-            source_bonds=pp_source_bonds,
-            source_amplitudes=pp_source_amplitudes,
-        ),
-    ])
-end
-
-"""
 用途: 构造 Emery `dp/pd/pp` directed orbital class 解耦的 split backflow。
 
 参数:
@@ -1795,82 +1668,6 @@ function build_column_directed_emery_backflow(
 end
 
 """
-用途: 根据开关构造 column nonPH backflow 对象。
-
-参数:
-- `enable_backflow::Bool`: 是否启用 backflow。
-- 其余参数同 `build_column_composite_backflow`。
-
-返回:
-- `AbstractBackflowTerm`: 启用时为 composite backflow, 禁用时为 `NoBackflowTerm()`。
-"""
-function build_column_optional_backflow(
-    enable_backflow::Bool,
-    source_bonds::Vector{Tuple{Int,Int}},
-    source_amplitudes::Vector{Float64},
-    bf_epsilon::Float64,
-    bf_eta1::Float64,
-    bf_eta2::Float64,
-    bf_eta3::Float64,
-)
-    if !enable_backflow
-        return NoBackflowTerm()
-    end
-    return build_column_composite_backflow(
-        source_bonds,
-        source_amplitudes,
-        bf_epsilon,
-        bf_eta1,
-        bf_eta2,
-        bf_eta3,
-    )
-end
-
-"""
-用途: 根据开关构造 Emery `dp/pp` 解耦 backflow 对象。
-
-参数:
-- `enable_backflow::Bool`: 是否启用 backflow。
-- `dp_source_bonds, dp_source_amplitudes`: Cu-O source 数据。
-- `pp_source_bonds, pp_source_amplitudes`: O-O source 数据。
-- 其余参数同 `build_column_decoupled_emery_backflow`。
-
-返回:
-- `AbstractBackflowTerm`: 关闭时为 `NoBackflowTerm()`, 开启时为 dp/pp 解耦的 `CompositeBackflowTerm`。
-"""
-function build_column_optional_decoupled_emery_backflow(
-    enable_backflow::Bool,
-    dp_source_bonds::Vector{Tuple{Int,Int}},
-    dp_source_amplitudes::Vector{Float64},
-    pp_source_bonds::Vector{Tuple{Int,Int}},
-    pp_source_amplitudes::Vector{Float64},
-    bf_epsilon::Float64,
-    bf_eta1_dp::Float64,
-    bf_eta2_dp::Float64,
-    bf_eta3_dp::Float64,
-    bf_eta1_pp::Float64,
-    bf_eta2_pp::Float64,
-    bf_eta3_pp::Float64,
-)
-    if !enable_backflow
-        return NoBackflowTerm()
-    end
-    return build_column_decoupled_emery_backflow(
-        dp_source_bonds,
-        dp_source_amplitudes,
-        pp_source_bonds,
-        pp_source_amplitudes,
-        bf_epsilon,
-        bf_eta1_dp,
-        bf_eta2_dp,
-        bf_eta3_dp,
-        bf_eta1_pp,
-        bf_eta2_pp,
-        bf_eta3_pp,
-    )
-end
-
-"""
 用途: 根据开关构造 Emery `dp/pd/pp` directed split backflow 对象。
 
 参数:
@@ -1964,98 +1761,6 @@ function parse_column_bool_flag(raw_value::AbstractString, option_name::Abstract
 end
 
 """
-用途: 解析 dp/pp 解耦 backflow 参数的初值。
-
-参数:
-- `specific_value::Float64`: 新的 bond-type-specific 参数, 如 `bf_eta1_dp`。
-- `legacy_value::Float64`: 旧的共享参数, 如 `bf_eta1`。
-
-返回:
-- `Float64`: 若 `specific_value` 为 `NaN`, 返回 `legacy_value`; 否则返回 `specific_value`。
-"""
-function resolve_decoupled_backflow_initial_value(
-    specific_value::Float64,
-    legacy_value::Float64,
-)::Float64
-    return isnan(specific_value) ? legacy_value : specific_value
-end
-
-"""
-用途: 从一组候选 backflow 初值中选择第一个非 `NaN` 的值。
-
-参数:
-- `candidate_values::Float64...`: 按优先级排列的候选初值。
-
-返回:
-- `Float64`: 第一个非 `NaN` 的候选值。若全部为 `NaN`, 返回 `NaN`。
-"""
-function first_non_nan_backflow_initial_value(candidate_values::Float64...)::Float64
-    for candidate_value in candidate_values
-        if !isnan(candidate_value)
-            return candidate_value
-        end
-    end
-    return NaN
-end
-
-"""
-用途: 返回当前参数名对应的旧 JSON 参数名候选列表。
-
-参数:
-- `param_name::Symbol`: 当前 ansatz 的参数名。
-
-返回:
-- `Vector{String}`: 按优先级排列的 fallback key 列表。
-
-兼容规则:
-- 新的 `pd` 方向优先继承旧的 `dp` 参数, 因为旧 `dp` 组曾同时包含
-  `d -> p` 与 `p -> d` 两个方向。
-- 新的 `eta4` 优先继承同 class 的旧 `eta3`, 因为旧 mixed `eta3`
-  等价于 split `eta3 + eta4` 共用同一个初值。
-"""
-function column_backflow_json_fallback_keys(param_name::Symbol)::Vector{String}
-    key = String(param_name)
-    if key == "bf_epsilon_d"
-        return ["bf_epsilon"]
-    elseif key == "bf_epsilon_p"
-        return ["bf_epsilon_d", "bf_epsilon"]
-    elseif key == "bf_eta1_dd"
-        return ["bf_eta1_dp", "bf_eta1"]
-    elseif key == "bf_eta2_dd"
-        return ["bf_eta2_dp", "bf_eta2"]
-    elseif key == "bf_eta3_dd"
-        return ["bf_eta3_dp", "bf_eta3"]
-    elseif key == "bf_eta4_dd"
-        return ["bf_eta4_dd", "bf_eta4_dp", "bf_eta4", "bf_eta3_dd", "bf_eta3_dp", "bf_eta3"]
-    elseif key == "bf_eta1_dp"
-        return ["bf_eta1"]
-    elseif key == "bf_eta2_dp"
-        return ["bf_eta2"]
-    elseif key == "bf_eta3_dp"
-        return ["bf_eta3"]
-    elseif key == "bf_eta4_dp"
-        return ["bf_eta4", "bf_eta3_dp", "bf_eta3"]
-    elseif key == "bf_eta1_pd"
-        return ["bf_eta1_dp", "bf_eta1"]
-    elseif key == "bf_eta2_pd"
-        return ["bf_eta2_dp", "bf_eta2"]
-    elseif key == "bf_eta3_pd"
-        return ["bf_eta3_dp", "bf_eta3"]
-    elseif key == "bf_eta4_pd"
-        return ["bf_eta4_pd", "bf_eta4_dp", "bf_eta4", "bf_eta3_dp", "bf_eta3"]
-    elseif key == "bf_eta1_pp"
-        return ["bf_eta1"]
-    elseif key == "bf_eta2_pp"
-        return ["bf_eta2"]
-    elseif key == "bf_eta3_pp"
-        return ["bf_eta3"]
-    elseif key == "bf_eta4_pp"
-        return ["bf_eta4", "bf_eta3_pp", "bf_eta3"]
-    end
-    return String[]
-end
-
-"""
 用途: 判断参数名是否属于 Emery backflow 参数。
 
 参数:
@@ -2069,22 +1774,21 @@ function is_column_backflow_parameter(param_name::Symbol)::Bool
 end
 
 """
-用途: 从 JSON 构造初始参数, 并兼容旧的共享 backflow 参数名。
+用途: 从 JSON 构造初始参数。
 
 参数:
 - `json_path::AbstractString`: 参数 JSON 路径。
 - `param_names::Vector{Symbol}`: 当前 ansatz 的参数名顺序。
 - `default_params::Union{Nothing, Vector{Float64}}`: 可选默认参数。若 JSON 缺失当前
-  backflow 参数且没有旧 key fallback, 则使用对应位置的默认值。
+  backflow 参数, 则使用对应位置的默认值。
 
 返回:
 - `Vector{Float64}`: 按 `param_names` 顺序排列的初始参数。
 
-兼容规则:
-- 新 directed `dd/dp/pd/pp` 参数缺失时, 按 `column_backflow_json_fallback_keys`
-  使用旧共享参数或旧 `dp/pp` 解耦参数。
-- 若从不含 backflow 的 JSON 启动 backflow 计算, 缺失的 `bf_*` 参数使用当前命令行/构造
-  得到的 `default_params` 初值; 非 backflow 参数缺失仍然报错。
+说明:
+- 不再接受旧的共享 backflow 参数名, 如 `bf_eta1` 或 `bf_epsilon`。
+- 若从不含 backflow 的 JSON 启动 backflow 计算, 缺失的 `bf_*` 参数使用当前命令行默认值;
+  非 backflow 参数缺失仍然报错。
 """
 function build_column_init_params_from_json(
     json_path::AbstractString,
@@ -2105,21 +1809,10 @@ function build_column_init_params_from_json(
         if haskey(raw_dict, key)
             push!(init_params, Float64(raw_dict[key]))
         else
-            fallback_value = nothing
-            for fallback_key in column_backflow_json_fallback_keys(param_name)
-                if haskey(raw_dict, fallback_key)
-                    fallback_value = Float64(raw_dict[fallback_key])
-                    break
-                end
-            end
-            if fallback_value === nothing
-                if default_params !== nothing && is_column_backflow_parameter(param_name)
-                    push!(init_params, default_params[length(init_params) + 1])
-                else
-                    push!(missing_keys, key)
-                end
+            if default_params !== nothing && is_column_backflow_parameter(param_name)
+                push!(init_params, default_params[length(init_params) + 1])
             else
-                push!(init_params, fallback_value)
+                push!(missing_keys, key)
             end
         end
     end
@@ -2448,75 +2141,60 @@ function parse_column_bf_commandline()
         "--enable_timing"
         arg_type = String
         default = "false"
-        "--bf_epsilon"
-        arg_type = Float64
-        default = 1.0
         "--bf_epsilon_d"
         arg_type = Float64
-        default = NaN
+        default = 1.0
         "--bf_epsilon_p"
         arg_type = Float64
-        default = NaN
-        "--bf_eta1"
-        arg_type = Float64
-        default = 0.0
-        "--bf_eta2"
-        arg_type = Float64
-        default = 0.0
-        "--bf_eta3"
-        arg_type = Float64
-        default = 0.0
-        "--bf_eta4"
-        arg_type = Float64
-        default = NaN
+        default = 1.0
         "--bf_eta1_dd"
         arg_type = Float64
-        default = NaN
+        default = 0.0
         "--bf_eta2_dd"
         arg_type = Float64
-        default = NaN
+        default = 0.0
         "--bf_eta3_dd"
         arg_type = Float64
-        default = NaN
+        default = 0.0
         "--bf_eta4_dd"
         arg_type = Float64
-        default = NaN
+        default = 0.0
         "--bf_eta1_dp"
         arg_type = Float64
-        default = NaN
+        default = 0.0
         "--bf_eta2_dp"
         arg_type = Float64
-        default = NaN
+        default = 0.0
         "--bf_eta3_dp"
         arg_type = Float64
-        default = NaN
+        default = 0.0
         "--bf_eta4_dp"
         arg_type = Float64
-        default = NaN
+        default = 0.0
         "--bf_eta1_pd"
         arg_type = Float64
-        default = NaN
+        default = 0.0
         "--bf_eta2_pd"
         arg_type = Float64
-        default = NaN
+        default = 0.0
         "--bf_eta3_pd"
         arg_type = Float64
-        default = NaN
+        default = 0.0
         "--bf_eta4_pd"
         arg_type = Float64
-        default = NaN
+        default = 0.0
         "--bf_eta1_pp"
         arg_type = Float64
-        default = NaN
+        default = 0.0
         "--bf_eta2_pp"
         arg_type = Float64
-        default = NaN
+        default = 0.0
         "--bf_eta3_pp"
         arg_type = Float64
-        default = NaN
+        default = 0.0
         "--bf_eta4_pp"
         arg_type = Float64
-        default = NaN
+        default = 0.0
     end
     return parse_args(settings)
 end
@@ -2601,24 +2279,24 @@ function main_column_nonph_backflow()::Nothing
         pd_source_amplitudes,
         pp_source_bonds,
         pp_source_amplitudes,
-        first_non_nan_backflow_initial_value(args["bf_epsilon_d"], args["bf_epsilon"]),
-        first_non_nan_backflow_initial_value(args["bf_epsilon_p"], args["bf_epsilon_d"], args["bf_epsilon"]),
-        first_non_nan_backflow_initial_value(args["bf_eta1_dd"], args["bf_eta1_dp"], args["bf_eta1"]),
-        first_non_nan_backflow_initial_value(args["bf_eta2_dd"], args["bf_eta2_dp"], args["bf_eta2"]),
-        first_non_nan_backflow_initial_value(args["bf_eta3_dd"], args["bf_eta3_dp"], args["bf_eta3"]),
-        first_non_nan_backflow_initial_value(args["bf_eta4_dd"], args["bf_eta4_dp"], args["bf_eta4"], args["bf_eta3_dd"], args["bf_eta3_dp"], args["bf_eta3"]),
-        first_non_nan_backflow_initial_value(args["bf_eta1_dp"], args["bf_eta1"]),
-        first_non_nan_backflow_initial_value(args["bf_eta2_dp"], args["bf_eta2"]),
-        first_non_nan_backflow_initial_value(args["bf_eta3_dp"], args["bf_eta3"]),
-        first_non_nan_backflow_initial_value(args["bf_eta4_dp"], args["bf_eta4"], args["bf_eta3_dp"], args["bf_eta3"]),
-        first_non_nan_backflow_initial_value(args["bf_eta1_pd"], args["bf_eta1_dp"], args["bf_eta1"]),
-        first_non_nan_backflow_initial_value(args["bf_eta2_pd"], args["bf_eta2_dp"], args["bf_eta2"]),
-        first_non_nan_backflow_initial_value(args["bf_eta3_pd"], args["bf_eta3_dp"], args["bf_eta3"]),
-        first_non_nan_backflow_initial_value(args["bf_eta4_pd"], args["bf_eta4_dp"], args["bf_eta4"], args["bf_eta3_dp"], args["bf_eta3"]),
-        first_non_nan_backflow_initial_value(args["bf_eta1_pp"], args["bf_eta1"]),
-        first_non_nan_backflow_initial_value(args["bf_eta2_pp"], args["bf_eta2"]),
-        first_non_nan_backflow_initial_value(args["bf_eta3_pp"], args["bf_eta3"]),
-        first_non_nan_backflow_initial_value(args["bf_eta4_pp"], args["bf_eta4"], args["bf_eta3_pp"], args["bf_eta3"]),
+        args["bf_epsilon_d"],
+        args["bf_epsilon_p"],
+        args["bf_eta1_dd"],
+        args["bf_eta2_dd"],
+        args["bf_eta3_dd"],
+        args["bf_eta4_dd"],
+        args["bf_eta1_dp"],
+        args["bf_eta2_dp"],
+        args["bf_eta3_dp"],
+        args["bf_eta4_dp"],
+        args["bf_eta1_pd"],
+        args["bf_eta2_pd"],
+        args["bf_eta3_pd"],
+        args["bf_eta4_pd"],
+        args["bf_eta1_pp"],
+        args["bf_eta2_pp"],
+        args["bf_eta3_pp"],
+        args["bf_eta4_pp"],
     )
     projector = build_emery_density_jastrow_projector(
         lx,

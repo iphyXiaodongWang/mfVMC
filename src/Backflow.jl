@@ -6,7 +6,7 @@ export AbstractBackflowTerm, AbstractBackflowCorrectionTerm
 export NoBackflowTerm
 export CompositeBackflowTerm
 export BackflowEpsilonTerm, BackflowEta1DoublonHoleTerm
-export BackflowEta2SpinExchangeTerm, BackflowEta3MixedVirtualHopTerm
+export BackflowEta2SpinExchangeTerm
 export BackflowEta3DoublonSingleTerm, BackflowEta4SingleHoleTerm
 export uses_backflow
 export backflow_param_names, backflow_param_values, backflow_param_count
@@ -20,7 +20,8 @@ export build_backflow_derivative_orbitals
 用途: 管理 determinant 路线中的 backflow correlation 轨道修正。
 
 当前实现范围:
-- 当前实现保留组合式 Eq.(5) backflow correction terms: `epsilon`, `eta1`, `eta2`, `eta3`。
+- 当前实现保留 Emery directed split backflow correction terms:
+  `epsilon`, `eta1`, `eta2`, `eta3_doublon_single`, `eta4`。
 - 当前实现只假设轨道矩阵采用每个 site 两行的 spin-resolved layout:
   第一行为 `UP`, 第二行为 `DN`。
 - 该 layout 可由不同 determinant 表示共用, 具体行的物理解释由调用方决定。
@@ -28,7 +29,8 @@ export build_backflow_derivative_orbitals
 当前代码采用的组合式写法为:
 
 - `U_b(i, sigma, k; x) = U_0(i, sigma, k) + sum_m delta U_m(i, sigma, k; x)`,
-  其中 `m` 遍历 `epsilon`, `eta1`, `eta2`, `eta3` correction terms。
+  其中 `m` 遍历 `epsilon`, `eta1`, `eta2`, `eta3_doublon_single`, `eta4`
+  correction terms。
 
 其中:
 - `i, j` 为格点指标, `sigma` 为物理自旋标签, `k` 为轨道指标。
@@ -53,7 +55,7 @@ export build_backflow_derivative_orbitals
 abstract type AbstractBackflowTerm end
 abstract type AbstractBackflowCorrectionTerm end
 
-const BACKFLOW_EPSILON_MASK_TERMS = (:eta1, :eta2, :eta3, :eta3_doublon_single, :eta4, :eta4_single_hole)
+const BACKFLOW_EPSILON_MASK_TERMS = (:eta1, :eta2, :eta3_doublon_single, :eta4)
 
 
 """
@@ -95,7 +97,8 @@ end
 用途: 规范化 `epsilon` prefactor 使用的 virtual hopping mask 通道列表。
 
 参数:
-- `epsilon_mask_terms::AbstractVector{Symbol}`: 允许的元素为 `:eta1`, `:eta2`, `:eta3`。
+- `epsilon_mask_terms::AbstractVector{Symbol}`: 允许的元素为 `:eta1`, `:eta2`,
+  `:eta3_doublon_single`, `:eta4`。
 
 返回:
 - `Vector{Symbol}`: 去重后且保持输入顺序的 mask 通道列表。
@@ -106,7 +109,7 @@ function normalize_backflow_epsilon_mask_terms(
     normalized_terms = Symbol[]
     for mask_term in epsilon_mask_terms
         if !(mask_term in BACKFLOW_EPSILON_MASK_TERMS)
-            error("Unknown epsilon mask term $(mask_term). Allowed terms are :eta1, :eta2, :eta3, :eta3_doublon_single, :eta4, and :eta4_single_hole.")
+            error("Unknown epsilon mask term $(mask_term). Allowed terms are :eta1, :eta2, :eta3_doublon_single, and :eta4.")
         end
         if !(mask_term in normalized_terms)
             push!(normalized_terms, mask_term)
@@ -238,29 +241,6 @@ mutable struct BackflowEta2SpinExchangeTerm <: AbstractBackflowCorrectionTerm
 end
 
 """
-用途: Eq.(5) 中的 `eta3` mixed virtual hopping backflow correction term。
-
-数学公式:
-- `delta U_eta3(i, sigma) = eta3_bf * sum_j t_ij *
-   (D_i n_j_-sigma h_j_sigma + n_i_sigma h_i_-sigma H_j) * U_0(j, sigma)`。
-
-字段:
-- `param_name::Symbol`: 参数名。
-- `eta3_bf::Float64`: `eta3` 参数值。
-- `source_bonds::Vector{Tuple{Int, Int}}`: 有向键 `(i, j)` 列表。
-- `source_amplitudes::Vector{Float64}`: 与有向键对齐的 hopping 振幅。
-"""
-mutable struct BackflowEta3MixedVirtualHopTerm <: AbstractBackflowCorrectionTerm
-    param_name::Symbol
-    eta3_bf::Float64
-    source_bonds::Vector{Tuple{Int,Int}}
-    source_amplitudes::Vector{Float64}
-    source_data_signature::UInt
-    outgoing_bond_indices_by_source::Vector{Vector{Int}}
-    incoming_source_sites_by_target::Vector{Vector{Int}}
-end
-
-"""
 用途: 三带 Emery split backflow 中的 `eta3` doublon-single correction term。
 
 数学公式:
@@ -362,84 +342,6 @@ function build_composite_incoming_source_sites_by_target(
 end
 
 """
-用途: 从 composite backflow terms 中取出指定类型的 correction term。
-
-参数:
-- `term_type::Type{T}`: 目标 correction term 类型。
-- `terms::Vector{AbstractBackflowCorrectionTerm}`: composite 中的 correction term 列表。
-
-返回:
-- `Union{Nothing, T}`: 若存在对应 correction term, 返回该对象, 否则返回 `nothing`。
-"""
-function find_composite_correction_term(
-    term_type::Type{T},
-    terms::Vector{AbstractBackflowCorrectionTerm},
-)::Union{Nothing,T} where {T<:AbstractBackflowCorrectionTerm}
-    for correction_term in terms
-        if correction_term isa T
-            return correction_term
-        end
-    end
-    return nothing
-end
-
-"""
-用途: 判断 composite backflow 的所有 correction terms 是否共享同一套 source 数据。
-
-参数:
-- `terms::Vector{AbstractBackflowCorrectionTerm}`: composite 中的 correction term 列表。
-
-返回:
-- `Bool`: 所有 correction terms 的 `source_data_signature` 相同时返回 `true`。
-"""
-function has_shared_backflow_source_data(
-    terms::Vector{AbstractBackflowCorrectionTerm},
-)::Bool
-    isempty(terms) && return false
-    reference_signature = terms[1].source_data_signature
-    for correction_term in terms
-        if correction_term.source_data_signature != reference_signature
-            return false
-        end
-    end
-    return true
-end
-
-"""
-用途: 判断单个 correction term 是否被 shared-source fused 局域快路径支持。
-
-参数:
-- `correction_term::AbstractBackflowCorrectionTerm`: 待判断的 backflow correction term。
-
-返回:
-- `Bool`: 只有旧 Eq.(5) 的 `epsilon/eta1/eta2/mixed eta3` 返回 `true`。
-"""
-function supports_shared_source_fused_site_block(
-    correction_term::AbstractBackflowCorrectionTerm,
-)::Bool
-    return correction_term isa BackflowEpsilonTerm ||
-           correction_term isa BackflowEta1DoublonHoleTerm ||
-           correction_term isa BackflowEta2SpinExchangeTerm ||
-           correction_term isa BackflowEta3MixedVirtualHopTerm
-end
-
-"""
-用途: 判断 composite backflow 是否可以使用 shared-source fused 局域快路径。
-
-参数:
-- `backflow_term::CompositeBackflowTerm`: 组合式 backflow 对象。
-
-返回:
-- `Bool`: source 数据共享且所有 term 都属于旧 Eq.(5) fused 支持集合时返回 `true`。
-"""
-function can_use_shared_source_fused_site_block(
-    backflow_term,
-)::Bool
-    return backflow_term.has_shared_source_data &&
-           all(supports_shared_source_fused_site_block, backflow_term.terms)
-end
-
-"""
 用途: 判断参数名是否属于指定 directed backflow 后缀组。
 
 参数:
@@ -535,47 +437,25 @@ end
 - `terms::Vector{AbstractBackflowCorrectionTerm}`: composite 中的 term 列表。
 
 返回:
-- `Tuple{Bool, Vector{DirectedSplitBackflowGroup}}`: 第一项表示是否可以使用 grouped fused
-  site-block path, 第二项为按 `dd/dp/pd/pp` 或旧 `dp/pd/pp` 顺序保存的组缓存。
+- `Vector{DirectedSplitBackflowGroup}`: 按 `dd/dp/pd/pp` 顺序保存的组缓存。
 """
 function build_directed_split_backflow_groups(
     terms::Vector{AbstractBackflowCorrectionTerm},
-)::Tuple{Bool,Vector{DirectedSplitBackflowGroup}}
-    epsilon_count = count(correction_term -> correction_term isa BackflowEpsilonTerm, terms)
-    for suffixes in ((:dd, :dp, :pd, :pp), (:dp, :pd, :pp))
-        groups = DirectedSplitBackflowGroup[]
-        for suffix in suffixes
-            group = collect_directed_split_backflow_group(terms, suffix)
-            group === nothing && break
-            push!(groups, group)
-        end
-        if length(groups) != length(suffixes)
-            continue
-        end
-
-        expected_term_count = 4 * length(groups) + epsilon_count
-        if length(terms) == expected_term_count
-            return true, groups
-        end
+)::Vector{DirectedSplitBackflowGroup}
+    groups = DirectedSplitBackflowGroup[]
+    for suffix in (:dd, :dp, :pd, :pp)
+        group = collect_directed_split_backflow_group(terms, suffix)
+        group === nothing && error("Directed Emery backflow requires eta1/eta2/eta3/eta4 group for suffix $suffix.")
+        push!(groups, group)
     end
 
-    return false, DirectedSplitBackflowGroup[]
-end
+    epsilon_count = count(correction_term -> correction_term isa BackflowEpsilonTerm, terms)
+    expected_term_count = 4 * length(groups) + epsilon_count
+    if length(terms) != expected_term_count
+        error("Directed Emery backflow accepts only epsilon terms plus dd/dp/pd/pp eta1..eta4 groups.")
+    end
 
-"""
-用途: 判断 composite backflow 是否可以使用 directed grouped fused 局域快路径。
-
-参数:
-- `backflow_term::CompositeBackflowTerm`: 组合式 backflow 对象。
-
-返回:
-- `Bool`: 当对象由可选 `epsilon` 加上 `dd/dp/pd/pp` 四组 split `eta1..eta4` 组成,
-  且每组内部 source 数据一致时返回 `true`。
-"""
-function can_use_grouped_source_fused_site_block(
-    backflow_term,
-)::Bool
-    return backflow_term.has_grouped_source_data
+    return groups
 end
 
 """
@@ -585,49 +465,23 @@ end
 - `terms::Vector{AbstractBackflowCorrectionTerm}`: 按参数顺序保存的 backflow correction term 列表。
 - `incoming_source_sites_by_target::Vector{Vector{Int}}`: composite 级别合并后的 incoming source graph,
   用于 proposal 局域更新时一次性收集 affected sites。
-- `has_shared_source_data::Bool`: 所有 correction terms 是否共享同一套 source 数据。
-- `shared_source_bonds, shared_source_amplitudes`: shared-source fast path 使用的有向键与振幅。
-- `shared_outgoing_bond_indices_by_source`: shared-source fast path 使用的 outgoing graph。
-- `has_grouped_source_data::Bool`: 是否存在可用于 directed grouped fused path 的 `dd/dp/pd/pp` 或旧 `dp/pd/pp` 组缓存。
 - `grouped_source_groups::Vector{DirectedSplitBackflowGroup}`: directed grouped fused path 使用的组缓存。
 - `epsilon_terms::Vector{BackflowEpsilonTerm}`: composite 中所有 epsilon correction term, 允许不同
   source 子图使用不同 epsilon 参数。
 """
-mutable struct CompositeBackflowTerm <: AbstractBackflowTerm
+struct CompositeBackflowTerm <: AbstractBackflowTerm
     terms::Vector{AbstractBackflowCorrectionTerm}
     incoming_source_sites_by_target::Vector{Vector{Int}}
-    has_shared_source_data::Bool
-    shared_source_bonds::Vector{Tuple{Int,Int}}
-    shared_source_amplitudes::Vector{Float64}
-    shared_outgoing_bond_indices_by_source::Vector{Vector{Int}}
-    has_grouped_source_data::Bool
     grouped_source_groups::Vector{DirectedSplitBackflowGroup}
     epsilon_terms::Vector{BackflowEpsilonTerm}
-    epsilon_term::Union{Nothing,BackflowEpsilonTerm}
-    eta1_term::Union{Nothing,BackflowEta1DoublonHoleTerm}
-    eta2_term::Union{Nothing,BackflowEta2SpinExchangeTerm}
-    eta3_term::Union{Nothing,BackflowEta3MixedVirtualHopTerm}
     function CompositeBackflowTerm(terms::Vector{<:AbstractBackflowCorrectionTerm})
         term_list = AbstractBackflowCorrectionTerm[terms...]
-        has_shared_source_data = has_shared_backflow_source_data(term_list)
-        shared_source_bonds = has_shared_source_data ? term_list[1].source_bonds : Tuple{Int,Int}[]
-        shared_source_amplitudes = has_shared_source_data ? term_list[1].source_amplitudes : Float64[]
-        shared_outgoing_bond_indices_by_source = has_shared_source_data ? term_list[1].outgoing_bond_indices_by_source : Vector{Int}[]
-        has_grouped_source_data, grouped_source_groups = build_directed_split_backflow_groups(term_list)
+        grouped_source_groups = build_directed_split_backflow_groups(term_list)
         return new(
             term_list,
             build_composite_incoming_source_sites_by_target(term_list),
-            has_shared_source_data,
-            shared_source_bonds,
-            shared_source_amplitudes,
-            shared_outgoing_bond_indices_by_source,
-            has_grouped_source_data,
             grouped_source_groups,
             BackflowEpsilonTerm[correction_term for correction_term in term_list if correction_term isa BackflowEpsilonTerm],
-            find_composite_correction_term(BackflowEpsilonTerm, term_list),
-            find_composite_correction_term(BackflowEta1DoublonHoleTerm, term_list),
-            find_composite_correction_term(BackflowEta2SpinExchangeTerm, term_list),
-            find_composite_correction_term(BackflowEta3MixedVirtualHopTerm, term_list),
         )
     end
 end
@@ -668,7 +522,7 @@ end
 - `param_name::Symbol`: 参数名, 默认 `:bf_epsilon`。
 - `epsilon_bf::Real`: `epsilon` 参数值。
 - `epsilon_mask_terms::AbstractVector{Symbol}`: 打开 `epsilon` prefactor 的 virtual hopping 通道,
-  允许 `:eta1`, `:eta2`, `:eta3`。
+  允许 `:eta1`, `:eta2`, `:eta3_doublon_single`, `:eta4`。
 - `source_bonds::Vector{Tuple{Int, Int}}`: 有向键 `(i, j)` 列表。
 - `source_amplitudes::Vector{<:Real}`: 每条有向键对应的 hopping 振幅。
 
@@ -747,36 +601,6 @@ function BackflowEta2SpinExchangeTerm(;
     return BackflowEta2SpinExchangeTerm(
         param_name,
         Float64(eta2_bf),
-        source_cache.source_bonds,
-        source_cache.source_amplitudes,
-        source_cache.source_data_signature,
-        source_cache.outgoing_bond_indices_by_source,
-        source_cache.incoming_source_sites_by_target,
-    )
-end
-
-"""
-用途: 构造 Eq.(5) 的 `eta3` mixed virtual hopping backflow correction term。
-
-参数:
-- `param_name::Symbol`: 参数名, 默认 `:bf_eta3`。
-- `eta3_bf::Real`: `eta3` 参数值。
-- `source_bonds::Vector{Tuple{Int, Int}}`: 有向键 `(i, j)` 列表。
-- `source_amplitudes::Vector{<:Real}`: 每条有向键对应的 hopping 振幅。
-
-返回:
-- `BackflowEta3MixedVirtualHopTerm`: 带 source 缓存的 correction term。
-"""
-function BackflowEta3MixedVirtualHopTerm(;
-    param_name::Symbol=:bf_eta3,
-    eta3_bf::Real=0.0,
-    source_bonds::Vector{Tuple{Int,Int}}=Tuple{Int,Int}[],
-    source_amplitudes::Vector{<:Real}=ones(Float64, length(source_bonds)),
-)
-    source_cache = build_backflow_correction_source_cache(source_bonds, source_amplitudes)
-    return BackflowEta3MixedVirtualHopTerm(
-        param_name,
-        Float64(eta3_bf),
         source_cache.source_bonds,
         source_cache.source_amplitudes,
         source_cache.source_data_signature,
@@ -886,9 +710,6 @@ function backflow_correction_param_value(correction_term::BackflowEta1DoublonHol
 end
 function backflow_correction_param_value(correction_term::BackflowEta2SpinExchangeTerm)::Float64
     return correction_term.eta2_bf
-end
-function backflow_correction_param_value(correction_term::BackflowEta3MixedVirtualHopTerm)::Float64
-    return correction_term.eta3_bf
 end
 function backflow_correction_param_value(correction_term::BackflowEta3DoublonSingleTerm)::Float64
     return correction_term.eta3_bf
@@ -1180,63 +1001,6 @@ function add_backflow_correction_site_block_after_proposal!(
             end
             target_row = 2 * (target_site - 1) + row_offset
             @views site_block_buffer[row_offset, :] .+= eta2_value * bond_amplitude * T(eta2_factor) .* base_orbitals[target_row, :]
-        end
-    end
-
-    return nothing
-end
-
-"""
-用途: 将 Eq.(5) 的 `eta3` correction term 在 proposal 后对单个站点行块的贡献累加到 buffer。
-
-数学公式:
-- `delta U_eta3(i, sigma; x') = eta3_bf * sum_j t_ij *
-   (D_i n_j_-sigma h_j_sigma + n_i_sigma h_i_-sigma H_j) * U_0(j, sigma)`。
-
-参数:
-- `site_block_buffer::AbstractMatrix{T}`: 待累加的 `2 x N_orb` 站点行块。
-- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
-- `state_vector::Vector{Int8}`: proposal 提交前的构型状态数组。
-- `correction_term::BackflowEta3MixedVirtualHopTerm`: `eta3` correction term。
-- `proposal::MoveProposal`: Monte Carlo proposal。
-- `site_index::Int`: 待写入的站点编号。
-
-返回:
-- `nothing`。
-"""
-function add_backflow_correction_site_block_after_proposal!(
-    site_block_buffer::AbstractMatrix{T},
-    base_orbitals::AbstractMatrix{T},
-    state_vector::Vector{Int8},
-    correction_term::BackflowEta3MixedVirtualHopTerm,
-    proposal::MoveProposal,
-    site_index::Int,
-) where {T}
-    if site_index > length(correction_term.outgoing_bond_indices_by_source)
-        return nothing
-    end
-
-    state_i = get_site_state_after_proposal(state_vector, proposal, site_index)
-    eta3_value = T(correction_term.eta3_bf)
-    for bond_index in correction_term.outgoing_bond_indices_by_source[site_index]
-        (_, target_site) = correction_term.source_bonds[bond_index]
-        state_j = get_site_state_after_proposal(state_vector, proposal, target_site)
-        bond_amplitude = T(correction_term.source_amplitudes[bond_index])
-        for row_offset in 1:2
-            spin = backflow_spin_from_row_offset(row_offset)
-            opposite_spin = backflow_opposite_spin(spin)
-            eta3_factor =
-                (state_i == DB ? 1.0 : 0.0) *
-                backflow_n_sigma(state_j, opposite_spin) *
-                backflow_h_sigma(state_j, spin) +
-                backflow_n_sigma(state_i, spin) *
-                backflow_h_sigma(state_i, opposite_spin) *
-                (state_j == HOLE ? 1.0 : 0.0)
-            if eta3_factor == 0.0
-                continue
-            end
-            target_row = 2 * (target_site - 1) + row_offset
-            @views site_block_buffer[row_offset, :] .+= eta3_value * bond_amplitude * T(eta3_factor) .* base_orbitals[target_row, :]
         end
     end
 
@@ -1577,62 +1341,6 @@ function add_backflow_correction_site_row_after_proposal!(
 end
 
 """
-用途: 将 mixed `eta3` correction term 在 proposal 后对单个 occupied row 的贡献累加到 buffer。
-
-数学公式:
-- `delta U_eta3(i,sigma) = eta3 * sum_j t_ij *
-   (D_i n_j_-sigma h_j_sigma + n_i_sigma h_i_-sigma H_j) U_0(j,sigma)`。
-
-参数:
-- `site_row_buffer::AbstractVector{T}`: 待累加的单行轨道 buffer。
-- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
-- `state_vector::Vector{Int8}`: proposal 提交前的构型状态数组。
-- `correction_term::BackflowEta3MixedVirtualHopTerm`: mixed `eta3` correction term。
-- `proposal::MoveProposal`: Monte Carlo proposal。
-- `site_index::Int`: 待写入的站点编号。
-- `row_offset::Int`: 站点内部自旋行偏移, `1` 为 up, `2` 为 down。
-- `row_index::Int`: 当前行的全局行号, 此函数不直接使用, 保持接口一致。
-
-返回:
-- `nothing`。
-"""
-function add_backflow_correction_site_row_after_proposal!(
-    site_row_buffer::AbstractVector{T},
-    base_orbitals::AbstractMatrix{T},
-    state_vector::Vector{Int8},
-    correction_term::BackflowEta3MixedVirtualHopTerm,
-    proposal::MoveProposal,
-    site_index::Int,
-    row_offset::Int,
-    row_index::Int,
-) where {T}
-    if site_index > length(correction_term.outgoing_bond_indices_by_source)
-        return nothing
-    end
-
-    state_i = get_site_state_after_proposal(state_vector, proposal, site_index)
-    spin = backflow_spin_from_row_offset(row_offset)
-    eta3_value = T(correction_term.eta3_bf)
-    if eta3_value == zero(T) || backflow_n_sigma(state_i, spin) == 0.0
-        return nothing
-    end
-
-    for bond_index in correction_term.outgoing_bond_indices_by_source[site_index]
-        (_, target_site) = correction_term.source_bonds[bond_index]
-        state_j = get_site_state_after_proposal(state_vector, proposal, target_site)
-        eta3_factor = compute_eta3_virtual_hopping_factor(state_i, state_j, spin)
-        if eta3_factor == 0.0
-            continue
-        end
-        target_row = 2 * (target_site - 1) + row_offset
-        bond_amplitude = T(correction_term.source_amplitudes[bond_index])
-        @views site_row_buffer .+= eta3_value * bond_amplitude * T(eta3_factor) .* base_orbitals[target_row, :]
-    end
-
-    return nothing
-end
-
-"""
 用途: 将 split `eta3` correction term 在 proposal 后对单个 occupied row 的贡献累加到 buffer。
 
 数学公式:
@@ -1790,107 +1498,6 @@ function fill_backflow_site_row_after_proposal_by_terms!(
 end
 
 """
-用途: 对共享 source 数据的 composite backflow 使用 fused 逻辑写入 proposal 后的单个 occupied row。
-
-数学公式:
-- 对固定 `(i,sigma)` 一次性计算旧 Eq.(5) 的 `epsilon/eta1/eta2/mixed eta3`
-  contribution, 避免逐 correction term 重复扫描同一批 outgoing bonds。
-- 对非 `epsilon` 项, 若 source site `i` 在 proposal 后没有 `sigma` 电子, 所有 eta
-  contribution 必为零, 可跳过 eta 系数计算。
-
-参数:
-- `site_row_buffer::AbstractVector{T}`: 输出 buffer, 长度必须等于轨道数。
-- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
-- `state_vector::Vector{Int8}`: proposal 提交前的构型状态数组。
-- `backflow_term::CompositeBackflowTerm`: shared-source 组合式 backflow 对象。
-- `proposal::MoveProposal`: Monte Carlo proposal。
-- `site_index::Int`: 待写入的站点编号。
-- `row_offset::Int`: 站点内部自旋行偏移, `1` 为 up, `2` 为 down。
-
-返回:
-- `nothing`。
-"""
-function fill_shared_source_composite_site_row_after_proposal!(
-    site_row_buffer::AbstractVector{T},
-    base_orbitals::AbstractMatrix{T},
-    state_vector::Vector{Int8},
-    backflow_term::CompositeBackflowTerm,
-    proposal::MoveProposal,
-    site_index::Int,
-    row_offset::Int,
-) where {T}
-    row_index = initialize_site_row_base_after_proposal!(
-        site_row_buffer,
-        base_orbitals,
-        state_vector,
-        site_index,
-        row_offset,
-    )
-    if !backflow_term.has_shared_source_data ||
-       site_index > length(backflow_term.shared_outgoing_bond_indices_by_source)
-        return nothing
-    end
-
-    state_i = get_site_state_after_proposal(state_vector, proposal, site_index)
-    spin = backflow_spin_from_row_offset(row_offset)
-    epsilon_term = backflow_term.epsilon_term
-    eta1_term = backflow_term.eta1_term
-    eta2_term = backflow_term.eta2_term
-    eta3_term = backflow_term.eta3_term
-    epsilon_shift = epsilon_term === nothing ? zero(T) : T(epsilon_term.epsilon_bf - 1.0)
-    eta1_value = eta1_term === nothing ? zero(T) : T(eta1_term.eta1_bf)
-    eta2_value = eta2_term === nothing ? zero(T) : T(eta2_term.eta2_bf)
-    eta3_value = eta3_term === nothing ? zero(T) : T(eta3_term.eta3_bf)
-    source_spin_is_occupied = backflow_n_sigma(state_i, spin) != 0.0
-    epsilon_is_active = false
-
-    for bond_index in backflow_term.shared_outgoing_bond_indices_by_source[site_index]
-        (_, target_site) = backflow_term.shared_source_bonds[bond_index]
-        state_j = get_site_state_after_proposal(state_vector, proposal, target_site)
-
-        if epsilon_term !== nothing &&
-           epsilon_shift != zero(T) &&
-           !epsilon_is_active &&
-           is_backflow_epsilon_row_active(
-               state_i,
-               state_j,
-               spin,
-               epsilon_term.epsilon_mask_terms,
-           )
-            epsilon_is_active = true
-        end
-
-        if !source_spin_is_occupied
-            continue
-        end
-
-        bond_amplitude = T(backflow_term.shared_source_amplitudes[bond_index])
-        eta1_factor = state_i == DB && state_j == HOLE ? one(T) : zero(T)
-        eta2_factor = compute_eta2_virtual_hopping_factor(state_i, state_j, spin)
-        eta3_factor = compute_eta3_virtual_hopping_factor(state_i, state_j, spin)
-        coefficient =
-            bond_amplitude *
-            (
-                eta1_value * eta1_factor +
-                eta2_value * T(eta2_factor) +
-                eta3_value * T(eta3_factor)
-            )
-        if coefficient == zero(T)
-            continue
-        end
-
-        target_row = 2 * (target_site - 1) + row_offset
-        @views site_row_buffer .+= coefficient .* base_orbitals[target_row, :]
-    end
-
-    if epsilon_is_active
-        @views site_row_buffer .+= epsilon_shift .* base_orbitals[row_index, :]
-    end
-
-    return nothing
-end
-
-"""
 用途: 对 directed split backflow 使用 grouped fused 逻辑写入 proposal 后的单个 occupied row。
 
 数学公式:
@@ -2013,29 +1620,7 @@ function fill_backflow_site_row_after_proposal!(
     site_index::Int,
     row_offset::Int,
 ) where {T}
-    if can_use_shared_source_fused_site_block(backflow_term)
-        return fill_shared_source_composite_site_row_after_proposal!(
-            site_row_buffer,
-            base_orbitals,
-            state_vector,
-            backflow_term,
-            proposal,
-            site_index,
-            row_offset,
-        )
-    end
-    if can_use_grouped_source_fused_site_block(backflow_term)
-        return fill_grouped_source_composite_site_row_after_proposal!(
-            site_row_buffer,
-            base_orbitals,
-            state_vector,
-            backflow_term,
-            proposal,
-            site_index,
-            row_offset,
-        )
-    end
-    return fill_backflow_site_row_after_proposal_by_terms!(
+    return fill_grouped_source_composite_site_row_after_proposal!(
         site_row_buffer,
         base_orbitals,
         state_vector,
@@ -2083,128 +1668,6 @@ function fill_backflow_site_block_after_proposal_by_terms!(
             proposal,
             site_index,
         )
-    end
-
-    return nothing
-end
-
-"""
-用途: 对共享 source 数据的 composite backflow 使用 fused 逻辑写入 proposal 后的局域 site block。
-
-参数:
-- `site_block_buffer::AbstractMatrix{T}`: 输出 buffer, 形状必须为 `2 x N_orb`。
-- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
-- `state_vector::Vector{Int8}`: proposal 提交前的构型状态数组。
-- `backflow_term::CompositeBackflowTerm`: 组合式 Eq.(5) backflow 对象, 需满足 `has_shared_source_data == true`。
-- `proposal::MoveProposal`: Monte Carlo proposal。
-- `site_index::Int`: 待写入的站点编号。
-
-返回:
-- `nothing`。
-
-公式:
-- 对同一条有向键 `(i,j)` 一次性计算 Eq.(5) 中 `epsilon`, `eta1`, `eta2`, `eta3`
-  对 site `i` 的贡献, 避免四个 correction term 分别扫描同一套 outgoing bonds。
-"""
-function fill_shared_source_composite_site_block_after_proposal!(
-    site_block_buffer::AbstractMatrix{T},
-    base_orbitals::AbstractMatrix{T},
-    state_vector::Vector{Int8},
-    backflow_term::CompositeBackflowTerm,
-    proposal::MoveProposal,
-    site_index::Int,
-) where {T}
-    row_up, row_down = initialize_site_block_base_after_proposal!(
-        site_block_buffer,
-        base_orbitals,
-        state_vector,
-        site_index,
-    )
-    if !backflow_term.has_shared_source_data ||
-       site_index > length(backflow_term.shared_outgoing_bond_indices_by_source)
-        return nothing
-    end
-
-    state_i = get_site_state_after_proposal(state_vector, proposal, site_index)
-    epsilon_term = backflow_term.epsilon_term
-    eta1_term = backflow_term.eta1_term
-    eta2_term = backflow_term.eta2_term
-    eta3_term = backflow_term.eta3_term
-    epsilon_shift = epsilon_term === nothing ? zero(T) : T(epsilon_term.epsilon_bf - 1.0)
-    eta1_value = eta1_term === nothing ? zero(T) : T(eta1_term.eta1_bf)
-    eta2_value = eta2_term === nothing ? zero(T) : T(eta2_term.eta2_bf)
-    eta3_value = eta3_term === nothing ? zero(T) : T(eta3_term.eta3_bf)
-    epsilon_up_is_active = false
-    epsilon_down_is_active = false
-
-    for bond_index in backflow_term.shared_outgoing_bond_indices_by_source[site_index]
-        (_, target_site) = backflow_term.shared_source_bonds[bond_index]
-        state_j = get_site_state_after_proposal(state_vector, proposal, target_site)
-        bond_amplitude = T(backflow_term.shared_source_amplitudes[bond_index])
-        target_row_up = 2 * (target_site - 1) + 1
-        target_row_down = target_row_up + 1
-
-        if epsilon_term !== nothing && epsilon_shift != zero(T)
-            if !epsilon_up_is_active &&
-               is_backflow_epsilon_row_active(
-                state_i,
-                state_j,
-                UP,
-                epsilon_term.epsilon_mask_terms,
-            )
-                epsilon_up_is_active = true
-            end
-            if !epsilon_down_is_active &&
-               is_backflow_epsilon_row_active(
-                state_i,
-                state_j,
-                DN,
-                epsilon_term.epsilon_mask_terms,
-            )
-                epsilon_down_is_active = true
-            end
-        end
-
-        eta1_factor = state_i == DB && state_j == HOLE ? one(T) : zero(T)
-        if eta1_value != zero(T) && eta1_factor != zero(T)
-            coefficient = eta1_value * bond_amplitude
-            @views site_block_buffer[1, :] .+= coefficient .* base_orbitals[target_row_up, :]
-            @views site_block_buffer[2, :] .+= coefficient .* base_orbitals[target_row_down, :]
-        end
-
-        for row_offset in 1:2
-            spin = backflow_spin_from_row_offset(row_offset)
-            opposite_spin = backflow_opposite_spin(spin)
-            eta2_factor =
-                backflow_n_sigma(state_i, spin) *
-                backflow_h_sigma(state_i, opposite_spin) *
-                backflow_n_sigma(state_j, opposite_spin) *
-                backflow_h_sigma(state_j, spin)
-            eta3_factor =
-                (state_i == DB ? 1.0 : 0.0) *
-                backflow_n_sigma(state_j, opposite_spin) *
-                backflow_h_sigma(state_j, spin) +
-                backflow_n_sigma(state_i, spin) *
-                backflow_h_sigma(state_i, opposite_spin) *
-                (state_j == HOLE ? 1.0 : 0.0)
-            coefficient =
-                eta2_value * bond_amplitude * T(eta2_factor) +
-                eta3_value * bond_amplitude * T(eta3_factor)
-            if coefficient == zero(T)
-                continue
-            end
-            target_row = row_offset == 1 ? target_row_up : target_row_down
-            @views site_block_buffer[row_offset, :] .+= coefficient .* base_orbitals[target_row, :]
-        end
-    end
-
-    if epsilon_shift != zero(T)
-        if epsilon_up_is_active
-            @views site_block_buffer[1, :] .+= epsilon_shift .* base_orbitals[row_up, :]
-        end
-        if epsilon_down_is_active
-            @views site_block_buffer[2, :] .+= epsilon_shift .* base_orbitals[row_down, :]
-        end
     end
 
     return nothing
@@ -2347,7 +1810,7 @@ end
 
 数学公式:
 - `U_b(i, sigma; x') = U_0(i, sigma) + sum_m delta U_m(i, sigma; x')`,
-  其中 `m` 遍历 `epsilon, eta1, eta2, eta3` 等 correction terms。
+  其中 `m` 遍历 `epsilon, eta1, eta2, eta3_doublon_single, eta4` correction terms。
 
 参数:
 - `site_block_buffer::AbstractMatrix{T}`: 输出 buffer, 形状必须为 `2 x N_orb`。
@@ -2368,27 +1831,7 @@ function fill_backflow_site_block_after_proposal!(
     proposal::MoveProposal,
     site_index::Int,
 ) where {T}
-    if can_use_shared_source_fused_site_block(backflow_term)
-        return fill_shared_source_composite_site_block_after_proposal!(
-            site_block_buffer,
-            base_orbitals,
-            state_vector,
-            backflow_term,
-            proposal,
-            site_index,
-        )
-    end
-    if can_use_grouped_source_fused_site_block(backflow_term)
-        return fill_grouped_source_composite_site_block_after_proposal!(
-            site_block_buffer,
-            base_orbitals,
-            state_vector,
-            backflow_term,
-            proposal,
-            site_index,
-        )
-    end
-    return fill_backflow_site_block_after_proposal_by_terms!(
+    return fill_grouped_source_composite_site_block_after_proposal!(
         site_block_buffer,
         base_orbitals,
         state_vector,
@@ -2477,17 +1920,6 @@ function update_backflow_correction_param!(
         return false
     end
     correction_term.eta2_bf = Float64(param_value)
-    return true
-end
-function update_backflow_correction_param!(
-    correction_term::BackflowEta3MixedVirtualHopTerm,
-    param_name::Symbol,
-    param_value::Real,
-)::Bool
-    if param_name != correction_term.param_name
-        return false
-    end
-    correction_term.eta3_bf = Float64(param_value)
     return true
 end
 function update_backflow_correction_param!(
@@ -2725,29 +2157,6 @@ function compute_eta2_virtual_hopping_factor(
 end
 
 """
-用途: 计算 Eq.(5) 中 `eta3` 对给定 `(i, j, sigma)` 的 mixed virtual hopping 因子。
-
-数学公式:
-- `eta3_factor = D_i n_{j,-sigma} h_{j,sigma} + n_{i,sigma} h_{i,-sigma} H_j`。
-
-参数:
-- `state_i::Int8`: source site `i` 的物理状态编码。
-- `state_j::Int8`: target site `j` 的物理状态编码。
-- `spin::Int8`: 当前行对应的物理自旋 `sigma`。
-
-返回:
-- `Float64`: 因子取值, 当前实现中为 `0.0` 或 `1.0`。
-"""
-function compute_eta3_virtual_hopping_factor(
-    state_i::Int8,
-    state_j::Int8,
-    spin::Int8,
-)::Float64
-    return compute_eta3_doublon_single_factor(state_i, state_j, spin) +
-           compute_eta4_single_hole_factor(state_i, state_j, spin)
-end
-
-"""
 用途: 计算 split Eq.(5) 中 `eta3` 对给定 `(i, j, sigma)` 的 doublon-single 因子。
 
 数学公式:
@@ -2804,8 +2213,8 @@ end
 - 若 `epsilon_mask_terms` 包含 `:eta1`, 则检查 `D_i H_j`。
 - 若包含 `:eta2`, 则检查
   `n_{i,sigma} h_{i,-sigma} n_{j,-sigma} h_{j,sigma}`。
-- 若包含 `:eta3`, 则检查
-  `D_i n_{j,-sigma} h_{j,sigma} + n_{i,sigma} h_{i,-sigma} H_j`。
+- 若包含 `:eta3_doublon_single`, 则检查 `D_i n_{j,-sigma} h_{j,sigma}`。
+- 若包含 `:eta4`, 则检查 `n_{i,sigma} h_{i,-sigma} H_j`。
 
 参数:
 - `state_i::Int8`: source site `i` 的物理状态编码。
@@ -2831,15 +2240,11 @@ function is_backflow_epsilon_row_active(
             if compute_eta2_virtual_hopping_factor(state_i, state_j, spin) != 0.0
                 return true
             end
-        elseif mask_term == :eta3
-            if compute_eta3_virtual_hopping_factor(state_i, state_j, spin) != 0.0
-                return true
-            end
         elseif mask_term == :eta3_doublon_single
             if compute_eta3_doublon_single_factor(state_i, state_j, spin) != 0.0
                 return true
             end
-        elseif mask_term == :eta4 || mask_term == :eta4_single_hole
+        elseif mask_term == :eta4
             if compute_eta4_single_hole_factor(state_i, state_j, spin) != 0.0
                 return true
             end
@@ -3003,56 +2408,6 @@ function add_backflow_correction_orbitals!(
             row_i = 2 * (site_i - 1) + row_offset
             row_j = 2 * (site_j - 1) + row_offset
             @views backflow_orbitals[row_i, :] .+= eta2_value * bond_amplitude * T(eta2_factor) .* base_orbitals[row_j, :]
-        end
-    end
-
-    return nothing
-end
-
-"""
-用途: 将 Eq.(5) 的 `eta3` correction term 加到 backflow 轨道矩阵。
-
-数学公式:
-- `delta U_eta3(i, sigma) = eta3_bf * sum_j t_ij *
-   (D_i n_j_-sigma h_j_sigma + n_i_sigma h_i_-sigma H_j) * U_0(j, sigma)`。
-
-参数:
-- `backflow_orbitals::AbstractMatrix{T}`: 待累加的 backflow 轨道矩阵。
-- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵。
-- `state_vector::Vector{Int8}`: 当前构型。
-- `correction_term::BackflowEta3MixedVirtualHopTerm`: `eta3` correction term。
-
-返回:
-- `nothing`。
-"""
-function add_backflow_correction_orbitals!(
-    backflow_orbitals::AbstractMatrix{T},
-    base_orbitals::AbstractMatrix{T},
-    state_vector::Vector{Int8},
-    correction_term::BackflowEta3MixedVirtualHopTerm,
-) where {T}
-    validate_backflow_correction_source_data!(correction_term)
-    eta3_value = T(correction_term.eta3_bf)
-    for (bond_index, (site_i, site_j)) in enumerate(correction_term.source_bonds)
-        state_i = state_vector[site_i]
-        state_j = state_vector[site_j]
-        bond_amplitude = T(correction_term.source_amplitudes[bond_index])
-        for row_offset in 1:2
-            spin = backflow_spin_from_row_offset(row_offset)
-            opposite_spin = backflow_opposite_spin(spin)
-            eta3_factor =
-                (state_i == DB ? 1.0 : 0.0) *
-                backflow_n_sigma(state_j, opposite_spin) *
-                backflow_h_sigma(state_j, spin) +
-                backflow_n_sigma(state_i, spin) *
-                backflow_h_sigma(state_i, opposite_spin) *
-                (state_j == HOLE ? 1.0 : 0.0)
-            if eta3_factor == 0.0
-                continue
-            end
-            row_i = 2 * (site_i - 1) + row_offset
-            row_j = 2 * (site_j - 1) + row_offset
-            @views backflow_orbitals[row_i, :] .+= eta3_value * bond_amplitude * T(eta3_factor) .* base_orbitals[row_j, :]
         end
     end
 
@@ -3473,60 +2828,6 @@ function add_backflow_correction_chain_rule_row!(
         target_row = 2 * (target_site - 1) + row_offset
         bond_amplitude = T(correction_term.source_amplitudes[bond_index])
         @views output_row .+= eta2_value * bond_amplitude * T(eta2_factor) .* input_derivative_orbitals[target_row, :]
-    end
-
-    return nothing
-end
-
-"""
-用途: 将 mixed `eta3` correction term 对单行 chain-rule 导数的贡献累加到 buffer。
-
-数学公式:
-- `dU_b(i,sigma)/dp += eta3_bf * sum_j t_ij *
-   (D_i n_j_-sigma h_j_sigma + n_i_sigma h_i_-sigma H_j) dU_0(j,sigma)/dp`。
-
-参数:
-- `output_row::AbstractVector{T}`: 待累加的单行输出 buffer。
-- `input_derivative_orbitals::AbstractMatrix{T}`: 输入裸轨道导数矩阵。
-- `state_vector::Vector{Int8}`: 当前构型。
-- `correction_term::BackflowEta3MixedVirtualHopTerm`: mixed `eta3` correction term。
-- `site_index::Int`: 当前 site 编号。
-- `row_offset::Int`: 当前 site 内部自旋行偏移。
-- `row_index::Int`: 当前全局行号, 此函数不直接使用, 保持接口一致。
-
-返回:
-- `nothing`。
-"""
-function add_backflow_correction_chain_rule_row!(
-    output_row::AbstractVector{T},
-    input_derivative_orbitals::AbstractMatrix{T},
-    state_vector::Vector{Int8},
-    correction_term::BackflowEta3MixedVirtualHopTerm,
-    site_index::Int,
-    row_offset::Int,
-    row_index::Int,
-) where {T}
-    if site_index > length(correction_term.outgoing_bond_indices_by_source)
-        return nothing
-    end
-
-    state_i = state_vector[site_index]
-    spin = backflow_spin_from_row_offset(row_offset)
-    eta3_value = T(correction_term.eta3_bf)
-    if eta3_value == zero(T) || backflow_n_sigma(state_i, spin) == 0.0
-        return nothing
-    end
-
-    for bond_index in correction_term.outgoing_bond_indices_by_source[site_index]
-        (_, target_site) = correction_term.source_bonds[bond_index]
-        state_j = state_vector[target_site]
-        eta3_factor = compute_eta3_virtual_hopping_factor(state_i, state_j, spin)
-        if eta3_factor == 0.0
-            continue
-        end
-        target_row = 2 * (target_site - 1) + row_offset
-        bond_amplitude = T(correction_term.source_amplitudes[bond_index])
-        @views output_row .+= eta3_value * bond_amplitude * T(eta3_factor) .* input_derivative_orbitals[target_row, :]
     end
 
     return nothing
@@ -3977,68 +3278,6 @@ function add_backflow_correction_chain_rule_source_weights!(
 end
 
 """
-用途: 将 mixed `eta3` correction term 对单行 chain-rule 的 source-row 权重贡献累加到列表。
-
-参数:
-- `source_row_indices::AbstractVector{Int}`: source row 编号 buffer。
-- `source_row_weights::AbstractVector{T}`: source row 权重 buffer。
-- `source_count::Int`: 当前 source row 数量。
-- `state_vector::Vector{Int8}`: 当前构型。
-- `correction_term::BackflowEta3MixedVirtualHopTerm`: mixed `eta3` correction term。
-- `site_index::Int`: 当前 site 编号。
-- `row_offset::Int`: 当前 site 内部自旋行偏移。
-- `row_index::Int`: 当前全局行号, 此函数不直接使用, 保持接口一致。
-
-返回:
-- `Int`: 更新后的 source row 数量。
-
-公式:
-- `dU_b(i,sigma) += eta3_bf * sum_j t_ij *
-  (D_i n_j_-sigma h_j_sigma + n_i_sigma h_i_-sigma H_j) dU_0(j,sigma)`。
-"""
-function add_backflow_correction_chain_rule_source_weights!(
-    source_row_indices::AbstractVector{Int},
-    source_row_weights::AbstractVector{T},
-    source_count::Int,
-    state_vector::Vector{Int8},
-    correction_term::BackflowEta3MixedVirtualHopTerm,
-    site_index::Int,
-    row_offset::Int,
-    row_index::Int,
-)::Int where {T}
-    if site_index > length(correction_term.outgoing_bond_indices_by_source)
-        return source_count
-    end
-
-    state_i = state_vector[site_index]
-    spin = backflow_spin_from_row_offset(row_offset)
-    eta3_value = T(correction_term.eta3_bf)
-    if eta3_value == zero(T) || backflow_n_sigma(state_i, spin) == 0.0
-        return source_count
-    end
-
-    for bond_index in correction_term.outgoing_bond_indices_by_source[site_index]
-        (_, target_site) = correction_term.source_bonds[bond_index]
-        state_j = state_vector[target_site]
-        eta3_factor = compute_eta3_virtual_hopping_factor(state_i, state_j, spin)
-        if eta3_factor == 0.0
-            continue
-        end
-        target_row = 2 * (target_site - 1) + row_offset
-        bond_amplitude = T(correction_term.source_amplitudes[bond_index])
-        source_count = add_backflow_chain_rule_source_weight!(
-            source_row_indices,
-            source_row_weights,
-            source_count,
-            target_row,
-            eta3_value * bond_amplitude * T(eta3_factor),
-        )
-    end
-
-    return source_count
-end
-
-"""
 用途: 将 split `eta3` correction term 对单行 chain-rule 的 source-row 权重贡献累加到列表。
 
 参数:
@@ -4346,55 +3585,6 @@ function add_backflow_correction_derivative_orbitals!(
             row_i = 2 * (site_i - 1) + row_offset
             row_j = 2 * (site_j - 1) + row_offset
             @views derivative_orbitals[row_i, :] .+= bond_amplitude * T(eta2_factor) .* base_orbitals[row_j, :]
-        end
-    end
-
-    return nothing
-end
-
-"""
-用途: 将 Eq.(5) 的 `eta3` correction term 对 `eta3_bf` 的导数累加到导数轨道矩阵。
-
-数学公式:
-- `partial U_b(i, sigma) / partial eta3_bf =
-   sum_j t_ij * (D_i n_j_-sigma h_j_sigma + n_i_sigma h_i_-sigma H_j) * U_0(j, sigma)`。
-
-参数:
-- `derivative_orbitals::AbstractMatrix{T}`: 待累加的导数轨道矩阵。
-- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
-- `state_vector::Vector{Int8}`: 当前 Monte Carlo 构型。
-- `correction_term::BackflowEta3MixedVirtualHopTerm`: `eta3` correction term。
-
-返回:
-- `nothing`。
-"""
-function add_backflow_correction_derivative_orbitals!(
-    derivative_orbitals::AbstractMatrix{T},
-    base_orbitals::AbstractMatrix{T},
-    state_vector::Vector{Int8},
-    correction_term::BackflowEta3MixedVirtualHopTerm,
-) where {T}
-    validate_backflow_correction_source_data!(correction_term)
-    for (bond_index, (site_i, site_j)) in enumerate(correction_term.source_bonds)
-        state_i = state_vector[site_i]
-        state_j = state_vector[site_j]
-        bond_amplitude = T(correction_term.source_amplitudes[bond_index])
-        for row_offset in 1:2
-            spin = backflow_spin_from_row_offset(row_offset)
-            opposite_spin = backflow_opposite_spin(spin)
-            eta3_factor =
-                (state_i == DB ? 1.0 : 0.0) *
-                backflow_n_sigma(state_j, opposite_spin) *
-                backflow_h_sigma(state_j, spin) +
-                backflow_n_sigma(state_i, spin) *
-                backflow_h_sigma(state_i, opposite_spin) *
-                (state_j == HOLE ? 1.0 : 0.0)
-            if eta3_factor == 0.0
-                continue
-            end
-            row_i = 2 * (site_i - 1) + row_offset
-            row_j = 2 * (site_j - 1) + row_offset
-            @views derivative_orbitals[row_i, :] .+= bond_amplitude * T(eta3_factor) .* base_orbitals[row_j, :]
         end
     end
 
