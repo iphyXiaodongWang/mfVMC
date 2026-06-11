@@ -1377,6 +1377,676 @@ function initialize_site_block_base_after_proposal!(
 end
 
 """
+用途: 校验局域 site row 尺寸并写入裸轨道基准行。
+
+参数:
+- `site_row_buffer::AbstractVector{T}`: 输出 buffer, 长度必须等于轨道数。
+- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
+- `state_vector::Vector{Int8}`: proposal 提交前的构型状态数组。
+- `site_index::Int`: 待写入的站点编号。
+- `row_offset::Int`: 站点内部自旋行偏移, `1` 为 up, `2` 为 down。
+
+返回:
+- `Int`: 该 site row 在 spin-resolved 轨道矩阵中的全局行号。
+"""
+function initialize_site_row_base_after_proposal!(
+    site_row_buffer::AbstractVector{T},
+    base_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    site_index::Int,
+    row_offset::Int,
+)::Int where {T}
+    validate_orbital_dimensions(base_orbitals, length(state_vector))
+    if length(site_row_buffer) != size(base_orbitals, 2)
+        error("Local site row buffer must have length $(size(base_orbitals, 2)), got $(length(site_row_buffer)).")
+    end
+    if !(1 <= site_index <= length(state_vector))
+        error("Affected site $site_index is out of bounds for a state vector with $(length(state_vector)) sites.")
+    end
+    if row_offset != 1 && row_offset != 2
+        error("row_offset must be 1 or 2, got $(row_offset).")
+    end
+
+    row_index = 2 * (site_index - 1) + row_offset
+    copyto!(site_row_buffer, @view(base_orbitals[row_index, :]))
+    return row_index
+end
+
+"""
+用途: 将 Eq.(5) 的 `epsilon` correction term 在 proposal 后对单个 occupied row 的贡献累加到 buffer。
+
+参数:
+- `site_row_buffer::AbstractVector{T}`: 待累加的单行轨道 buffer。
+- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
+- `state_vector::Vector{Int8}`: proposal 提交前的构型状态数组。
+- `correction_term::BackflowEpsilonTerm`: `epsilon` correction term。
+- `proposal::MoveProposal`: Monte Carlo proposal。
+- `site_index::Int`: 待写入的站点编号。
+- `row_offset::Int`: 站点内部自旋行偏移, `1` 为 up, `2` 为 down。
+- `row_index::Int`: `site_index,row_offset` 对应的全局行号。
+
+返回:
+- `nothing`。
+"""
+function add_backflow_correction_site_row_after_proposal!(
+    site_row_buffer::AbstractVector{T},
+    base_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    correction_term::BackflowEpsilonTerm,
+    proposal::MoveProposal,
+    site_index::Int,
+    row_offset::Int,
+    row_index::Int,
+) where {T}
+    if site_index > length(correction_term.outgoing_bond_indices_by_source)
+        return nothing
+    end
+
+    epsilon_shift = T(correction_term.epsilon_bf - 1.0)
+    if epsilon_shift == zero(T)
+        return nothing
+    end
+
+    state_i = get_site_state_after_proposal(state_vector, proposal, site_index)
+    spin = backflow_spin_from_row_offset(row_offset)
+    for bond_index in correction_term.outgoing_bond_indices_by_source[site_index]
+        (_, target_site) = correction_term.source_bonds[bond_index]
+        state_j = get_site_state_after_proposal(state_vector, proposal, target_site)
+        if is_backflow_epsilon_row_active(
+            state_i,
+            state_j,
+            spin,
+            correction_term.epsilon_mask_terms,
+        )
+            @views site_row_buffer .+= epsilon_shift .* base_orbitals[row_index, :]
+            return nothing
+        end
+    end
+
+    return nothing
+end
+
+"""
+用途: 将 `eta1` correction term 在 proposal 后对单个 occupied row 的贡献累加到 buffer。
+
+数学公式:
+- `delta U_eta1(i,sigma) = eta1 * sum_j t_ij D_i H_j U_0(j,sigma)`。
+
+参数:
+- `site_row_buffer::AbstractVector{T}`: 待累加的单行轨道 buffer。
+- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
+- `state_vector::Vector{Int8}`: proposal 提交前的构型状态数组。
+- `correction_term::BackflowEta1DoublonHoleTerm`: `eta1` correction term。
+- `proposal::MoveProposal`: Monte Carlo proposal。
+- `site_index::Int`: 待写入的站点编号。
+- `row_offset::Int`: 站点内部自旋行偏移, `1` 为 up, `2` 为 down。
+- `row_index::Int`: 当前行的全局行号, 此函数不直接使用, 保持接口一致。
+
+返回:
+- `nothing`。
+"""
+function add_backflow_correction_site_row_after_proposal!(
+    site_row_buffer::AbstractVector{T},
+    base_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    correction_term::BackflowEta1DoublonHoleTerm,
+    proposal::MoveProposal,
+    site_index::Int,
+    row_offset::Int,
+    row_index::Int,
+) where {T}
+    if site_index > length(correction_term.outgoing_bond_indices_by_source)
+        return nothing
+    end
+    if get_site_state_after_proposal(state_vector, proposal, site_index) != DB
+        return nothing
+    end
+
+    eta1_value = T(correction_term.eta1_bf)
+    if eta1_value == zero(T)
+        return nothing
+    end
+
+    for bond_index in correction_term.outgoing_bond_indices_by_source[site_index]
+        (_, target_site) = correction_term.source_bonds[bond_index]
+        if get_site_state_after_proposal(state_vector, proposal, target_site) != HOLE
+            continue
+        end
+
+        target_row = 2 * (target_site - 1) + row_offset
+        bond_amplitude = T(correction_term.source_amplitudes[bond_index])
+        @views site_row_buffer .+= eta1_value * bond_amplitude .* base_orbitals[target_row, :]
+    end
+
+    return nothing
+end
+
+"""
+用途: 将 `eta2` correction term 在 proposal 后对单个 occupied row 的贡献累加到 buffer。
+
+数学公式:
+- `delta U_eta2(i,sigma) = eta2 * sum_j t_ij n_i_sigma h_i_-sigma n_j_-sigma h_j_sigma U_0(j,sigma)`。
+
+参数:
+- `site_row_buffer::AbstractVector{T}`: 待累加的单行轨道 buffer。
+- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
+- `state_vector::Vector{Int8}`: proposal 提交前的构型状态数组。
+- `correction_term::BackflowEta2SpinExchangeTerm`: `eta2` correction term。
+- `proposal::MoveProposal`: Monte Carlo proposal。
+- `site_index::Int`: 待写入的站点编号。
+- `row_offset::Int`: 站点内部自旋行偏移, `1` 为 up, `2` 为 down。
+- `row_index::Int`: 当前行的全局行号, 此函数不直接使用, 保持接口一致。
+
+返回:
+- `nothing`。
+"""
+function add_backflow_correction_site_row_after_proposal!(
+    site_row_buffer::AbstractVector{T},
+    base_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    correction_term::BackflowEta2SpinExchangeTerm,
+    proposal::MoveProposal,
+    site_index::Int,
+    row_offset::Int,
+    row_index::Int,
+) where {T}
+    if site_index > length(correction_term.outgoing_bond_indices_by_source)
+        return nothing
+    end
+
+    state_i = get_site_state_after_proposal(state_vector, proposal, site_index)
+    spin = backflow_spin_from_row_offset(row_offset)
+    eta2_value = T(correction_term.eta2_bf)
+    if eta2_value == zero(T) || backflow_n_sigma(state_i, spin) == 0.0
+        return nothing
+    end
+
+    for bond_index in correction_term.outgoing_bond_indices_by_source[site_index]
+        (_, target_site) = correction_term.source_bonds[bond_index]
+        state_j = get_site_state_after_proposal(state_vector, proposal, target_site)
+        eta2_factor = compute_eta2_virtual_hopping_factor(state_i, state_j, spin)
+        if eta2_factor == 0.0
+            continue
+        end
+        target_row = 2 * (target_site - 1) + row_offset
+        bond_amplitude = T(correction_term.source_amplitudes[bond_index])
+        @views site_row_buffer .+= eta2_value * bond_amplitude * T(eta2_factor) .* base_orbitals[target_row, :]
+    end
+
+    return nothing
+end
+
+"""
+用途: 将 mixed `eta3` correction term 在 proposal 后对单个 occupied row 的贡献累加到 buffer。
+
+数学公式:
+- `delta U_eta3(i,sigma) = eta3 * sum_j t_ij *
+   (D_i n_j_-sigma h_j_sigma + n_i_sigma h_i_-sigma H_j) U_0(j,sigma)`。
+
+参数:
+- `site_row_buffer::AbstractVector{T}`: 待累加的单行轨道 buffer。
+- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
+- `state_vector::Vector{Int8}`: proposal 提交前的构型状态数组。
+- `correction_term::BackflowEta3MixedVirtualHopTerm`: mixed `eta3` correction term。
+- `proposal::MoveProposal`: Monte Carlo proposal。
+- `site_index::Int`: 待写入的站点编号。
+- `row_offset::Int`: 站点内部自旋行偏移, `1` 为 up, `2` 为 down。
+- `row_index::Int`: 当前行的全局行号, 此函数不直接使用, 保持接口一致。
+
+返回:
+- `nothing`。
+"""
+function add_backflow_correction_site_row_after_proposal!(
+    site_row_buffer::AbstractVector{T},
+    base_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    correction_term::BackflowEta3MixedVirtualHopTerm,
+    proposal::MoveProposal,
+    site_index::Int,
+    row_offset::Int,
+    row_index::Int,
+) where {T}
+    if site_index > length(correction_term.outgoing_bond_indices_by_source)
+        return nothing
+    end
+
+    state_i = get_site_state_after_proposal(state_vector, proposal, site_index)
+    spin = backflow_spin_from_row_offset(row_offset)
+    eta3_value = T(correction_term.eta3_bf)
+    if eta3_value == zero(T) || backflow_n_sigma(state_i, spin) == 0.0
+        return nothing
+    end
+
+    for bond_index in correction_term.outgoing_bond_indices_by_source[site_index]
+        (_, target_site) = correction_term.source_bonds[bond_index]
+        state_j = get_site_state_after_proposal(state_vector, proposal, target_site)
+        eta3_factor = compute_eta3_virtual_hopping_factor(state_i, state_j, spin)
+        if eta3_factor == 0.0
+            continue
+        end
+        target_row = 2 * (target_site - 1) + row_offset
+        bond_amplitude = T(correction_term.source_amplitudes[bond_index])
+        @views site_row_buffer .+= eta3_value * bond_amplitude * T(eta3_factor) .* base_orbitals[target_row, :]
+    end
+
+    return nothing
+end
+
+"""
+用途: 将 split `eta3` correction term 在 proposal 后对单个 occupied row 的贡献累加到 buffer。
+
+数学公式:
+- `delta U_eta3(i,sigma) = eta3 * sum_j t_ij D_i n_j_-sigma h_j_sigma U_0(j,sigma)`。
+
+参数:
+- `site_row_buffer::AbstractVector{T}`: 待累加的单行轨道 buffer。
+- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
+- `state_vector::Vector{Int8}`: proposal 提交前的构型状态数组。
+- `correction_term::BackflowEta3DoublonSingleTerm`: split `eta3` correction term。
+- `proposal::MoveProposal`: Monte Carlo proposal。
+- `site_index::Int`: 待写入的站点编号。
+- `row_offset::Int`: 站点内部自旋行偏移, `1` 为 up, `2` 为 down。
+- `row_index::Int`: 当前行的全局行号, 此函数不直接使用, 保持接口一致。
+
+返回:
+- `nothing`。
+"""
+function add_backflow_correction_site_row_after_proposal!(
+    site_row_buffer::AbstractVector{T},
+    base_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    correction_term::BackflowEta3DoublonSingleTerm,
+    proposal::MoveProposal,
+    site_index::Int,
+    row_offset::Int,
+    row_index::Int,
+) where {T}
+    if site_index > length(correction_term.outgoing_bond_indices_by_source)
+        return nothing
+    end
+
+    state_i = get_site_state_after_proposal(state_vector, proposal, site_index)
+    spin = backflow_spin_from_row_offset(row_offset)
+    eta3_value = T(correction_term.eta3_bf)
+    if eta3_value == zero(T) || backflow_n_sigma(state_i, spin) == 0.0
+        return nothing
+    end
+
+    for bond_index in correction_term.outgoing_bond_indices_by_source[site_index]
+        (_, target_site) = correction_term.source_bonds[bond_index]
+        state_j = get_site_state_after_proposal(state_vector, proposal, target_site)
+        eta3_factor = compute_eta3_doublon_single_factor(state_i, state_j, spin)
+        if eta3_factor == 0.0
+            continue
+        end
+        target_row = 2 * (target_site - 1) + row_offset
+        bond_amplitude = T(correction_term.source_amplitudes[bond_index])
+        @views site_row_buffer .+= eta3_value * bond_amplitude * T(eta3_factor) .* base_orbitals[target_row, :]
+    end
+
+    return nothing
+end
+
+"""
+用途: 将 split `eta4` correction term 在 proposal 后对单个 occupied row 的贡献累加到 buffer。
+
+数学公式:
+- `delta U_eta4(i,sigma) = eta4 * sum_j t_ij n_i_sigma h_i_-sigma H_j U_0(j,sigma)`。
+
+参数:
+- `site_row_buffer::AbstractVector{T}`: 待累加的单行轨道 buffer。
+- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
+- `state_vector::Vector{Int8}`: proposal 提交前的构型状态数组。
+- `correction_term::BackflowEta4SingleHoleTerm`: split `eta4` correction term。
+- `proposal::MoveProposal`: Monte Carlo proposal。
+- `site_index::Int`: 待写入的站点编号。
+- `row_offset::Int`: 站点内部自旋行偏移, `1` 为 up, `2` 为 down。
+- `row_index::Int`: 当前行的全局行号, 此函数不直接使用, 保持接口一致。
+
+返回:
+- `nothing`。
+"""
+function add_backflow_correction_site_row_after_proposal!(
+    site_row_buffer::AbstractVector{T},
+    base_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    correction_term::BackflowEta4SingleHoleTerm,
+    proposal::MoveProposal,
+    site_index::Int,
+    row_offset::Int,
+    row_index::Int,
+) where {T}
+    if site_index > length(correction_term.outgoing_bond_indices_by_source)
+        return nothing
+    end
+
+    state_i = get_site_state_after_proposal(state_vector, proposal, site_index)
+    spin = backflow_spin_from_row_offset(row_offset)
+    eta4_value = T(correction_term.eta4_bf)
+    if eta4_value == zero(T) || backflow_n_sigma(state_i, spin) == 0.0
+        return nothing
+    end
+
+    for bond_index in correction_term.outgoing_bond_indices_by_source[site_index]
+        (_, target_site) = correction_term.source_bonds[bond_index]
+        state_j = get_site_state_after_proposal(state_vector, proposal, target_site)
+        eta4_factor = compute_eta4_single_hole_factor(state_i, state_j, spin)
+        if eta4_factor == 0.0
+            continue
+        end
+        target_row = 2 * (target_site - 1) + row_offset
+        bond_amplitude = T(correction_term.source_amplitudes[bond_index])
+        @views site_row_buffer .+= eta4_value * bond_amplitude * T(eta4_factor) .* base_orbitals[target_row, :]
+    end
+
+    return nothing
+end
+
+"""
+用途: 使用逐 correction term 逻辑写入 proposal 后的单个 occupied row。
+
+参数:
+- `site_row_buffer::AbstractVector{T}`: 输出 buffer, 长度必须等于轨道数。
+- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
+- `state_vector::Vector{Int8}`: proposal 提交前的构型状态数组。
+- `backflow_term::CompositeBackflowTerm`: 组合式 Eq.(5) backflow 对象。
+- `proposal::MoveProposal`: Monte Carlo proposal。
+- `site_index::Int`: 待写入的站点编号。
+- `row_offset::Int`: 站点内部自旋行偏移, `1` 为 up, `2` 为 down。
+
+返回:
+- `nothing`。
+"""
+function fill_backflow_site_row_after_proposal_by_terms!(
+    site_row_buffer::AbstractVector{T},
+    base_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    backflow_term::CompositeBackflowTerm,
+    proposal::MoveProposal,
+    site_index::Int,
+    row_offset::Int,
+) where {T}
+    row_index = initialize_site_row_base_after_proposal!(
+        site_row_buffer,
+        base_orbitals,
+        state_vector,
+        site_index,
+        row_offset,
+    )
+    for correction_term in backflow_term.terms
+        add_backflow_correction_site_row_after_proposal!(
+            site_row_buffer,
+            base_orbitals,
+            state_vector,
+            correction_term,
+            proposal,
+            site_index,
+            row_offset,
+            row_index,
+        )
+    end
+
+    return nothing
+end
+
+"""
+用途: 对共享 source 数据的 composite backflow 使用 fused 逻辑写入 proposal 后的单个 occupied row。
+
+数学公式:
+- 对固定 `(i,sigma)` 一次性计算旧 Eq.(5) 的 `epsilon/eta1/eta2/mixed eta3`
+  contribution, 避免逐 correction term 重复扫描同一批 outgoing bonds。
+- 对非 `epsilon` 项, 若 source site `i` 在 proposal 后没有 `sigma` 电子, 所有 eta
+  contribution 必为零, 可跳过 eta 系数计算。
+
+参数:
+- `site_row_buffer::AbstractVector{T}`: 输出 buffer, 长度必须等于轨道数。
+- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
+- `state_vector::Vector{Int8}`: proposal 提交前的构型状态数组。
+- `backflow_term::CompositeBackflowTerm`: shared-source 组合式 backflow 对象。
+- `proposal::MoveProposal`: Monte Carlo proposal。
+- `site_index::Int`: 待写入的站点编号。
+- `row_offset::Int`: 站点内部自旋行偏移, `1` 为 up, `2` 为 down。
+
+返回:
+- `nothing`。
+"""
+function fill_shared_source_composite_site_row_after_proposal!(
+    site_row_buffer::AbstractVector{T},
+    base_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    backflow_term::CompositeBackflowTerm,
+    proposal::MoveProposal,
+    site_index::Int,
+    row_offset::Int,
+) where {T}
+    row_index = initialize_site_row_base_after_proposal!(
+        site_row_buffer,
+        base_orbitals,
+        state_vector,
+        site_index,
+        row_offset,
+    )
+    if !backflow_term.has_shared_source_data ||
+       site_index > length(backflow_term.shared_outgoing_bond_indices_by_source)
+        return nothing
+    end
+
+    state_i = get_site_state_after_proposal(state_vector, proposal, site_index)
+    spin = backflow_spin_from_row_offset(row_offset)
+    epsilon_term = backflow_term.epsilon_term
+    eta1_term = backflow_term.eta1_term
+    eta2_term = backflow_term.eta2_term
+    eta3_term = backflow_term.eta3_term
+    epsilon_shift = epsilon_term === nothing ? zero(T) : T(epsilon_term.epsilon_bf - 1.0)
+    eta1_value = eta1_term === nothing ? zero(T) : T(eta1_term.eta1_bf)
+    eta2_value = eta2_term === nothing ? zero(T) : T(eta2_term.eta2_bf)
+    eta3_value = eta3_term === nothing ? zero(T) : T(eta3_term.eta3_bf)
+    source_spin_is_occupied = backflow_n_sigma(state_i, spin) != 0.0
+    epsilon_is_active = false
+
+    for bond_index in backflow_term.shared_outgoing_bond_indices_by_source[site_index]
+        (_, target_site) = backflow_term.shared_source_bonds[bond_index]
+        state_j = get_site_state_after_proposal(state_vector, proposal, target_site)
+
+        if epsilon_term !== nothing &&
+           epsilon_shift != zero(T) &&
+           !epsilon_is_active &&
+           is_backflow_epsilon_row_active(
+               state_i,
+               state_j,
+               spin,
+               epsilon_term.epsilon_mask_terms,
+           )
+            epsilon_is_active = true
+        end
+
+        if !source_spin_is_occupied
+            continue
+        end
+
+        bond_amplitude = T(backflow_term.shared_source_amplitudes[bond_index])
+        eta1_factor = state_i == DB && state_j == HOLE ? one(T) : zero(T)
+        eta2_factor = compute_eta2_virtual_hopping_factor(state_i, state_j, spin)
+        eta3_factor = compute_eta3_virtual_hopping_factor(state_i, state_j, spin)
+        coefficient =
+            bond_amplitude *
+            (
+                eta1_value * eta1_factor +
+                eta2_value * T(eta2_factor) +
+                eta3_value * T(eta3_factor)
+            )
+        if coefficient == zero(T)
+            continue
+        end
+
+        target_row = 2 * (target_site - 1) + row_offset
+        @views site_row_buffer .+= coefficient .* base_orbitals[target_row, :]
+    end
+
+    if epsilon_is_active
+        @views site_row_buffer .+= epsilon_shift .* base_orbitals[row_index, :]
+    end
+
+    return nothing
+end
+
+"""
+用途: 对 directed split backflow 使用 grouped fused 逻辑写入 proposal 后的单个 occupied row。
+
+数学公式:
+- 对固定 `(i,sigma)` 只计算该 row 需要的
+  `eta1/eta2/eta3/eta4` contribution。
+- 对非 `epsilon` 项, 若 source site `i` 在 proposal 后没有 `sigma` 电子, 所有 eta
+  contribution 必为零, 可直接跳过 directed group 扫描。
+
+参数:
+- `site_row_buffer::AbstractVector{T}`: 输出 buffer, 长度必须等于轨道数。
+- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
+- `state_vector::Vector{Int8}`: proposal 提交前的构型状态数组。
+- `backflow_term::CompositeBackflowTerm`: directed split 组合式 backflow 对象。
+- `proposal::MoveProposal`: Monte Carlo proposal。
+- `site_index::Int`: 待写入的站点编号。
+- `row_offset::Int`: 站点内部自旋行偏移, `1` 为 up, `2` 为 down。
+
+返回:
+- `nothing`。
+"""
+function fill_grouped_source_composite_site_row_after_proposal!(
+    site_row_buffer::AbstractVector{T},
+    base_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    backflow_term::CompositeBackflowTerm,
+    proposal::MoveProposal,
+    site_index::Int,
+    row_offset::Int,
+) where {T}
+    row_index = initialize_site_row_base_after_proposal!(
+        site_row_buffer,
+        base_orbitals,
+        state_vector,
+        site_index,
+        row_offset,
+    )
+    state_i = get_site_state_after_proposal(state_vector, proposal, site_index)
+    spin = backflow_spin_from_row_offset(row_offset)
+
+    for epsilon_term in backflow_term.epsilon_terms
+        add_backflow_correction_site_row_after_proposal!(
+            site_row_buffer,
+            base_orbitals,
+            state_vector,
+            epsilon_term,
+            proposal,
+            site_index,
+            row_offset,
+            row_index,
+        )
+    end
+
+    if backflow_n_sigma(state_i, spin) == 0.0
+        return nothing
+    end
+
+    for grouped_terms in backflow_term.grouped_source_groups
+        eta1_term = grouped_terms.eta1_term
+        eta2_term = grouped_terms.eta2_term
+        eta3_term = grouped_terms.eta3_term
+        eta4_term = grouped_terms.eta4_term
+        if site_index > length(eta1_term.outgoing_bond_indices_by_source)
+            continue
+        end
+
+        eta1_value = T(eta1_term.eta1_bf)
+        eta2_value = T(eta2_term.eta2_bf)
+        eta3_value = T(eta3_term.eta3_bf)
+        eta4_value = T(eta4_term.eta4_bf)
+        for bond_index in eta1_term.outgoing_bond_indices_by_source[site_index]
+            (_, target_site) = eta1_term.source_bonds[bond_index]
+            state_j = get_site_state_after_proposal(state_vector, proposal, target_site)
+            bond_amplitude = T(eta1_term.source_amplitudes[bond_index])
+            target_row = 2 * (target_site - 1) + row_offset
+
+            eta1_factor = state_i == DB && state_j == HOLE ? one(T) : zero(T)
+            eta2_factor = compute_eta2_virtual_hopping_factor(state_i, state_j, spin)
+            eta3_factor = compute_eta3_doublon_single_factor(state_i, state_j, spin)
+            eta4_factor = compute_eta4_single_hole_factor(state_i, state_j, spin)
+            coefficient =
+                bond_amplitude *
+                (
+                    eta1_value * eta1_factor +
+                    eta2_value * T(eta2_factor) +
+                    eta3_value * T(eta3_factor) +
+                    eta4_value * T(eta4_factor)
+                )
+            if coefficient == zero(T)
+                continue
+            end
+
+            @views site_row_buffer .+= coefficient .* base_orbitals[target_row, :]
+        end
+    end
+
+    return nothing
+end
+
+"""
+用途: 写入组合式 Eq.(5) backflow 在 proposal 提交后的单个 occupied row。
+
+参数:
+- `site_row_buffer::AbstractVector{T}`: 输出 buffer, 长度必须等于轨道数。
+- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
+- `state_vector::Vector{Int8}`: proposal 提交前的构型状态数组。
+- `backflow_term::CompositeBackflowTerm`: 组合式 Eq.(5) backflow 对象。
+- `proposal::MoveProposal`: Monte Carlo proposal。
+- `site_index::Int`: 待写入的站点编号。
+- `row_offset::Int`: 站点内部自旋行偏移, `1` 为 up, `2` 为 down。
+
+返回:
+- `nothing`。
+"""
+function fill_backflow_site_row_after_proposal!(
+    site_row_buffer::AbstractVector{T},
+    base_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    backflow_term::CompositeBackflowTerm,
+    proposal::MoveProposal,
+    site_index::Int,
+    row_offset::Int,
+) where {T}
+    if can_use_shared_source_fused_site_block(backflow_term)
+        return fill_shared_source_composite_site_row_after_proposal!(
+            site_row_buffer,
+            base_orbitals,
+            state_vector,
+            backflow_term,
+            proposal,
+            site_index,
+            row_offset,
+        )
+    end
+    if can_use_grouped_source_fused_site_block(backflow_term)
+        return fill_grouped_source_composite_site_row_after_proposal!(
+            site_row_buffer,
+            base_orbitals,
+            state_vector,
+            backflow_term,
+            proposal,
+            site_index,
+            row_offset,
+        )
+    end
+    return fill_backflow_site_row_after_proposal_by_terms!(
+        site_row_buffer,
+        base_orbitals,
+        state_vector,
+        backflow_term,
+        proposal,
+        site_index,
+        row_offset,
+    )
+end
+
+"""
 用途: 使用逐 correction term 的旧逻辑写入 proposal 后的局域 site block。
 
 参数:

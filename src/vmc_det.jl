@@ -917,31 +917,12 @@ function collect_backflow_local_column_updates_into_cache!(
         proposal,
     )
 
-    ws.cached_affected_count = length(affected_sites)
+    ws.cached_affected_count = 0
     changed_count = 0
-    site_block_buffer = ws.cached_site_block_buffer
+    site_row_buffer = ws.dr1
 
     @timed "backflow_fill_site_blocks" begin
-        for (affected_offset, site_index) in enumerate(affected_sites)
-            ws.cached_affected_site_indices[affected_offset] = site_index
-            Backflow.fill_backflow_site_block_after_proposal!(
-                site_block_buffer,
-                vwf.base_gs_U,
-                vwf.sampler.state,
-                backflow_term,
-                proposal,
-                site_index,
-            )
-            cached_block_row = 2 * (affected_offset - 1) + 1
-            copyto!(
-                @view(ws.cached_affected_site_blocks[cached_block_row, :]),
-                @view(site_block_buffer[1, :]),
-            )
-            copyto!(
-                @view(ws.cached_affected_site_blocks[cached_block_row + 1, :]),
-                @view(site_block_buffer[2, :]),
-            )
-
+        for site_index in affected_sites
             for local_row_offset in 1:2
                 row_index = 2 * (site_index - 1) + local_row_offset
                 electron_id = get_postproposal_electron_id(vwf.sampler, proposal, row_index)
@@ -949,12 +930,22 @@ function collect_backflow_local_column_updates_into_cache!(
                     continue
                 end
 
+                Backflow.fill_backflow_site_row_after_proposal!(
+                    site_row_buffer,
+                    vwf.base_gs_U,
+                    vwf.sampler.state,
+                    backflow_term,
+                    proposal,
+                    site_index,
+                    local_row_offset,
+                )
+
                 changed_count += 1
                 ws.cached_changed_electron_ids[changed_count] = electron_id
                 ws.cached_changed_row_indices[changed_count] = row_index
                 copyto!(
                     @view(ws.cached_c_matrix[:, changed_count]),
-                    @view(site_block_buffer[local_row_offset, :]),
+                    site_row_buffer,
                 )
             end
         end
@@ -988,6 +979,73 @@ function collect_backflow_local_column_updates_into_cache!(
     copyto!(@view(ws.cached_changed_row_indices[1:changed_count]), sorted_row_indices)
     ws.cached_changed_count = changed_count
     return changed_count
+end
+
+"""
+用途: 在 proposal 被接受后, 重算所有 affected site rows 并刷新全局 backflow 轨道缓存。
+
+数学公式:
+- 对每个受影响站点 `i`, 写回 `U_b(i, up; x')` 与 `U_b(i, down; x')`。
+- ratio 阶段只需要 proposal 后 occupied rows; accept 后必须补全所有 affected rows,
+  保证后续电子移动到当前未占据 row 时 `gs_U/backflow_u` 仍与当前构型一致。
+
+参数:
+- `vwf::vwf_det{T}`: determinant 波函数对象。
+- `proposal::MoveProposal`: 已被接受的 Monte Carlo proposal。
+
+返回:
+- `nothing`。
+"""
+function refresh_backflow_affected_orbital_rows_after_accept!(
+    vwf::vwf_det{T},
+    proposal::MoveProposal,
+) where {T}
+    ws = ensure_ws!(vwf)
+    affected_sites = Backflow.collect_affected_site_indices(
+        vwf.sampler.state,
+        vwf.backflow,
+        proposal,
+    )
+    site_block_buffer = ws.cached_site_block_buffer
+
+    for site_index in affected_sites
+        Backflow.fill_backflow_site_block_after_proposal!(
+            site_block_buffer,
+            vwf.base_gs_U,
+            vwf.sampler.state,
+            vwf.backflow,
+            proposal,
+            site_index,
+        )
+
+        orbital_row = 2 * (site_index - 1) + 1
+        copyto!(
+            @view(vwf.backflow_u[orbital_row, :]),
+            @view(site_block_buffer[1, :]),
+        )
+        copyto!(
+            @view(vwf.backflow_u[orbital_row + 1, :]),
+            @view(site_block_buffer[2, :]),
+        )
+        copyto!(
+            @view(vwf.gs_U[orbital_row, :]),
+            @view(site_block_buffer[1, :]),
+        )
+        copyto!(
+            @view(vwf.gs_U[orbital_row + 1, :]),
+            @view(site_block_buffer[2, :]),
+        )
+        copyto!(
+            @view(vwf.gs_U_t[:, orbital_row]),
+            @view(site_block_buffer[1, :]),
+        )
+        copyto!(
+            @view(vwf.gs_U_t[:, orbital_row + 1]),
+            @view(site_block_buffer[2, :]),
+        )
+    end
+
+    return nothing
 end
 
 
@@ -1262,7 +1320,7 @@ function accept_backflow_local_update!(vwf::vwf_det{T}, proposal::MoveProposal, 
 
         update_rankk_from_cache!(vwf, ratio)
         @timed "backflow_commit_move!" commit_move!(vwf.sampler, proposal)
-        @timed "backflow_apply_cached_rows" apply_cached_backflow_orbital_rows!(vwf)
+        @timed "backflow_refresh_accepted_rows" refresh_backflow_affected_orbital_rows_after_accept!(vwf, proposal)
         reset_cached_rankk_update!(ws)
 
         if vwf.backflow_debug_verify
