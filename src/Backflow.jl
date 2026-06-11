@@ -5,9 +5,11 @@ using ..Sampler
 export AbstractBackflowTerm, AbstractBackflowCorrectionTerm
 export NoBackflowTerm
 export CompositeBackflowTerm
+export DirectedBackflowSourceGroup
 export BackflowEpsilonTerm, BackflowEta1DoublonHoleTerm
 export BackflowEta2SpinExchangeTerm
 export BackflowEta3DoublonSingleTerm, BackflowEta4SingleHoleTerm
+export build_directed_backflow_source_group
 export uses_backflow
 export backflow_param_names, backflow_param_values, backflow_param_count
 export update_backflow_params!
@@ -204,17 +206,13 @@ end
 字段:
 - `param_name::Symbol`: 参数名。
 - `eta1_bf::Float64`: `eta1` 参数值。
-- `source_bonds::Vector{Tuple{Int, Int}}`: 有向键 `(i, j)` 列表。
-- `source_amplitudes::Vector{Float64}`: 与有向键对齐的 hopping 振幅。
+
+说明:
+- source 数据现在由 `DirectedBackflowSourceGroup` 持有, eta term 变为轻量参数对象。
 """
 mutable struct BackflowEta1DoublonHoleTerm <: AbstractBackflowCorrectionTerm
     param_name::Symbol
     eta1_bf::Float64
-    source_bonds::Vector{Tuple{Int,Int}}
-    source_amplitudes::Vector{Float64}
-    source_data_signature::UInt
-    outgoing_bond_indices_by_source::Vector{Vector{Int}}
-    incoming_source_sites_by_target::Vector{Vector{Int}}
 end
 
 """
@@ -227,17 +225,13 @@ end
 字段:
 - `param_name::Symbol`: 参数名。
 - `eta2_bf::Float64`: `eta2` 参数值。
-- `source_bonds::Vector{Tuple{Int, Int}}`: 有向键 `(i, j)` 列表。
-- `source_amplitudes::Vector{Float64}`: 与有向键对齐的 hopping 振幅。
+
+说明:
+- source 数据现在由 `DirectedBackflowSourceGroup` 持有, eta term 变为轻量参数对象。
 """
 mutable struct BackflowEta2SpinExchangeTerm <: AbstractBackflowCorrectionTerm
     param_name::Symbol
     eta2_bf::Float64
-    source_bonds::Vector{Tuple{Int,Int}}
-    source_amplitudes::Vector{Float64}
-    source_data_signature::UInt
-    outgoing_bond_indices_by_source::Vector{Vector{Int}}
-    incoming_source_sites_by_target::Vector{Vector{Int}}
 end
 
 """
@@ -250,17 +244,13 @@ end
 字段:
 - `param_name::Symbol`: 参数名。
 - `eta3_bf::Float64`: split `eta3` 参数值。
-- `source_bonds::Vector{Tuple{Int, Int}}`: 有向键 `(i, j)` 列表。
-- `source_amplitudes::Vector{Float64}`: 与有向键对齐的 hopping 振幅。
+
+说明:
+- source 数据现在由 `DirectedBackflowSourceGroup` 持有, eta term 变为轻量参数对象。
 """
 mutable struct BackflowEta3DoublonSingleTerm <: AbstractBackflowCorrectionTerm
     param_name::Symbol
     eta3_bf::Float64
-    source_bonds::Vector{Tuple{Int,Int}}
-    source_amplitudes::Vector{Float64}
-    source_data_signature::UInt
-    outgoing_bond_indices_by_source::Vector{Vector{Int}}
-    incoming_source_sites_by_target::Vector{Vector{Int}}
 end
 
 """
@@ -273,32 +263,41 @@ end
 字段:
 - `param_name::Symbol`: 参数名。
 - `eta4_bf::Float64`: split `eta4` 参数值。
-- `source_bonds::Vector{Tuple{Int, Int}}`: 有向键 `(i, j)` 列表。
-- `source_amplitudes::Vector{Float64}`: 与有向键对齐的 hopping 振幅。
+
+说明:
+- source 数据现在由 `DirectedBackflowSourceGroup` 持有, eta term 变为轻量参数对象。
 """
 mutable struct BackflowEta4SingleHoleTerm <: AbstractBackflowCorrectionTerm
     param_name::Symbol
     eta4_bf::Float64
+end
+
+"""
+用途: 保存一个 directed split backflow source group 中共享的 source graph 和四个 eta term。
+
+字段:
+- `group_name::Symbol`: directed 组名, 例如 `:dd`, `:dp`, `:pd`, `:pp`。
+- `source_bonds::Vector{Tuple{Int,Int}}`: 有向键 `(i, j)` 列表。
+- `source_amplitudes::Vector{Float64}`: 与有向键对齐的 hopping 振幅。
+- `source_data_signature::UInt`: source 数据内容签名, 用于检测原地修改。
+- `outgoing_bond_indices_by_source::Vector{Vector{Int}}`: 按 source site 存储的 bond 索引列表。
+- `incoming_source_sites_by_target::Vector{Vector{Int}}`: 按 target site 存储的 source site 去重列表。
+- `eta1_term::BackflowEta1DoublonHoleTerm`: 该组内的 eta1 doublon-hole term。
+- `eta2_term::BackflowEta2SpinExchangeTerm`: 该组内的 eta2 spin-exchange term。
+- `eta3_term::BackflowEta3DoublonSingleTerm`: 该组内的 eta3 doublon-single term。
+- `eta4_term::BackflowEta4SingleHoleTerm`: 该组内的 eta4 single-hole term。
+
+说明:
+- 每个 source group 拥有共享的 `source_bonds`/`source_amplitudes`/graph cache,
+  eta term 只保存参数名和参数值, 不再重复保存 source 数据。
+"""
+struct DirectedBackflowSourceGroup
+    group_name::Symbol
     source_bonds::Vector{Tuple{Int,Int}}
     source_amplitudes::Vector{Float64}
     source_data_signature::UInt
     outgoing_bond_indices_by_source::Vector{Vector{Int}}
     incoming_source_sites_by_target::Vector{Vector{Int}}
-end
-
-"""
-用途: 缓存一个 directed split backflow 组内共享 source graph 的 `eta1/eta2/eta3/eta4` term。
-
-字段:
-- `suffix::Symbol`: directed 组名, 例如 `:dp`, `:pd`, `:pp`。
-- `eta1_term/eta2_term/eta3_term/eta4_term`: 该组内四个 split backflow correction term。
-
-说明:
-- 该结构只在 `CompositeBackflowTerm` 构造阶段建立一次, 用于避免 MCMC 热循环中反复通过
-  参数名字符串匹配查找同一组 term。
-"""
-struct DirectedSplitBackflowGroup
-    suffix::Symbol
     eta1_term::BackflowEta1DoublonHoleTerm
     eta2_term::BackflowEta2SpinExchangeTerm
     eta3_term::BackflowEta3DoublonSingleTerm
@@ -306,28 +305,83 @@ struct DirectedSplitBackflowGroup
 end
 
 """
-用途: 合并多个 backflow correction term 的 incoming source graph。
+用途: 构造一个 directed backflow source group。
 
 参数:
-- `terms::Vector{<:AbstractBackflowCorrectionTerm}`: composite backflow 中的 correction terms。
+- `group_name::Symbol`: directed 组名, 例如 `:dd`, `:dp`, `:pd`, `:pp`。
+- `source_bonds::Vector{Tuple{Int,Int}}`: 有向键 `(i, j)` 列表。
+- `source_amplitudes::Vector{<:Real}`: 每条有向键对应的 hopping 振幅。
+- `eta1_term::BackflowEta1DoublonHoleTerm`: 该组的 eta1 term。
+- `eta2_term::BackflowEta2SpinExchangeTerm`: 该组的 eta2 term。
+- `eta3_term::BackflowEta3DoublonSingleTerm`: 该组的 eta3 term。
+- `eta4_term::BackflowEta4SingleHoleTerm`: 该组的 eta4 term。
 
 返回:
-- `Vector{Vector{Int}}`: `incoming_source_sites_by_target[target]` 保存所有会影响该 target 的 source site,
-  已按 target 分组并排序去重。
+- `DirectedBackflowSourceGroup`: 带 source 图缓存的 directed group。
 """
-function build_composite_incoming_source_sites_by_target(
-    terms::Vector{<:AbstractBackflowCorrectionTerm},
+function build_directed_backflow_source_group(
+    group_name::Symbol,
+    source_bonds::Vector{Tuple{Int,Int}},
+    source_amplitudes::Vector{<:Real},
+    eta1_term::BackflowEta1DoublonHoleTerm,
+    eta2_term::BackflowEta2SpinExchangeTerm,
+    eta3_term::BackflowEta3DoublonSingleTerm,
+    eta4_term::BackflowEta4SingleHoleTerm,
+)::DirectedBackflowSourceGroup
+    source_cache = build_backflow_correction_source_cache(source_bonds, source_amplitudes)
+    return DirectedBackflowSourceGroup(
+        group_name,
+        source_cache.source_bonds,
+        source_cache.source_amplitudes,
+        source_cache.source_data_signature,
+        source_cache.outgoing_bond_indices_by_source,
+        source_cache.incoming_source_sites_by_target,
+        eta1_term,
+        eta2_term,
+        eta3_term,
+        eta4_term,
+    )
+end
+
+"""
+用途: 从 directed source groups 和 epsilon terms 合并 composite 级别的 incoming source graph。
+
+参数:
+- `epsilon_terms::Vector{BackflowEpsilonTerm}`: composite 中的 epsilon terms。
+- `source_groups::Vector{DirectedBackflowSourceGroup}`: directed source groups。
+
+返回:
+- `Vector{Vector{Int}}`: composite 级别合并后的 incoming source graph。
+"""
+function build_composite_incoming_from_groups(
+    epsilon_terms::Vector{BackflowEpsilonTerm},
+    source_groups::Vector{DirectedBackflowSourceGroup},
 )::Vector{Vector{Int}}
     max_target_site = 0
-    for correction_term in terms
-        max_target_site = max(max_target_site, length(correction_term.incoming_source_sites_by_target))
+    for epsilon_term in epsilon_terms
+        max_target_site = max(max_target_site, length(epsilon_term.incoming_source_sites_by_target))
+    end
+    for source_group in source_groups
+        max_target_site = max(max_target_site, length(source_group.incoming_source_sites_by_target))
     end
 
     incoming_source_sites_by_target = [Int[] for _ in 1:max_target_site]
-    for correction_term in terms
-        for target_site in eachindex(correction_term.incoming_source_sites_by_target)
+
+    for epsilon_term in epsilon_terms
+        for target_site in eachindex(epsilon_term.incoming_source_sites_by_target)
             target_sources = incoming_source_sites_by_target[target_site]
-            for source_site in correction_term.incoming_source_sites_by_target[target_site]
+            for source_site in epsilon_term.incoming_source_sites_by_target[target_site]
+                if !(source_site in target_sources)
+                    push!(target_sources, source_site)
+                end
+            end
+        end
+    end
+
+    for source_group in source_groups
+        for target_site in eachindex(source_group.incoming_source_sites_by_target)
+            target_sources = incoming_source_sites_by_target[target_site]
+            for source_site in source_group.incoming_source_sites_by_target[target_site]
                 if !(source_site in target_sources)
                     push!(target_sources, source_site)
                 end
@@ -342,146 +396,44 @@ function build_composite_incoming_source_sites_by_target(
 end
 
 """
-用途: 判断参数名是否属于指定 directed backflow 后缀组。
-
-参数:
-- `param_name::Symbol`: backflow 参数名, 例如 `:bf_eta1_dp`。
-- `suffix::Symbol`: directed 组名, 例如 `:dp`, `:pd`, `:pp`。
-
-返回:
-- `Bool`: 参数名以 `_<suffix>` 结尾时返回 `true`。
-"""
-function backflow_param_name_has_suffix(param_name::Symbol, suffix::Symbol)::Bool
-    return endswith(String(param_name), "_" * String(suffix))
-end
-
-"""
-用途: 按 directed 后缀查找某一类 split backflow correction term。
-
-参数:
-- `term_type::Type{T}`: 目标 correction term 类型。
-- `terms::Vector{AbstractBackflowCorrectionTerm}`: composite 中的 term 列表。
-- `suffix::Symbol`: directed 组名, 例如 `:dp`, `:pd`, `:pp`。
-
-返回:
-- `Union{Nothing, T}`: 找到唯一匹配 term 时返回该 term, 否则返回 `nothing`。
-"""
-function find_composite_correction_term_by_suffix(
-    term_type::Type{T},
-    terms::Vector{AbstractBackflowCorrectionTerm},
-    suffix::Symbol,
-)::Union{Nothing,T} where {T<:AbstractBackflowCorrectionTerm}
-    matched_term = nothing
-    for correction_term in terms
-        if correction_term isa T && backflow_param_name_has_suffix(correction_term.param_name, suffix)
-            matched_term !== nothing && return nothing
-            matched_term = correction_term
-        end
-    end
-    return matched_term
-end
-
-"""
-用途: 从 term 列表中收集一个 directed split backflow 组内的 `eta1/eta2/eta3/eta4` term。
-
-参数:
-- `terms::Vector{AbstractBackflowCorrectionTerm}`: composite 中的 term 列表。
-- `suffix::Symbol`: directed 组名, 例如 `:dp`, `:pd`, `:pp`。
-
-返回:
-- `Union{Nothing, DirectedSplitBackflowGroup}`: 若四个 term 都存在且共享同一 source 数据,
-  返回缓存后的 directed group, 否则返回 `nothing`。
-"""
-function collect_directed_split_backflow_group(
-    terms::Vector{AbstractBackflowCorrectionTerm},
-    suffix::Symbol,
-)::Union{Nothing,DirectedSplitBackflowGroup}
-    eta1_term = find_composite_correction_term_by_suffix(
-        BackflowEta1DoublonHoleTerm,
-        terms,
-        suffix,
-    )
-    eta2_term = find_composite_correction_term_by_suffix(
-        BackflowEta2SpinExchangeTerm,
-        terms,
-        suffix,
-    )
-    eta3_term = find_composite_correction_term_by_suffix(
-        BackflowEta3DoublonSingleTerm,
-        terms,
-        suffix,
-    )
-    eta4_term = find_composite_correction_term_by_suffix(
-        BackflowEta4SingleHoleTerm,
-        terms,
-        suffix,
-    )
-    if eta1_term === nothing || eta2_term === nothing || eta3_term === nothing || eta4_term === nothing
-        return nothing
-    end
-
-    reference_signature = eta1_term.source_data_signature
-    if eta2_term.source_data_signature != reference_signature ||
-       eta3_term.source_data_signature != reference_signature ||
-       eta4_term.source_data_signature != reference_signature
-        return nothing
-    end
-
-    return DirectedSplitBackflowGroup(suffix, eta1_term, eta2_term, eta3_term, eta4_term)
-end
-
-"""
-用途: 在 `CompositeBackflowTerm` 构造阶段建立 directed split backflow 组缓存。
-
-参数:
-- `terms::Vector{AbstractBackflowCorrectionTerm}`: composite 中的 term 列表。
-
-返回:
-- `Vector{DirectedSplitBackflowGroup}`: 按 `dd/dp/pd/pp` 顺序保存的组缓存。
-"""
-function build_directed_split_backflow_groups(
-    terms::Vector{AbstractBackflowCorrectionTerm},
-)::Vector{DirectedSplitBackflowGroup}
-    groups = DirectedSplitBackflowGroup[]
-    for suffix in (:dd, :dp, :pd, :pp)
-        group = collect_directed_split_backflow_group(terms, suffix)
-        group === nothing && error("Directed Emery backflow requires eta1/eta2/eta3/eta4 group for suffix $suffix.")
-        push!(groups, group)
-    end
-
-    epsilon_count = count(correction_term -> correction_term isa BackflowEpsilonTerm, terms)
-    expected_term_count = 4 * length(groups) + epsilon_count
-    if length(terms) != expected_term_count
-        error("Directed Emery backflow accepts only epsilon terms plus dd/dp/pd/pp eta1..eta4 groups.")
-    end
-
-    return groups
-end
-
-"""
 用途: 组合多个 Eq.(5) backflow correction terms。
 
 字段:
-- `terms::Vector{AbstractBackflowCorrectionTerm}`: 按参数顺序保存的 backflow correction term 列表。
+- `epsilon_terms::Vector{BackflowEpsilonTerm}`: composite 中所有 epsilon correction term,
+  允许不同 source 子图使用不同 epsilon 参数。
+- `source_groups::Vector{DirectedBackflowSourceGroup}`: directed split backflow source groups,
+  每个 group 持有共享的 source 数据和四个 eta term。
+- `terms::Vector{AbstractBackflowCorrectionTerm}`: 按参数顺序展开的 term 列表,
+  由 `epsilon_terms` 和 `source_groups` 的 eta term 自动生成。
 - `incoming_source_sites_by_target::Vector{Vector{Int}}`: composite 级别合并后的 incoming source graph,
   用于 proposal 局域更新时一次性收集 affected sites。
-- `grouped_source_groups::Vector{DirectedSplitBackflowGroup}`: directed grouped fused path 使用的组缓存。
-- `epsilon_terms::Vector{BackflowEpsilonTerm}`: composite 中所有 epsilon correction term, 允许不同
-  source 子图使用不同 epsilon 参数。
 """
 struct CompositeBackflowTerm <: AbstractBackflowTerm
+    epsilon_terms::Vector{BackflowEpsilonTerm}
+    source_groups::Vector{DirectedBackflowSourceGroup}
     terms::Vector{AbstractBackflowCorrectionTerm}
     incoming_source_sites_by_target::Vector{Vector{Int}}
-    grouped_source_groups::Vector{DirectedSplitBackflowGroup}
-    epsilon_terms::Vector{BackflowEpsilonTerm}
-    function CompositeBackflowTerm(terms::Vector{<:AbstractBackflowCorrectionTerm})
-        term_list = AbstractBackflowCorrectionTerm[terms...]
-        grouped_source_groups = build_directed_split_backflow_groups(term_list)
+
+    function CompositeBackflowTerm(
+        epsilon_terms::Vector{BackflowEpsilonTerm},
+        source_groups::Vector{DirectedBackflowSourceGroup},
+    )
+        term_list = AbstractBackflowCorrectionTerm[]
+        for epsilon_term in epsilon_terms
+            push!(term_list, epsilon_term)
+        end
+        for source_group in source_groups
+            push!(term_list, source_group.eta1_term)
+            push!(term_list, source_group.eta2_term)
+            push!(term_list, source_group.eta3_term)
+            push!(term_list, source_group.eta4_term)
+        end
+
         return new(
+            epsilon_terms,
+            source_groups,
             term_list,
-            build_composite_incoming_source_sites_by_target(term_list),
-            grouped_source_groups,
-            BackflowEpsilonTerm[correction_term for correction_term in term_list if correction_term isa BackflowEpsilonTerm],
+            build_composite_incoming_from_groups(epsilon_terms, source_groups),
         )
     end
 end
@@ -555,28 +507,15 @@ end
 参数:
 - `param_name::Symbol`: 参数名, 默认 `:bf_eta1`。
 - `eta1_bf::Real`: `eta1` 参数值。
-- `source_bonds::Vector{Tuple{Int, Int}}`: 有向键 `(i, j)` 列表。
-- `source_amplitudes::Vector{<:Real}`: 每条有向键对应的 hopping 振幅。
 
 返回:
-- `BackflowEta1DoublonHoleTerm`: 带 source 缓存的 correction term。
+- `BackflowEta1DoublonHoleTerm`: 轻量 correction term, source 数据由 `DirectedBackflowSourceGroup` 持有。
 """
 function BackflowEta1DoublonHoleTerm(;
     param_name::Symbol=:bf_eta1,
     eta1_bf::Real=0.0,
-    source_bonds::Vector{Tuple{Int,Int}}=Tuple{Int,Int}[],
-    source_amplitudes::Vector{<:Real}=ones(Float64, length(source_bonds)),
 )
-    source_cache = build_backflow_correction_source_cache(source_bonds, source_amplitudes)
-    return BackflowEta1DoublonHoleTerm(
-        param_name,
-        Float64(eta1_bf),
-        source_cache.source_bonds,
-        source_cache.source_amplitudes,
-        source_cache.source_data_signature,
-        source_cache.outgoing_bond_indices_by_source,
-        source_cache.incoming_source_sites_by_target,
-    )
+    return BackflowEta1DoublonHoleTerm(param_name, Float64(eta1_bf))
 end
 
 """
@@ -585,28 +524,15 @@ end
 参数:
 - `param_name::Symbol`: 参数名, 默认 `:bf_eta2`。
 - `eta2_bf::Real`: `eta2` 参数值。
-- `source_bonds::Vector{Tuple{Int, Int}}`: 有向键 `(i, j)` 列表。
-- `source_amplitudes::Vector{<:Real}`: 每条有向键对应的 hopping 振幅。
 
 返回:
-- `BackflowEta2SpinExchangeTerm`: 带 source 缓存的 correction term。
+- `BackflowEta2SpinExchangeTerm`: 轻量 correction term, source 数据由 `DirectedBackflowSourceGroup` 持有。
 """
 function BackflowEta2SpinExchangeTerm(;
     param_name::Symbol=:bf_eta2,
     eta2_bf::Real=0.0,
-    source_bonds::Vector{Tuple{Int,Int}}=Tuple{Int,Int}[],
-    source_amplitudes::Vector{<:Real}=ones(Float64, length(source_bonds)),
 )
-    source_cache = build_backflow_correction_source_cache(source_bonds, source_amplitudes)
-    return BackflowEta2SpinExchangeTerm(
-        param_name,
-        Float64(eta2_bf),
-        source_cache.source_bonds,
-        source_cache.source_amplitudes,
-        source_cache.source_data_signature,
-        source_cache.outgoing_bond_indices_by_source,
-        source_cache.incoming_source_sites_by_target,
-    )
+    return BackflowEta2SpinExchangeTerm(param_name, Float64(eta2_bf))
 end
 
 """
@@ -615,28 +541,15 @@ end
 参数:
 - `param_name::Symbol`: 参数名, 默认 `:bf_eta3`。
 - `eta3_bf::Real`: split `eta3` 参数值。
-- `source_bonds::Vector{Tuple{Int, Int}}`: 有向键 `(i, j)` 列表。
-- `source_amplitudes::Vector{<:Real}`: 每条有向键对应的 hopping 振幅。
 
 返回:
-- `BackflowEta3DoublonSingleTerm`: 带 source 缓存的 correction term。
+- `BackflowEta3DoublonSingleTerm`: 轻量 correction term, source 数据由 `DirectedBackflowSourceGroup` 持有。
 """
 function BackflowEta3DoublonSingleTerm(;
     param_name::Symbol=:bf_eta3,
     eta3_bf::Real=0.0,
-    source_bonds::Vector{Tuple{Int,Int}}=Tuple{Int,Int}[],
-    source_amplitudes::Vector{<:Real}=ones(Float64, length(source_bonds)),
 )
-    source_cache = build_backflow_correction_source_cache(source_bonds, source_amplitudes)
-    return BackflowEta3DoublonSingleTerm(
-        param_name,
-        Float64(eta3_bf),
-        source_cache.source_bonds,
-        source_cache.source_amplitudes,
-        source_cache.source_data_signature,
-        source_cache.outgoing_bond_indices_by_source,
-        source_cache.incoming_source_sites_by_target,
-    )
+    return BackflowEta3DoublonSingleTerm(param_name, Float64(eta3_bf))
 end
 
 """
@@ -645,28 +558,15 @@ end
 参数:
 - `param_name::Symbol`: 参数名, 默认 `:bf_eta4`。
 - `eta4_bf::Real`: split `eta4` 参数值。
-- `source_bonds::Vector{Tuple{Int, Int}}`: 有向键 `(i, j)` 列表。
-- `source_amplitudes::Vector{<:Real}`: 每条有向键对应的 hopping 振幅。
 
 返回:
-- `BackflowEta4SingleHoleTerm`: 带 source 缓存的 correction term。
+- `BackflowEta4SingleHoleTerm`: 轻量 correction term, source 数据由 `DirectedBackflowSourceGroup` 持有。
 """
 function BackflowEta4SingleHoleTerm(;
     param_name::Symbol=:bf_eta4,
     eta4_bf::Real=0.0,
-    source_bonds::Vector{Tuple{Int,Int}}=Tuple{Int,Int}[],
-    source_amplitudes::Vector{<:Real}=ones(Float64, length(source_bonds)),
 )
-    source_cache = build_backflow_correction_source_cache(source_bonds, source_amplitudes)
-    return BackflowEta4SingleHoleTerm(
-        param_name,
-        Float64(eta4_bf),
-        source_cache.source_bonds,
-        source_cache.source_amplitudes,
-        source_cache.source_data_signature,
-        source_cache.outgoing_bond_indices_by_source,
-        source_cache.incoming_source_sites_by_target,
-    )
+    return BackflowEta4SingleHoleTerm(param_name, Float64(eta4_bf))
 end
 
 
@@ -1554,23 +1454,19 @@ function fill_grouped_source_composite_site_row_after_proposal!(
         return nothing
     end
 
-    for grouped_terms in backflow_term.grouped_source_groups
-        eta1_term = grouped_terms.eta1_term
-        eta2_term = grouped_terms.eta2_term
-        eta3_term = grouped_terms.eta3_term
-        eta4_term = grouped_terms.eta4_term
-        if site_index > length(eta1_term.outgoing_bond_indices_by_source)
+    for source_group in backflow_term.source_groups
+        if site_index > length(source_group.outgoing_bond_indices_by_source)
             continue
         end
 
-        eta1_value = T(eta1_term.eta1_bf)
-        eta2_value = T(eta2_term.eta2_bf)
-        eta3_value = T(eta3_term.eta3_bf)
-        eta4_value = T(eta4_term.eta4_bf)
-        for bond_index in eta1_term.outgoing_bond_indices_by_source[site_index]
-            (_, target_site) = eta1_term.source_bonds[bond_index]
+        eta1_value = T(source_group.eta1_term.eta1_bf)
+        eta2_value = T(source_group.eta2_term.eta2_bf)
+        eta3_value = T(source_group.eta3_term.eta3_bf)
+        eta4_value = T(source_group.eta4_term.eta4_bf)
+        for bond_index in source_group.outgoing_bond_indices_by_source[site_index]
+            (_, target_site) = source_group.source_bonds[bond_index]
             state_j = get_site_state_after_proposal(state_vector, proposal, target_site)
-            bond_amplitude = T(eta1_term.source_amplitudes[bond_index])
+            bond_amplitude = T(source_group.source_amplitudes[bond_index])
             target_row = 2 * (target_site - 1) + row_offset
 
             eta1_factor = state_i == DB && state_j == HOLE ? one(T) : zero(T)
@@ -1754,23 +1650,19 @@ function fill_grouped_source_composite_site_block_after_proposal!(
         end
     end
 
-    for grouped_terms in backflow_term.grouped_source_groups
-        eta1_term = grouped_terms.eta1_term
-        eta2_term = grouped_terms.eta2_term
-        eta3_term = grouped_terms.eta3_term
-        eta4_term = grouped_terms.eta4_term
-        if site_index > length(eta1_term.outgoing_bond_indices_by_source)
+    for source_group in backflow_term.source_groups
+        if site_index > length(source_group.outgoing_bond_indices_by_source)
             continue
         end
 
-        eta1_value = T(eta1_term.eta1_bf)
-        eta2_value = T(eta2_term.eta2_bf)
-        eta3_value = T(eta3_term.eta3_bf)
-        eta4_value = T(eta4_term.eta4_bf)
-        for bond_index in eta1_term.outgoing_bond_indices_by_source[site_index]
-            (_, target_site) = eta1_term.source_bonds[bond_index]
+        eta1_value = T(source_group.eta1_term.eta1_bf)
+        eta2_value = T(source_group.eta2_term.eta2_bf)
+        eta3_value = T(source_group.eta3_term.eta3_bf)
+        eta4_value = T(source_group.eta4_term.eta4_bf)
+        for bond_index in source_group.outgoing_bond_indices_by_source[site_index]
+            (_, target_site) = source_group.source_bonds[bond_index]
             state_j = get_site_state_after_proposal(state_vector, proposal, target_site)
-            bond_amplitude = T(eta1_term.source_amplitudes[bond_index])
+            bond_amplitude = T(source_group.source_amplitudes[bond_index])
             target_row_up = 2 * (target_site - 1) + 1
             target_row_down = target_row_up + 1
 
@@ -2522,6 +2414,85 @@ function build_backflow_orbitals(
 end
 
 """
+用途: 使用 grouped source 逻辑将四个 eta 贡献从单个 source group 累加到 backflow 轨道矩阵。
+
+参数:
+- `backflow_orbitals::AbstractMatrix{T}`: 待累加的 backflow 轨道矩阵。
+- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵。
+- `state_vector::Vector{Int8}`: 当前构型。
+- `source_group::DirectedBackflowSourceGroup`: directed source group。
+
+返回:
+- `nothing`。
+"""
+function add_backflow_source_group_orbitals!(
+    backflow_orbitals::AbstractMatrix{T},
+    base_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    source_group::DirectedBackflowSourceGroup,
+) where {T}
+    validate_backflow_source_group_data!(source_group)
+    eta1_value = T(source_group.eta1_term.eta1_bf)
+    eta2_value = T(source_group.eta2_term.eta2_bf)
+    eta3_value = T(source_group.eta3_term.eta3_bf)
+    eta4_value = T(source_group.eta4_term.eta4_bf)
+    for (bond_index, (site_i, site_j)) in enumerate(source_group.source_bonds)
+        state_i = state_vector[site_i]
+        state_j = state_vector[site_j]
+        bond_amplitude = T(source_group.source_amplitudes[bond_index])
+        for row_offset in 1:2
+            spin = backflow_spin_from_row_offset(row_offset)
+            row_i = 2 * (site_i - 1) + row_offset
+            row_j = 2 * (site_j - 1) + row_offset
+
+            eta1_factor = (state_i == DB && state_j == HOLE) ? one(T) : zero(T)
+            eta2_factor = compute_eta2_virtual_hopping_factor(state_i, state_j, spin)
+            eta3_factor = compute_eta3_doublon_single_factor(state_i, state_j, spin)
+            eta4_factor = compute_eta4_single_hole_factor(state_i, state_j, spin)
+            coefficient =
+                bond_amplitude *
+                (
+                    eta1_value * eta1_factor +
+                    eta2_value * T(eta2_factor) +
+                    eta3_value * T(eta3_factor) +
+                    eta4_value * T(eta4_factor)
+                )
+            if coefficient == zero(T)
+                continue
+            end
+
+            @views backflow_orbitals[row_i, :] .+= coefficient .* base_orbitals[row_j, :]
+        end
+    end
+
+    return nothing
+end
+
+"""
+用途: 校验 DirectedBackflowSourceGroup 的 source 数据在构造后未被原地修改。
+
+参数:
+- `source_group::DirectedBackflowSourceGroup`: 待校验的 source group。
+
+返回:
+- `nothing`。若检测到原地修改则抛出异常。
+"""
+function validate_backflow_source_group_data!(
+    source_group::DirectedBackflowSourceGroup,
+)
+    current_signature = compute_backflow_source_data_signature(
+        source_group.source_bonds,
+        source_group.source_amplitudes,
+    )
+
+    if current_signature != source_group.source_data_signature
+        error("Backflow source group $(source_group.group_name) source_bonds/source_amplitudes were mutated after construction. Please rebuild the source group instead of modifying it in place.")
+    end
+
+    return nothing
+end
+
+"""
 用途: 构造组合式 Eq.(5) backflow 的构型依赖轨道矩阵。
 
 数学公式:
@@ -2543,14 +2514,25 @@ function build_backflow_orbitals(
 ) where {T}
     validate_orbital_dimensions(base_orbitals, length(state_vector))
     backflow_orbitals = Matrix{T}(base_orbitals)
-    for correction_term in backflow_term.terms
+
+    for epsilon_term in backflow_term.epsilon_terms
         add_backflow_correction_orbitals!(
             backflow_orbitals,
             base_orbitals,
             state_vector,
-            correction_term,
+            epsilon_term,
         )
     end
+
+    for source_group in backflow_term.source_groups
+        add_backflow_source_group_orbitals!(
+            backflow_orbitals,
+            base_orbitals,
+            state_vector,
+            source_group,
+        )
+    end
+
     return backflow_orbitals
 end
 
@@ -2628,14 +2610,80 @@ function fill_backflow_chain_rule_orbitals!(
     validate_orbital_dimensions(input_derivative_orbitals, length(state_vector))
     validate_chain_rule_output_dimensions(output_orbitals, input_derivative_orbitals)
     copyto!(output_orbitals, input_derivative_orbitals)
-    for correction_term in backflow_term.terms
+
+    for epsilon_term in backflow_term.epsilon_terms
         add_backflow_correction_orbitals!(
             output_orbitals,
             input_derivative_orbitals,
             state_vector,
-            correction_term,
+            epsilon_term,
         )
     end
+
+    for source_group in backflow_term.source_groups
+        add_backflow_source_group_chain_rule_orbitals!(
+            output_orbitals,
+            input_derivative_orbitals,
+            state_vector,
+            source_group,
+        )
+    end
+
+    return nothing
+end
+
+"""
+用途: 使用 grouped source 逻辑将单个 source group 的 chain rule 贡献累加到轨道导数矩阵。
+
+参数:
+- `output_orbitals::AbstractMatrix{T}`: 待累加的输出矩阵。
+- `input_derivative_orbitals::AbstractMatrix{T}`: 输入裸轨道导数。
+- `state_vector::Vector{Int8}`: 当前构型。
+- `source_group::DirectedBackflowSourceGroup`: directed source group。
+
+返回:
+- `nothing`。
+"""
+function add_backflow_source_group_chain_rule_orbitals!(
+    output_orbitals::AbstractMatrix{T},
+    input_derivative_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    source_group::DirectedBackflowSourceGroup,
+) where {T}
+    validate_backflow_source_group_data!(source_group)
+    eta1_value = T(source_group.eta1_term.eta1_bf)
+    eta2_value = T(source_group.eta2_term.eta2_bf)
+    eta3_value = T(source_group.eta3_term.eta3_bf)
+    eta4_value = T(source_group.eta4_term.eta4_bf)
+    for (bond_index, (site_i, site_j)) in enumerate(source_group.source_bonds)
+        state_i = state_vector[site_i]
+        state_j = state_vector[site_j]
+        bond_amplitude = T(source_group.source_amplitudes[bond_index])
+        for row_offset in 1:2
+            spin = backflow_spin_from_row_offset(row_offset)
+            row_i = 2 * (site_i - 1) + row_offset
+            row_j = 2 * (site_j - 1) + row_offset
+
+            eta1_factor = (state_i == DB && state_j == HOLE) ? one(T) : zero(T)
+            eta2_factor = compute_eta2_virtual_hopping_factor(state_i, state_j, spin)
+            eta3_factor = compute_eta3_doublon_single_factor(state_i, state_j, spin)
+            eta4_factor = compute_eta4_single_hole_factor(state_i, state_j, spin)
+            coefficient =
+                bond_amplitude *
+                (
+                    eta1_value * eta1_factor +
+                    eta2_value * T(eta2_factor) +
+                    eta3_value * T(eta3_factor) +
+                    eta4_value * T(eta4_factor)
+                )
+            if coefficient == zero(T)
+                continue
+            end
+
+            @views output_orbitals[row_i, :] .+= coefficient .* input_derivative_orbitals[row_j, :]
+        end
+    end
+
     return nothing
 end
 
@@ -2971,15 +3019,27 @@ function fill_backflow_chain_rule_row!(
         state_vector,
         row_index,
     )
-    for correction_term in backflow_term.terms
+
+    for epsilon_term in backflow_term.epsilon_terms
         add_backflow_correction_chain_rule_row!(
             output_row,
             input_derivative_orbitals,
             state_vector,
-            correction_term,
+            epsilon_term,
             site_index,
             row_offset,
             row_index,
+        )
+    end
+
+    for source_group in backflow_term.source_groups
+        add_backflow_source_group_chain_rule_row!(
+            output_row,
+            input_derivative_orbitals,
+            state_vector,
+            source_group,
+            site_index,
+            row_offset,
         )
     end
 
@@ -3012,6 +3072,70 @@ function fill_backflow_chain_rule_row!(
         state_vector,
         row_index,
     )
+    return nothing
+end
+
+"""
+用途: 使用 grouped source 逻辑将单个 source group 的 chain rule 单行贡献累加到 buffer。
+
+参数:
+- `output_row::AbstractVector{T}`: 待累加的单行输出 buffer。
+- `input_derivative_orbitals::AbstractMatrix{T}`: 输入裸轨道导数矩阵。
+- `state_vector::Vector{Int8}`: 当前构型。
+- `source_group::DirectedBackflowSourceGroup`: directed source group。
+- `site_index::Int`: 当前 site 编号。
+- `row_offset::Int`: 当前 site 内部自旋行偏移。
+
+返回:
+- `nothing`。
+"""
+function add_backflow_source_group_chain_rule_row!(
+    output_row::AbstractVector{T},
+    input_derivative_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    source_group::DirectedBackflowSourceGroup,
+    site_index::Int,
+    row_offset::Int,
+) where {T}
+    if site_index > length(source_group.outgoing_bond_indices_by_source)
+        return nothing
+    end
+
+    state_i = state_vector[site_index]
+    spin = backflow_spin_from_row_offset(row_offset)
+    if backflow_n_sigma(state_i, spin) == 0.0
+        return nothing
+    end
+
+    eta1_value = T(source_group.eta1_term.eta1_bf)
+    eta2_value = T(source_group.eta2_term.eta2_bf)
+    eta3_value = T(source_group.eta3_term.eta3_bf)
+    eta4_value = T(source_group.eta4_term.eta4_bf)
+    for bond_index in source_group.outgoing_bond_indices_by_source[site_index]
+        (_, target_site) = source_group.source_bonds[bond_index]
+        state_j = state_vector[target_site]
+        target_row = 2 * (target_site - 1) + row_offset
+        bond_amplitude = T(source_group.source_amplitudes[bond_index])
+
+        eta1_factor = (state_i == DB && state_j == HOLE) ? one(T) : zero(T)
+        eta2_factor = compute_eta2_virtual_hopping_factor(state_i, state_j, spin)
+        eta3_factor = compute_eta3_doublon_single_factor(state_i, state_j, spin)
+        eta4_factor = compute_eta4_single_hole_factor(state_i, state_j, spin)
+        coefficient =
+            bond_amplitude *
+            (
+                eta1_value * eta1_factor +
+                eta2_value * T(eta2_factor) +
+                eta3_value * T(eta3_factor) +
+                eta4_value * T(eta4_factor)
+            )
+        if coefficient == zero(T)
+            continue
+        end
+
+        @views output_row .+= coefficient .* input_derivative_orbitals[target_row, :]
+    end
+
     return nothing
 end
 
@@ -3400,6 +3524,78 @@ function add_backflow_correction_chain_rule_source_weights!(
 end
 
 """
+用途: 使用 grouped source 逻辑将单个 source group 的 chain rule source-weight 贡献累加到列表。
+
+参数:
+- `source_row_indices::AbstractVector{Int}`: source row 编号 buffer。
+- `source_row_weights::AbstractVector{T}`: source row 权重 buffer。
+- `source_count::Int`: 当前 source row 数量。
+- `state_vector::Vector{Int8}`: 当前构型。
+- `source_group::DirectedBackflowSourceGroup`: directed source group。
+- `site_index::Int`: 当前 site 编号。
+- `row_offset::Int`: 当前 site 内部自旋行偏移。
+
+返回:
+- `Int`: 更新后的 source row 数量。
+"""
+function add_backflow_source_group_chain_rule_source_weights!(
+    source_row_indices::AbstractVector{Int},
+    source_row_weights::AbstractVector{T},
+    source_count::Int,
+    state_vector::Vector{Int8},
+    source_group::DirectedBackflowSourceGroup,
+    site_index::Int,
+    row_offset::Int,
+)::Int where {T}
+    if site_index > length(source_group.outgoing_bond_indices_by_source)
+        return source_count
+    end
+
+    state_i = state_vector[site_index]
+    spin = backflow_spin_from_row_offset(row_offset)
+    if backflow_n_sigma(state_i, spin) == 0.0
+        return source_count
+    end
+
+    eta1_value = T(source_group.eta1_term.eta1_bf)
+    eta2_value = T(source_group.eta2_term.eta2_bf)
+    eta3_value = T(source_group.eta3_term.eta3_bf)
+    eta4_value = T(source_group.eta4_term.eta4_bf)
+    for bond_index in source_group.outgoing_bond_indices_by_source[site_index]
+        (_, target_site) = source_group.source_bonds[bond_index]
+        state_j = state_vector[target_site]
+        target_row = 2 * (target_site - 1) + row_offset
+        bond_amplitude = T(source_group.source_amplitudes[bond_index])
+
+        eta1_factor = (state_i == DB && state_j == HOLE) ? one(T) : zero(T)
+        eta2_factor = compute_eta2_virtual_hopping_factor(state_i, state_j, spin)
+        eta3_factor = compute_eta3_doublon_single_factor(state_i, state_j, spin)
+        eta4_factor = compute_eta4_single_hole_factor(state_i, state_j, spin)
+        coefficient =
+            bond_amplitude *
+            (
+                eta1_value * eta1_factor +
+                eta2_value * T(eta2_factor) +
+                eta3_value * T(eta3_factor) +
+                eta4_value * T(eta4_factor)
+            )
+        if coefficient == zero(T)
+            continue
+        end
+
+        source_count = add_backflow_chain_rule_source_weight!(
+            source_row_indices,
+            source_row_weights,
+            source_count,
+            target_row,
+            coefficient,
+        )
+    end
+
+    return source_count
+end
+
+"""
 用途: 将指定 output row 的 backflow chain-rule 展开为 source rows 与权重。
 
 参数:
@@ -3428,16 +3624,29 @@ function fill_backflow_chain_rule_source_weights!(
         state_vector,
         row_index,
     )
-    for correction_term in backflow_term.terms
+
+    for epsilon_term in backflow_term.epsilon_terms
         source_count = add_backflow_correction_chain_rule_source_weights!(
             source_row_indices,
             source_row_weights,
             source_count,
             state_vector,
-            correction_term,
+            epsilon_term,
             site_index,
             row_offset,
             row_index,
+        )
+    end
+
+    for source_group in backflow_term.source_groups
+        source_count = add_backflow_source_group_chain_rule_source_weights!(
+            source_row_indices,
+            source_row_weights,
+            source_count,
+            state_vector,
+            source_group,
+            site_index,
+            row_offset,
         )
     end
 
@@ -3676,6 +3885,64 @@ function add_backflow_correction_derivative_orbitals!(
 end
 
 """
+用途: 使用 grouped source 逻辑将单个 source group 的四个 eta 参数导数贡献累加到四个导数矩阵。
+
+参数:
+- `derivative_orbitals_eta1::AbstractMatrix{T}`: eta1 参数导数矩阵。
+- `derivative_orbitals_eta2::AbstractMatrix{T}`: eta2 参数导数矩阵。
+- `derivative_orbitals_eta3::AbstractMatrix{T}`: eta3 参数导数矩阵。
+- `derivative_orbitals_eta4::AbstractMatrix{T}`: eta4 参数导数矩阵。
+- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
+- `state_vector::Vector{Int8}`: 当前 Monte Carlo 构型。
+- `source_group::DirectedBackflowSourceGroup`: directed source group。
+
+返回:
+- `nothing`。
+"""
+function add_backflow_source_group_derivative_orbitals!(
+    derivative_orbitals_eta1::AbstractMatrix{T},
+    derivative_orbitals_eta2::AbstractMatrix{T},
+    derivative_orbitals_eta3::AbstractMatrix{T},
+    derivative_orbitals_eta4::AbstractMatrix{T},
+    base_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    source_group::DirectedBackflowSourceGroup,
+) where {T}
+    validate_backflow_source_group_data!(source_group)
+    for (bond_index, (site_i, site_j)) in enumerate(source_group.source_bonds)
+        state_i = state_vector[site_i]
+        state_j = state_vector[site_j]
+        bond_amplitude = T(source_group.source_amplitudes[bond_index])
+        for row_offset in 1:2
+            spin = backflow_spin_from_row_offset(row_offset)
+            row_i = 2 * (site_i - 1) + row_offset
+            row_j = 2 * (site_j - 1) + row_offset
+
+            if state_i == DB && state_j == HOLE
+                @views derivative_orbitals_eta1[row_i, :] .+= bond_amplitude .* base_orbitals[row_j, :]
+            end
+
+            eta2_factor = compute_eta2_virtual_hopping_factor(state_i, state_j, spin)
+            if eta2_factor != 0.0
+                @views derivative_orbitals_eta2[row_i, :] .+= bond_amplitude * T(eta2_factor) .* base_orbitals[row_j, :]
+            end
+
+            eta3_factor = compute_eta3_doublon_single_factor(state_i, state_j, spin)
+            if eta3_factor != 0.0
+                @views derivative_orbitals_eta3[row_i, :] .+= bond_amplitude * T(eta3_factor) .* base_orbitals[row_j, :]
+            end
+
+            eta4_factor = compute_eta4_single_hole_factor(state_i, state_j, spin)
+            if eta4_factor != 0.0
+                @views derivative_orbitals_eta4[row_i, :] .+= bond_amplitude * T(eta4_factor) .* base_orbitals[row_j, :]
+            end
+        end
+    end
+
+    return nothing
+end
+
+"""
 用途: 在 `NoBackflowTerm` 情况下返回空的导数轨道列表。
 
 参数:
@@ -3718,18 +3985,39 @@ function build_backflow_derivative_orbitals(
 ) where {T}
     validate_orbital_dimensions(base_orbitals, length(state_vector))
     derivative_pairs = Pair{Symbol,Matrix{T}}[]
-    for correction_term in backflow_term.terms
+
+    for epsilon_term in backflow_term.epsilon_terms
         derivative_orbitals = zeros(T, size(base_orbitals))
         add_backflow_correction_derivative_orbitals!(
             derivative_orbitals,
             base_orbitals,
             state_vector,
-            correction_term,
+            epsilon_term,
         )
         push!(
             derivative_pairs,
-            backflow_correction_param_name(correction_term) => derivative_orbitals,
+            backflow_correction_param_name(epsilon_term) => derivative_orbitals,
         )
+    end
+
+    for source_group in backflow_term.source_groups
+        eta1_deriv = zeros(T, size(base_orbitals))
+        eta2_deriv = zeros(T, size(base_orbitals))
+        eta3_deriv = zeros(T, size(base_orbitals))
+        eta4_deriv = zeros(T, size(base_orbitals))
+        add_backflow_source_group_derivative_orbitals!(
+            eta1_deriv,
+            eta2_deriv,
+            eta3_deriv,
+            eta4_deriv,
+            base_orbitals,
+            state_vector,
+            source_group,
+        )
+        push!(derivative_pairs, source_group.eta1_term.param_name => eta1_deriv)
+        push!(derivative_pairs, source_group.eta2_term.param_name => eta2_deriv)
+        push!(derivative_pairs, source_group.eta3_term.param_name => eta3_deriv)
+        push!(derivative_pairs, source_group.eta4_term.param_name => eta4_deriv)
     end
 
     return derivative_pairs

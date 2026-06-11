@@ -1553,118 +1553,62 @@ function build_column_directed_emery_backflow(
     d_source_amplitudes = vcat(dd_source_amplitudes, dp_source_amplitudes)
     p_source_bonds = vcat(pd_source_bonds, pp_source_bonds)
     p_source_amplitudes = vcat(pd_source_amplitudes, pp_source_amplitudes)
-    return CompositeBackflowTerm([
-        BackflowEpsilonTerm(
+
+    epsilon_terms = mfVMC.BackflowEpsilonTerm[
+        mfVMC.Backflow.BackflowEpsilonTerm(
             param_name=:bf_epsilon_d,
             epsilon_bf=bf_epsilon_d,
             epsilon_mask_terms=Symbol[:eta1, :eta2, :eta3_doublon_single, :eta4],
             source_bonds=d_source_bonds,
             source_amplitudes=d_source_amplitudes,
         ),
-        BackflowEpsilonTerm(
+        mfVMC.Backflow.BackflowEpsilonTerm(
             param_name=:bf_epsilon_p,
             epsilon_bf=bf_epsilon_p,
             epsilon_mask_terms=Symbol[:eta1, :eta2, :eta3_doublon_single, :eta4],
             source_bonds=p_source_bonds,
             source_amplitudes=p_source_amplitudes,
         ),
-        BackflowEta1DoublonHoleTerm(
-            param_name=:bf_eta1_dd,
-            eta1_bf=bf_eta1_dd,
-            source_bonds=dd_source_bonds,
-            source_amplitudes=dd_source_amplitudes,
-        ),
-        BackflowEta2SpinExchangeTerm(
-            param_name=:bf_eta2_dd,
-            eta2_bf=bf_eta2_dd,
-            source_bonds=dd_source_bonds,
-            source_amplitudes=dd_source_amplitudes,
-        ),
-        BackflowEta3DoublonSingleTerm(
-            param_name=:bf_eta3_dd,
-            eta3_bf=bf_eta3_dd,
-            source_bonds=dd_source_bonds,
-            source_amplitudes=dd_source_amplitudes,
-        ),
-        BackflowEta4SingleHoleTerm(
-            param_name=:bf_eta4_dd,
-            eta4_bf=bf_eta4_dd,
-            source_bonds=dd_source_bonds,
-            source_amplitudes=dd_source_amplitudes,
-        ),
-        BackflowEta1DoublonHoleTerm(
-            param_name=:bf_eta1_dp,
-            eta1_bf=bf_eta1_dp,
-            source_bonds=dp_source_bonds,
-            source_amplitudes=dp_source_amplitudes,
-        ),
-        BackflowEta2SpinExchangeTerm(
-            param_name=:bf_eta2_dp,
-            eta2_bf=bf_eta2_dp,
-            source_bonds=dp_source_bonds,
-            source_amplitudes=dp_source_amplitudes,
-        ),
-        BackflowEta3DoublonSingleTerm(
-            param_name=:bf_eta3_dp,
-            eta3_bf=bf_eta3_dp,
-            source_bonds=dp_source_bonds,
-            source_amplitudes=dp_source_amplitudes,
-        ),
-        BackflowEta4SingleHoleTerm(
-            param_name=:bf_eta4_dp,
-            eta4_bf=bf_eta4_dp,
-            source_bonds=dp_source_bonds,
-            source_amplitudes=dp_source_amplitudes,
-        ),
-        BackflowEta1DoublonHoleTerm(
-            param_name=:bf_eta1_pd,
-            eta1_bf=bf_eta1_pd,
-            source_bonds=pd_source_bonds,
-            source_amplitudes=pd_source_amplitudes,
-        ),
-        BackflowEta2SpinExchangeTerm(
-            param_name=:bf_eta2_pd,
-            eta2_bf=bf_eta2_pd,
-            source_bonds=pd_source_bonds,
-            source_amplitudes=pd_source_amplitudes,
-        ),
-        BackflowEta3DoublonSingleTerm(
-            param_name=:bf_eta3_pd,
-            eta3_bf=bf_eta3_pd,
-            source_bonds=pd_source_bonds,
-            source_amplitudes=pd_source_amplitudes,
-        ),
-        BackflowEta4SingleHoleTerm(
-            param_name=:bf_eta4_pd,
-            eta4_bf=bf_eta4_pd,
-            source_bonds=pd_source_bonds,
-            source_amplitudes=pd_source_amplitudes,
-        ),
-        BackflowEta1DoublonHoleTerm(
-            param_name=:bf_eta1_pp,
-            eta1_bf=bf_eta1_pp,
-            source_bonds=pp_source_bonds,
-            source_amplitudes=pp_source_amplitudes,
-        ),
-        BackflowEta2SpinExchangeTerm(
-            param_name=:bf_eta2_pp,
-            eta2_bf=bf_eta2_pp,
-            source_bonds=pp_source_bonds,
-            source_amplitudes=pp_source_amplitudes,
-        ),
-        BackflowEta3DoublonSingleTerm(
-            param_name=:bf_eta3_pp,
-            eta3_bf=bf_eta3_pp,
-            source_bonds=pp_source_bonds,
-            source_amplitudes=pp_source_amplitudes,
-        ),
-        BackflowEta4SingleHoleTerm(
-            param_name=:bf_eta4_pp,
-            eta4_bf=bf_eta4_pp,
-            source_bonds=pp_source_bonds,
-            source_amplitudes=pp_source_amplitudes,
-        ),
-    ])
+    ]
+
+    dd_group = mfVMC.Backflow.build_directed_backflow_source_group(
+        :dd,
+        dd_source_bonds,
+        dd_source_amplitudes,
+        mfVMC.BackflowEta1DoublonHoleTerm(:bf_eta1_dd, bf_eta1_dd),
+        mfVMC.BackflowEta2SpinExchangeTerm(:bf_eta2_dd, bf_eta2_dd),
+        mfVMC.BackflowEta3DoublonSingleTerm(:bf_eta3_dd, bf_eta3_dd),
+        mfVMC.BackflowEta4SingleHoleTerm(:bf_eta4_dd, bf_eta4_dd),
+    )
+    dp_group = mfVMC.Backflow.build_directed_backflow_source_group(
+        :dp,
+        dp_source_bonds,
+        dp_source_amplitudes,
+        mfVMC.BackflowEta1DoublonHoleTerm(:bf_eta1_dp, bf_eta1_dp),
+        mfVMC.BackflowEta2SpinExchangeTerm(:bf_eta2_dp, bf_eta2_dp),
+        mfVMC.BackflowEta3DoublonSingleTerm(:bf_eta3_dp, bf_eta3_dp),
+        mfVMC.BackflowEta4SingleHoleTerm(:bf_eta4_dp, bf_eta4_dp),
+    )
+    pd_group = mfVMC.Backflow.build_directed_backflow_source_group(
+        :pd,
+        pd_source_bonds,
+        pd_source_amplitudes,
+        mfVMC.BackflowEta1DoublonHoleTerm(:bf_eta1_pd, bf_eta1_pd),
+        mfVMC.BackflowEta2SpinExchangeTerm(:bf_eta2_pd, bf_eta2_pd),
+        mfVMC.BackflowEta3DoublonSingleTerm(:bf_eta3_pd, bf_eta3_pd),
+        mfVMC.BackflowEta4SingleHoleTerm(:bf_eta4_pd, bf_eta4_pd),
+    )
+    pp_group = mfVMC.Backflow.build_directed_backflow_source_group(
+        :pp,
+        pp_source_bonds,
+        pp_source_amplitudes,
+        mfVMC.BackflowEta1DoublonHoleTerm(:bf_eta1_pp, bf_eta1_pp),
+        mfVMC.BackflowEta2SpinExchangeTerm(:bf_eta2_pp, bf_eta2_pp),
+        mfVMC.BackflowEta3DoublonSingleTerm(:bf_eta3_pp, bf_eta3_pp),
+        mfVMC.BackflowEta4SingleHoleTerm(:bf_eta4_pp, bf_eta4_pp),
+    )
+
+    return mfVMC.Backflow.CompositeBackflowTerm(epsilon_terms, [dd_group, dp_group, pd_group, pp_group])
 end
 
 """
