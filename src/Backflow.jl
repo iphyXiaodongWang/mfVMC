@@ -67,7 +67,7 @@ const BACKFLOW_EPSILON_MASK_TERMS = (:eta1, :eta2, :eta3, :eta3_doublon_single, 
 - `NamedTuple`: 包含复制后的 `source_bonds`, `source_amplitudes`, 内容签名与图缓存。
 """
 function build_backflow_correction_source_cache(
-    source_bonds::Vector{Tuple{Int, Int}},
+    source_bonds::Vector{Tuple{Int,Int}},
     source_amplitudes::Vector{<:Real},
 )
     if length(source_bonds) != length(source_amplitudes)
@@ -126,7 +126,7 @@ end
 返回:
 - `NamedTuple`: 包含上述两个缓存数组。
 """
-function build_backflow_source_graph_cache(source_bonds::Vector{Tuple{Int, Int}})
+function build_backflow_source_graph_cache(source_bonds::Vector{Tuple{Int,Int}})
     max_site_index = 0
     for (bond_index, (site_i, site_j)) in enumerate(source_bonds)
         if site_i < 1 || site_j < 1
@@ -185,7 +185,7 @@ mutable struct BackflowEpsilonTerm <: AbstractBackflowCorrectionTerm
     param_name::Symbol
     epsilon_bf::Float64
     epsilon_mask_terms::Vector{Symbol}
-    source_bonds::Vector{Tuple{Int, Int}}
+    source_bonds::Vector{Tuple{Int,Int}}
     source_amplitudes::Vector{Float64}
     source_data_signature::UInt
     outgoing_bond_indices_by_source::Vector{Vector{Int}}
@@ -207,7 +207,7 @@ end
 mutable struct BackflowEta1DoublonHoleTerm <: AbstractBackflowCorrectionTerm
     param_name::Symbol
     eta1_bf::Float64
-    source_bonds::Vector{Tuple{Int, Int}}
+    source_bonds::Vector{Tuple{Int,Int}}
     source_amplitudes::Vector{Float64}
     source_data_signature::UInt
     outgoing_bond_indices_by_source::Vector{Vector{Int}}
@@ -230,7 +230,7 @@ end
 mutable struct BackflowEta2SpinExchangeTerm <: AbstractBackflowCorrectionTerm
     param_name::Symbol
     eta2_bf::Float64
-    source_bonds::Vector{Tuple{Int, Int}}
+    source_bonds::Vector{Tuple{Int,Int}}
     source_amplitudes::Vector{Float64}
     source_data_signature::UInt
     outgoing_bond_indices_by_source::Vector{Vector{Int}}
@@ -253,7 +253,7 @@ end
 mutable struct BackflowEta3MixedVirtualHopTerm <: AbstractBackflowCorrectionTerm
     param_name::Symbol
     eta3_bf::Float64
-    source_bonds::Vector{Tuple{Int, Int}}
+    source_bonds::Vector{Tuple{Int,Int}}
     source_amplitudes::Vector{Float64}
     source_data_signature::UInt
     outgoing_bond_indices_by_source::Vector{Vector{Int}}
@@ -276,7 +276,7 @@ end
 mutable struct BackflowEta3DoublonSingleTerm <: AbstractBackflowCorrectionTerm
     param_name::Symbol
     eta3_bf::Float64
-    source_bonds::Vector{Tuple{Int, Int}}
+    source_bonds::Vector{Tuple{Int,Int}}
     source_amplitudes::Vector{Float64}
     source_data_signature::UInt
     outgoing_bond_indices_by_source::Vector{Vector{Int}}
@@ -299,7 +299,7 @@ end
 mutable struct BackflowEta4SingleHoleTerm <: AbstractBackflowCorrectionTerm
     param_name::Symbol
     eta4_bf::Float64
-    source_bonds::Vector{Tuple{Int, Int}}
+    source_bonds::Vector{Tuple{Int,Int}}
     source_amplitudes::Vector{Float64}
     source_data_signature::UInt
     outgoing_bond_indices_by_source::Vector{Vector{Int}}
@@ -644,7 +644,7 @@ end
 - `UInt`: 用于检测原地修改的内容签名。
 """
 function compute_backflow_source_data_signature(
-    source_bonds::Vector{Tuple{Int, Int}},
+    source_bonds::Vector{Tuple{Int,Int}},
     source_amplitudes::Vector{<:Real},
 )
     source_data_signature = hash(length(source_bonds))
@@ -679,7 +679,7 @@ function BackflowEpsilonTerm(;
     param_name::Symbol=:bf_epsilon,
     epsilon_bf::Real=1.0,
     epsilon_mask_terms::AbstractVector{Symbol}=Symbol[:eta1],
-    source_bonds::Vector{Tuple{Int, Int}}=Tuple{Int, Int}[],
+    source_bonds::Vector{Tuple{Int,Int}}=Tuple{Int,Int}[],
     source_amplitudes::Vector{<:Real}=ones(Float64, length(source_bonds)),
 )
     source_cache = build_backflow_correction_source_cache(source_bonds, source_amplitudes)
@@ -710,7 +710,7 @@ end
 function BackflowEta1DoublonHoleTerm(;
     param_name::Symbol=:bf_eta1,
     eta1_bf::Real=0.0,
-    source_bonds::Vector{Tuple{Int, Int}}=Tuple{Int, Int}[],
+    source_bonds::Vector{Tuple{Int,Int}}=Tuple{Int,Int}[],
     source_amplitudes::Vector{<:Real}=ones(Float64, length(source_bonds)),
 )
     source_cache = build_backflow_correction_source_cache(source_bonds, source_amplitudes)
@@ -740,7 +740,7 @@ end
 function BackflowEta2SpinExchangeTerm(;
     param_name::Symbol=:bf_eta2,
     eta2_bf::Real=0.0,
-    source_bonds::Vector{Tuple{Int, Int}}=Tuple{Int, Int}[],
+    source_bonds::Vector{Tuple{Int,Int}}=Tuple{Int,Int}[],
     source_amplitudes::Vector{<:Real}=ones(Float64, length(source_bonds)),
 )
     source_cache = build_backflow_correction_source_cache(source_bonds, source_amplitudes)
@@ -770,7 +770,7 @@ end
 function BackflowEta3MixedVirtualHopTerm(;
     param_name::Symbol=:bf_eta3,
     eta3_bf::Real=0.0,
-    source_bonds::Vector{Tuple{Int, Int}}=Tuple{Int, Int}[],
+    source_bonds::Vector{Tuple{Int,Int}}=Tuple{Int,Int}[],
     source_amplitudes::Vector{<:Real}=ones(Float64, length(source_bonds)),
 )
     source_cache = build_backflow_correction_source_cache(source_bonds, source_amplitudes)
@@ -800,7 +800,7 @@ end
 function BackflowEta3DoublonSingleTerm(;
     param_name::Symbol=:bf_eta3,
     eta3_bf::Real=0.0,
-    source_bonds::Vector{Tuple{Int, Int}}=Tuple{Int, Int}[],
+    source_bonds::Vector{Tuple{Int,Int}}=Tuple{Int,Int}[],
     source_amplitudes::Vector{<:Real}=ones(Float64, length(source_bonds)),
 )
     source_cache = build_backflow_correction_source_cache(source_bonds, source_amplitudes)
@@ -830,7 +830,7 @@ end
 function BackflowEta4SingleHoleTerm(;
     param_name::Symbol=:bf_eta4,
     eta4_bf::Real=0.0,
-    source_bonds::Vector{Tuple{Int, Int}}=Tuple{Int, Int}[],
+    source_bonds::Vector{Tuple{Int,Int}}=Tuple{Int,Int}[],
     source_amplitudes::Vector{<:Real}=ones(Float64, length(source_bonds)),
 )
     source_cache = build_backflow_correction_source_cache(source_bonds, source_amplitudes)
@@ -2147,20 +2147,20 @@ function fill_shared_source_composite_site_block_after_proposal!(
         if epsilon_term !== nothing && epsilon_shift != zero(T)
             if !epsilon_up_is_active &&
                is_backflow_epsilon_row_active(
-                   state_i,
-                   state_j,
-                   UP,
-                   epsilon_term.epsilon_mask_terms,
-               )
+                state_i,
+                state_j,
+                UP,
+                epsilon_term.epsilon_mask_terms,
+            )
                 epsilon_up_is_active = true
             end
             if !epsilon_down_is_active &&
                is_backflow_epsilon_row_active(
-                   state_i,
-                   state_j,
-                   DN,
-                   epsilon_term.epsilon_mask_terms,
-               )
+                state_i,
+                state_j,
+                DN,
+                epsilon_term.epsilon_mask_terms,
+            )
                 epsilon_down_is_active = true
             end
         end
@@ -2264,20 +2264,20 @@ function fill_grouped_source_composite_site_block_after_proposal!(
             state_j = get_site_state_after_proposal(state_vector, proposal, target_site)
             if !epsilon_up_is_active &&
                is_backflow_epsilon_row_active(
-                   state_i,
-                   state_j,
-                   UP,
-                   epsilon_term.epsilon_mask_terms,
-               )
+                state_i,
+                state_j,
+                UP,
+                epsilon_term.epsilon_mask_terms,
+            )
                 epsilon_up_is_active = true
             end
             if !epsilon_down_is_active &&
                is_backflow_epsilon_row_active(
-                   state_i,
-                   state_j,
-                   DN,
-                   epsilon_term.epsilon_mask_terms,
-               )
+                state_i,
+                state_j,
+                DN,
+                epsilon_term.epsilon_mask_terms,
+            )
                 epsilon_down_is_active = true
             end
             epsilon_up_is_active && epsilon_down_is_active && break
@@ -4502,7 +4502,7 @@ function build_backflow_derivative_orbitals(
     ::NoBackflowTerm,
 ) where {T}
     validate_orbital_dimensions(base_orbitals, length(state_vector))
-    return Pair{Symbol, Matrix{T}}[]
+    return Pair{Symbol,Matrix{T}}[]
 end
 
 
@@ -4527,7 +4527,7 @@ function build_backflow_derivative_orbitals(
     backflow_term::CompositeBackflowTerm,
 ) where {T}
     validate_orbital_dimensions(base_orbitals, length(state_vector))
-    derivative_pairs = Pair{Symbol, Matrix{T}}[]
+    derivative_pairs = Pair{Symbol,Matrix{T}}[]
     for correction_term in backflow_term.terms
         derivative_orbitals = zeros(T, size(base_orbitals))
         add_backflow_correction_derivative_orbitals!(

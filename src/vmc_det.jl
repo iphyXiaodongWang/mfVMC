@@ -977,7 +977,7 @@ function collect_backflow_local_column_updates_into_cache!(
         sorted_electron_ids[column_index] = ws.cached_changed_electron_ids[old_column_index]
         sorted_row_indices[column_index] = ws.cached_changed_row_indices[old_column_index]
 
-        if column_index > 1 && sorted_electron_ids[column_index] == sorted_electron_ids[column_index - 1]
+        if column_index > 1 && sorted_electron_ids[column_index] == sorted_electron_ids[column_index-1]
             error("Backflow local column update collected duplicate electron IDs: $(sorted_electron_ids[1:column_index])")
         end
 
@@ -1036,7 +1036,7 @@ function refresh_backflow_affected_orbital_rows_after_accept!(
             @view(site_block_buffer[1, :]),
         )
         copyto!(
-            @view(vwf.backflow_u[orbital_row + 1, :]),
+            @view(vwf.backflow_u[orbital_row+1, :]),
             @view(site_block_buffer[2, :]),
         )
         copyto!(
@@ -1044,7 +1044,7 @@ function refresh_backflow_affected_orbital_rows_after_accept!(
             @view(site_block_buffer[1, :]),
         )
         copyto!(
-            @view(vwf.gs_U[orbital_row + 1, :]),
+            @view(vwf.gs_U[orbital_row+1, :]),
             @view(site_block_buffer[2, :]),
         )
         copyto!(
@@ -1052,7 +1052,7 @@ function refresh_backflow_affected_orbital_rows_after_accept!(
             @view(site_block_buffer[1, :]),
         )
         copyto!(
-            @view(vwf.gs_U_t[:, orbital_row + 1]),
+            @view(vwf.gs_U_t[:, orbital_row+1]),
             @view(site_block_buffer[2, :]),
         )
     end
@@ -1190,24 +1190,24 @@ function apply_cached_backflow_orbital_rows!(vwf::vwf_det{T}) where {T}
             @view(ws.cached_affected_site_blocks[cached_block_row, :]),
         )
         copyto!(
-            @view(vwf.backflow_u[orbital_row + 1, :]),
-            @view(ws.cached_affected_site_blocks[cached_block_row + 1, :]),
+            @view(vwf.backflow_u[orbital_row+1, :]),
+            @view(ws.cached_affected_site_blocks[cached_block_row+1, :]),
         )
         copyto!(
             @view(vwf.gs_U[orbital_row, :]),
             @view(ws.cached_affected_site_blocks[cached_block_row, :]),
         )
         copyto!(
-            @view(vwf.gs_U[orbital_row + 1, :]),
-            @view(ws.cached_affected_site_blocks[cached_block_row + 1, :]),
+            @view(vwf.gs_U[orbital_row+1, :]),
+            @view(ws.cached_affected_site_blocks[cached_block_row+1, :]),
         )
         copyto!(
             @view(vwf.gs_U_t[:, orbital_row]),
             @view(ws.cached_affected_site_blocks[cached_block_row, :]),
         )
         copyto!(
-            @view(vwf.gs_U_t[:, orbital_row + 1]),
-            @view(ws.cached_affected_site_blocks[cached_block_row + 1, :]),
+            @view(vwf.gs_U_t[:, orbital_row+1]),
+            @view(ws.cached_affected_site_blocks[cached_block_row+1, :]),
         )
     end
 
@@ -1698,7 +1698,7 @@ function compute_grad_log_psi!(vwf::vwf_det{T}) where T
             @timed "grad_backflow_param_log_derivative" begin
                 start_idx = wf_param_count + projector_param_count + 1
                 for (pair_offset, (_, derivative_orbitals)) in enumerate(backflow_pairs)
-                    O_vec[start_idx + pair_offset - 1] = _compute_orbital_log_derivative_from_selected_rows!(
+                    O_vec[start_idx+pair_offset-1] = _compute_orbital_log_derivative_from_selected_rows!(
                         ws.orbital_log_derivative_row_buffer,
                         A_inv,
                         ss.electron_locs,
