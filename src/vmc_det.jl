@@ -1505,6 +1505,64 @@ function _compute_orbital_log_derivative_from_selected_rows!(
     return dot(a_inv, selected_row_buffer)
 end
 
+"""
+用途: 只通过 occupied rows 计算 backflow chain-rule 后的 determinant log-derivative。
+
+参数:
+- `chain_rule_row_buffer::AbstractVector{T}`: 单行工作缓冲区, 长度必须等于轨道数 `N_orb`。
+- `a_inv::AbstractMatrix{T}`: 当前 Slater 矩阵逆, 形状为 `N_orb x N_elec`。
+- `electron_locs::AbstractVector{Int}`: 第 `e` 个电子在 spin-resolved 轨道矩阵中的行号 `r_e`。
+- `input_derivative_orbitals::AbstractMatrix{T}`: 裸 mean-field 导数矩阵 `dU_0 / dp`, 行为空间/自旋轨道, 列为占据轨道。
+- `state_vector::Vector{Int8}`: 当前 Monte Carlo 构型。
+- `backflow_term::Backflow.AbstractBackflowTerm`: 当前 backflow 项。
+
+返回:
+- `T`: `sum_e sum_o A^{-1}_{o,e} * (B_x[dU_0 / dp])[r_e,o]`。
+
+公式:
+- 若 `U_b = B_x[U_0]`, 固定构型 `x` 时 backflow 对 `U_0` 是线性变换,
+  因此 `dU_b / dp = B_x[dU_0 / dp]`。
+- determinant 波函数满足
+  `partial log det(A) / partial p = Tr(A^{-1} partial A / partial p)`。
+- 这里不显式构造完整 `dU_b / dp`, 而是逐个电子只计算 occupied row `r_e`。
+"""
+function _compute_backflow_orbital_log_derivative_from_selected_rows!(
+    chain_rule_row_buffer::AbstractVector{T},
+    a_inv::AbstractMatrix{T},
+    electron_locs::AbstractVector{Int},
+    input_derivative_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    backflow_term::Backflow.AbstractBackflowTerm,
+)::T where {T}
+    n_orb, n_elec = size(a_inv)
+    if length(chain_rule_row_buffer) != n_orb
+        throw(DimensionMismatch("chain_rule_row_buffer length $(length(chain_rule_row_buffer)) != orbital count $n_orb"))
+    end
+    if length(electron_locs) != n_elec
+        throw(DimensionMismatch("electron_locs length $(length(electron_locs)) != electron count $(n_elec)"))
+    end
+    if size(input_derivative_orbitals, 2) < n_orb
+        throw(DimensionMismatch("input_derivative_orbitals column count $(size(input_derivative_orbitals, 2)) < orbital count $(n_orb)"))
+    end
+
+    log_derivative = zero(T)
+    @inbounds for elec in 1:n_elec
+        row_index = electron_locs[elec]
+        Backflow.fill_backflow_chain_rule_row!(
+            chain_rule_row_buffer,
+            input_derivative_orbitals,
+            state_vector,
+            backflow_term,
+            row_index,
+        )
+        for orbital_index in 1:n_orb
+            log_derivative += a_inv[orbital_index, elec] * chain_rule_row_buffer[orbital_index]
+        end
+    end
+
+    return log_derivative
+end
+
 function compute_grad_log_psi!(vwf::vwf_det{T}) where T
     return @timed "compute_grad_log_psi!" begin
         # 1. 准备 Workspace
@@ -1524,18 +1582,13 @@ function compute_grad_log_psi!(vwf::vwf_det{T}) where T
         if has_active_backflow
             for idx in 1:wf_param_count
                 dU_t = @view vwf.dUt_matrix[:, :, idx]
-                Backflow.fill_backflow_chain_rule_orbitals!(
-                    ws.backflow_chain_rule_buffer,
+                O_vec[idx] = _compute_backflow_orbital_log_derivative_from_selected_rows!(
+                    ws.dr1,
+                    A_inv,
+                    ss.electron_locs,
                     transpose(dU_t),
                     ss.state,
                     vwf.backflow,
-                )
-                derivative_orbitals = ws.backflow_chain_rule_buffer
-                O_vec[idx] = _compute_orbital_log_derivative_from_selected_rows!(
-                    ws.orbital_log_derivative_row_buffer,
-                    A_inv,
-                    ss.electron_locs,
-                    derivative_orbitals,
                 )
             end
         else

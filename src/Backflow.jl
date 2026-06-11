@@ -3285,6 +3285,436 @@ function fill_backflow_chain_rule_orbitals!(
 end
 
 """
+用途: 校验 chain-rule 单行输出并写入裸导数轨道基准行。
+
+参数:
+- `output_row::AbstractVector{T}`: 输出 buffer, 长度必须等于轨道数。
+- `input_derivative_orbitals::AbstractMatrix{T}`: 输入裸轨道导数 `dU_0 / dp`。
+- `state_vector::Vector{Int8}`: 当前构型。
+- `row_index::Int`: 需要计算的 spin-resolved 全局行号。
+
+返回:
+- `Tuple{Int, Int}`: `(site_index, row_offset)`, 其中 `row_offset=1` 为 up, `2` 为 down。
+"""
+function initialize_backflow_chain_rule_row!(
+    output_row::AbstractVector{T},
+    input_derivative_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    row_index::Int,
+)::Tuple{Int,Int} where {T}
+    validate_orbital_dimensions(input_derivative_orbitals, length(state_vector))
+    if length(output_row) != size(input_derivative_orbitals, 2)
+        error("Chain-rule row buffer length $(length(output_row)) != orbital count $(size(input_derivative_orbitals, 2)).")
+    end
+    if !(1 <= row_index <= size(input_derivative_orbitals, 1))
+        error("Chain-rule row index $row_index is out of bounds for $(size(input_derivative_orbitals, 1)) rows.")
+    end
+
+    site_index = div(row_index + 1, 2)
+    row_offset = isodd(row_index) ? 1 : 2
+    copyto!(output_row, @view(input_derivative_orbitals[row_index, :]))
+    return site_index, row_offset
+end
+
+"""
+用途: 将 `epsilon` correction term 对单行 chain-rule 导数的贡献累加到 buffer。
+
+数学公式:
+- 若 `xi_{i,sigma}=1`, 则
+  `dU_b(i,sigma)/dp += (epsilon_bf - 1) * dU_0(i,sigma)/dp`。
+
+参数:
+- `output_row::AbstractVector{T}`: 待累加的单行输出 buffer。
+- `input_derivative_orbitals::AbstractMatrix{T}`: 输入裸轨道导数矩阵。
+- `state_vector::Vector{Int8}`: 当前构型。
+- `correction_term::BackflowEpsilonTerm`: `epsilon` correction term。
+- `site_index::Int`: 当前 site 编号。
+- `row_offset::Int`: 当前 site 内部自旋行偏移。
+- `row_index::Int`: 当前全局行号。
+
+返回:
+- `nothing`。
+"""
+function add_backflow_correction_chain_rule_row!(
+    output_row::AbstractVector{T},
+    input_derivative_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    correction_term::BackflowEpsilonTerm,
+    site_index::Int,
+    row_offset::Int,
+    row_index::Int,
+) where {T}
+    if site_index > length(correction_term.outgoing_bond_indices_by_source)
+        return nothing
+    end
+
+    epsilon_shift = T(correction_term.epsilon_bf - 1.0)
+    if epsilon_shift == zero(T)
+        return nothing
+    end
+
+    state_i = state_vector[site_index]
+    spin = backflow_spin_from_row_offset(row_offset)
+    for bond_index in correction_term.outgoing_bond_indices_by_source[site_index]
+        (_, target_site) = correction_term.source_bonds[bond_index]
+        state_j = state_vector[target_site]
+        if is_backflow_epsilon_row_active(
+            state_i,
+            state_j,
+            spin,
+            correction_term.epsilon_mask_terms,
+        )
+            @views output_row .+= epsilon_shift .* input_derivative_orbitals[row_index, :]
+            return nothing
+        end
+    end
+
+    return nothing
+end
+
+"""
+用途: 将 `eta1` correction term 对单行 chain-rule 导数的贡献累加到 buffer。
+
+数学公式:
+- `dU_b(i,sigma)/dp += eta1_bf * sum_j t_ij D_i H_j dU_0(j,sigma)/dp`。
+
+参数:
+- `output_row::AbstractVector{T}`: 待累加的单行输出 buffer。
+- `input_derivative_orbitals::AbstractMatrix{T}`: 输入裸轨道导数矩阵。
+- `state_vector::Vector{Int8}`: 当前构型。
+- `correction_term::BackflowEta1DoublonHoleTerm`: `eta1` correction term。
+- `site_index::Int`: 当前 site 编号。
+- `row_offset::Int`: 当前 site 内部自旋行偏移。
+- `row_index::Int`: 当前全局行号, 此函数不直接使用, 保持接口一致。
+
+返回:
+- `nothing`。
+"""
+function add_backflow_correction_chain_rule_row!(
+    output_row::AbstractVector{T},
+    input_derivative_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    correction_term::BackflowEta1DoublonHoleTerm,
+    site_index::Int,
+    row_offset::Int,
+    row_index::Int,
+) where {T}
+    if site_index > length(correction_term.outgoing_bond_indices_by_source)
+        return nothing
+    end
+    if state_vector[site_index] != DB
+        return nothing
+    end
+
+    eta1_value = T(correction_term.eta1_bf)
+    if eta1_value == zero(T)
+        return nothing
+    end
+
+    for bond_index in correction_term.outgoing_bond_indices_by_source[site_index]
+        (_, target_site) = correction_term.source_bonds[bond_index]
+        if state_vector[target_site] != HOLE
+            continue
+        end
+        target_row = 2 * (target_site - 1) + row_offset
+        bond_amplitude = T(correction_term.source_amplitudes[bond_index])
+        @views output_row .+= eta1_value * bond_amplitude .* input_derivative_orbitals[target_row, :]
+    end
+
+    return nothing
+end
+
+"""
+用途: 将 `eta2` correction term 对单行 chain-rule 导数的贡献累加到 buffer。
+
+数学公式:
+- `dU_b(i,sigma)/dp += eta2_bf * sum_j t_ij
+   n_i_sigma h_i_-sigma n_j_-sigma h_j_sigma dU_0(j,sigma)/dp`。
+
+参数:
+- `output_row::AbstractVector{T}`: 待累加的单行输出 buffer。
+- `input_derivative_orbitals::AbstractMatrix{T}`: 输入裸轨道导数矩阵。
+- `state_vector::Vector{Int8}`: 当前构型。
+- `correction_term::BackflowEta2SpinExchangeTerm`: `eta2` correction term。
+- `site_index::Int`: 当前 site 编号。
+- `row_offset::Int`: 当前 site 内部自旋行偏移。
+- `row_index::Int`: 当前全局行号, 此函数不直接使用, 保持接口一致。
+
+返回:
+- `nothing`。
+"""
+function add_backflow_correction_chain_rule_row!(
+    output_row::AbstractVector{T},
+    input_derivative_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    correction_term::BackflowEta2SpinExchangeTerm,
+    site_index::Int,
+    row_offset::Int,
+    row_index::Int,
+) where {T}
+    if site_index > length(correction_term.outgoing_bond_indices_by_source)
+        return nothing
+    end
+
+    state_i = state_vector[site_index]
+    spin = backflow_spin_from_row_offset(row_offset)
+    eta2_value = T(correction_term.eta2_bf)
+    if eta2_value == zero(T) || backflow_n_sigma(state_i, spin) == 0.0
+        return nothing
+    end
+
+    for bond_index in correction_term.outgoing_bond_indices_by_source[site_index]
+        (_, target_site) = correction_term.source_bonds[bond_index]
+        state_j = state_vector[target_site]
+        eta2_factor = compute_eta2_virtual_hopping_factor(state_i, state_j, spin)
+        if eta2_factor == 0.0
+            continue
+        end
+        target_row = 2 * (target_site - 1) + row_offset
+        bond_amplitude = T(correction_term.source_amplitudes[bond_index])
+        @views output_row .+= eta2_value * bond_amplitude * T(eta2_factor) .* input_derivative_orbitals[target_row, :]
+    end
+
+    return nothing
+end
+
+"""
+用途: 将 mixed `eta3` correction term 对单行 chain-rule 导数的贡献累加到 buffer。
+
+数学公式:
+- `dU_b(i,sigma)/dp += eta3_bf * sum_j t_ij *
+   (D_i n_j_-sigma h_j_sigma + n_i_sigma h_i_-sigma H_j) dU_0(j,sigma)/dp`。
+
+参数:
+- `output_row::AbstractVector{T}`: 待累加的单行输出 buffer。
+- `input_derivative_orbitals::AbstractMatrix{T}`: 输入裸轨道导数矩阵。
+- `state_vector::Vector{Int8}`: 当前构型。
+- `correction_term::BackflowEta3MixedVirtualHopTerm`: mixed `eta3` correction term。
+- `site_index::Int`: 当前 site 编号。
+- `row_offset::Int`: 当前 site 内部自旋行偏移。
+- `row_index::Int`: 当前全局行号, 此函数不直接使用, 保持接口一致。
+
+返回:
+- `nothing`。
+"""
+function add_backflow_correction_chain_rule_row!(
+    output_row::AbstractVector{T},
+    input_derivative_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    correction_term::BackflowEta3MixedVirtualHopTerm,
+    site_index::Int,
+    row_offset::Int,
+    row_index::Int,
+) where {T}
+    if site_index > length(correction_term.outgoing_bond_indices_by_source)
+        return nothing
+    end
+
+    state_i = state_vector[site_index]
+    spin = backflow_spin_from_row_offset(row_offset)
+    eta3_value = T(correction_term.eta3_bf)
+    if eta3_value == zero(T) || backflow_n_sigma(state_i, spin) == 0.0
+        return nothing
+    end
+
+    for bond_index in correction_term.outgoing_bond_indices_by_source[site_index]
+        (_, target_site) = correction_term.source_bonds[bond_index]
+        state_j = state_vector[target_site]
+        eta3_factor = compute_eta3_virtual_hopping_factor(state_i, state_j, spin)
+        if eta3_factor == 0.0
+            continue
+        end
+        target_row = 2 * (target_site - 1) + row_offset
+        bond_amplitude = T(correction_term.source_amplitudes[bond_index])
+        @views output_row .+= eta3_value * bond_amplitude * T(eta3_factor) .* input_derivative_orbitals[target_row, :]
+    end
+
+    return nothing
+end
+
+"""
+用途: 将 split `eta3` correction term 对单行 chain-rule 导数的贡献累加到 buffer。
+
+数学公式:
+- `dU_b(i,sigma)/dp += eta3_bf * sum_j t_ij
+   D_i n_j_-sigma h_j_sigma dU_0(j,sigma)/dp`。
+
+参数:
+- `output_row::AbstractVector{T}`: 待累加的单行输出 buffer。
+- `input_derivative_orbitals::AbstractMatrix{T}`: 输入裸轨道导数矩阵。
+- `state_vector::Vector{Int8}`: 当前构型。
+- `correction_term::BackflowEta3DoublonSingleTerm`: split `eta3` correction term。
+- `site_index::Int`: 当前 site 编号。
+- `row_offset::Int`: 当前 site 内部自旋行偏移。
+- `row_index::Int`: 当前全局行号, 此函数不直接使用, 保持接口一致。
+
+返回:
+- `nothing`。
+"""
+function add_backflow_correction_chain_rule_row!(
+    output_row::AbstractVector{T},
+    input_derivative_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    correction_term::BackflowEta3DoublonSingleTerm,
+    site_index::Int,
+    row_offset::Int,
+    row_index::Int,
+) where {T}
+    if site_index > length(correction_term.outgoing_bond_indices_by_source)
+        return nothing
+    end
+
+    state_i = state_vector[site_index]
+    spin = backflow_spin_from_row_offset(row_offset)
+    eta3_value = T(correction_term.eta3_bf)
+    if eta3_value == zero(T) || backflow_n_sigma(state_i, spin) == 0.0
+        return nothing
+    end
+
+    for bond_index in correction_term.outgoing_bond_indices_by_source[site_index]
+        (_, target_site) = correction_term.source_bonds[bond_index]
+        state_j = state_vector[target_site]
+        eta3_factor = compute_eta3_doublon_single_factor(state_i, state_j, spin)
+        if eta3_factor == 0.0
+            continue
+        end
+        target_row = 2 * (target_site - 1) + row_offset
+        bond_amplitude = T(correction_term.source_amplitudes[bond_index])
+        @views output_row .+= eta3_value * bond_amplitude * T(eta3_factor) .* input_derivative_orbitals[target_row, :]
+    end
+
+    return nothing
+end
+
+"""
+用途: 将 split `eta4` correction term 对单行 chain-rule 导数的贡献累加到 buffer。
+
+数学公式:
+- `dU_b(i,sigma)/dp += eta4_bf * sum_j t_ij
+   n_i_sigma h_i_-sigma H_j dU_0(j,sigma)/dp`。
+
+参数:
+- `output_row::AbstractVector{T}`: 待累加的单行输出 buffer。
+- `input_derivative_orbitals::AbstractMatrix{T}`: 输入裸轨道导数矩阵。
+- `state_vector::Vector{Int8}`: 当前构型。
+- `correction_term::BackflowEta4SingleHoleTerm`: split `eta4` correction term。
+- `site_index::Int`: 当前 site 编号。
+- `row_offset::Int`: 当前 site 内部自旋行偏移。
+- `row_index::Int`: 当前全局行号, 此函数不直接使用, 保持接口一致。
+
+返回:
+- `nothing`。
+"""
+function add_backflow_correction_chain_rule_row!(
+    output_row::AbstractVector{T},
+    input_derivative_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    correction_term::BackflowEta4SingleHoleTerm,
+    site_index::Int,
+    row_offset::Int,
+    row_index::Int,
+) where {T}
+    if site_index > length(correction_term.outgoing_bond_indices_by_source)
+        return nothing
+    end
+
+    state_i = state_vector[site_index]
+    spin = backflow_spin_from_row_offset(row_offset)
+    eta4_value = T(correction_term.eta4_bf)
+    if eta4_value == zero(T) || backflow_n_sigma(state_i, spin) == 0.0
+        return nothing
+    end
+
+    for bond_index in correction_term.outgoing_bond_indices_by_source[site_index]
+        (_, target_site) = correction_term.source_bonds[bond_index]
+        state_j = state_vector[target_site]
+        eta4_factor = compute_eta4_single_hole_factor(state_i, state_j, spin)
+        if eta4_factor == 0.0
+            continue
+        end
+        target_row = 2 * (target_site - 1) + row_offset
+        bond_amplitude = T(correction_term.source_amplitudes[bond_index])
+        @views output_row .+= eta4_value * bond_amplitude * T(eta4_factor) .* input_derivative_orbitals[target_row, :]
+    end
+
+    return nothing
+end
+
+"""
+用途: 只计算指定 occupied row 的 backflow chain-rule 轨道导数。
+
+数学公式:
+- 若 `U_b = B_x[U_0]`, 则对裸导数矩阵 `dU_0 / dp`,
+  本函数返回单行 `(B_x[dU_0 / dp])[row_index, :]`。
+
+参数:
+- `output_row::AbstractVector{T}`: 输出 buffer, 长度必须等于轨道数。
+- `input_derivative_orbitals::AbstractMatrix{T}`: 输入裸轨道导数 `dU_0 / dp`。
+- `state_vector::Vector{Int8}`: 当前 Monte Carlo 构型。
+- `backflow_term::CompositeBackflowTerm`: 组合式 Eq.(5) backflow 对象。
+- `row_index::Int`: 需要计算的 spin-resolved 全局行号。
+
+返回:
+- `nothing`。
+"""
+function fill_backflow_chain_rule_row!(
+    output_row::AbstractVector{T},
+    input_derivative_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    backflow_term::CompositeBackflowTerm,
+    row_index::Int,
+) where {T}
+    site_index, row_offset = initialize_backflow_chain_rule_row!(
+        output_row,
+        input_derivative_orbitals,
+        state_vector,
+        row_index,
+    )
+    for correction_term in backflow_term.terms
+        add_backflow_correction_chain_rule_row!(
+            output_row,
+            input_derivative_orbitals,
+            state_vector,
+            correction_term,
+            site_index,
+            row_offset,
+            row_index,
+        )
+    end
+
+    return nothing
+end
+
+"""
+用途: 在无 backflow 情况下只复制指定 row 的裸轨道导数。
+
+参数:
+- `output_row::AbstractVector{T}`: 输出 buffer, 长度必须等于轨道数。
+- `input_derivative_orbitals::AbstractMatrix{T}`: 输入裸轨道导数 `dU_0 / dp`。
+- `state_vector::Vector{Int8}`: 当前构型, 此处仅用于接口统一。
+- `backflow_term::NoBackflowTerm`: 空 backflow 对象。
+- `row_index::Int`: 需要复制的 spin-resolved 全局行号。
+
+返回:
+- `nothing`。
+"""
+function fill_backflow_chain_rule_row!(
+    output_row::AbstractVector{T},
+    input_derivative_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    ::NoBackflowTerm,
+    row_index::Int,
+) where {T}
+    initialize_backflow_chain_rule_row!(
+        output_row,
+        input_derivative_orbitals,
+        state_vector,
+        row_index,
+    )
+    return nothing
+end
+
+"""
 用途: 将 Eq.(5) 的 `epsilon` correction term 对 `epsilon_bf` 的导数累加到导数轨道矩阵。
 
 数学公式:
