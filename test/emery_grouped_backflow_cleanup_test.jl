@@ -652,3 +652,60 @@ end
     @test site_block_buffer_eta[1, :] == full_orbitals_after_eta[1, :]
     @test site_block_buffer_eta[2, :] == full_orbitals_after_eta[2, :]
 end
+
+@testset "Backflow source weights use eta-driven epsilon activation" begin
+    source_row_indices = zeros(Int, 4)
+    source_row_weights = zeros(Float64, 4)
+
+    active_backflow = build_minimal_dd_eta4_backflow(
+        bf_epsilon_d=1.5,
+        bf_eta4_dd=0.5,
+        dd_amplitude=1.0,
+    )
+    active_state = Int8[1, 0]
+    active_count = mfVMC.Backflow.fill_backflow_row_source_weights_from_state_getter!(
+        source_row_indices,
+        source_row_weights,
+        active_state,
+        active_backflow,
+        1,
+        site_index -> active_state[site_index],
+    )
+    @test active_count == 2
+    @test source_row_indices[1:active_count] == [1, 3]
+    @test source_row_weights[1:active_count] ≈ [1.5, 0.5]
+
+    fill!(source_row_indices, 0)
+    fill!(source_row_weights, 0.0)
+    zero_eta_backflow = build_minimal_dd_eta4_backflow(
+        bf_epsilon_d=1.5,
+        bf_eta4_dd=0.0,
+        dd_amplitude=1.0,
+    )
+    zero_eta_count = mfVMC.Backflow.fill_backflow_row_source_weights_from_state_getter!(
+        source_row_indices,
+        source_row_weights,
+        active_state,
+        zero_eta_backflow,
+        1,
+        site_index -> active_state[site_index],
+    )
+    @test zero_eta_count == 1
+    @test source_row_indices[1:zero_eta_count] == [1]
+    @test source_row_weights[1:zero_eta_count] ≈ [1.0]
+
+    fill!(source_row_indices, 0)
+    fill!(source_row_weights, 0.0)
+    no_up_state = Int8[2, 0]
+    no_up_count = mfVMC.Backflow.fill_backflow_row_source_weights_from_state_getter!(
+        source_row_indices,
+        source_row_weights,
+        no_up_state,
+        active_backflow,
+        1,
+        site_index -> no_up_state[site_index],
+    )
+    @test no_up_count == 1
+    @test source_row_indices[1:no_up_count] == [1]
+    @test source_row_weights[1:no_up_count] ≈ [1.0]
+end

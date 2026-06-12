@@ -1913,28 +1913,28 @@ function add_backflow_chain_rule_source_weight!(
 end
 
 """
-用途: 使用 grouped source 逻辑将单个 source group 的 chain rule source-weight 贡献累加到列表, 同时跟踪产生了非零 eta 的 group 名称。
+用途: 使用 grouped source 逻辑将单个 source group 的 chain rule source-weight 贡献累加到列表, 同时跟踪产生了非零 eta 的 group 名称.
 
 参数:
-- `source_row_indices::AbstractVector{Int}`: source row 编号 buffer。
-- `source_row_weights::AbstractVector{T}`: source row 权重 buffer。
-- `source_count::Int`: 当前 source row 数量。
-- `state_i::Int8`: source site 的状态编码。
-- `state_vector::Vector{Int8}`: 当前构型 (用于获取 target 状态)。
-- `source_group::DirectedBackflowSourceGroup`: directed source group。
-- `site_index::Int`: 当前 site 编号。
-- `row_offset::Int`: 当前 site 内部自旋行偏移。
-- `active_group_names::Set{Symbol}`: 输出, 产生了非零 eta 的 group 名称集合。
+- `source_row_indices::AbstractVector{Int}`: source row 编号 buffer.
+- `source_row_weights::AbstractVector{T}`: source row 权重 buffer.
+- `source_count::Int`: 当前 source row 数量.
+- `state_i::Int8`: source site 的状态编码.
+- `get_state_j::Function`: `(site_index) -> Int8`, 用于读取 target site 状态.
+- `source_group::DirectedBackflowSourceGroup`: directed source group.
+- `site_index::Int`: 当前 site 编号.
+- `row_offset::Int`: 当前 site 内部自旋行偏移.
+- `active_group_names::Set{Symbol}`: 输出, 产生了非零 eta 的 group 名称集合.
 
 返回:
-- `Int`: 更新后的 source row 数量。
+- `Int`: 更新后的 source row 数量.
 """
 function add_source_group_chain_rule_source_weights_and_track!(
     source_row_indices::AbstractVector{Int},
     source_row_weights::AbstractVector{T},
     source_count::Int,
     state_i::Int8,
-    state_vector::Vector{Int8},
+    get_state_j::Function,
     source_group::DirectedBackflowSourceGroup,
     site_index::Int,
     row_offset::Int,
@@ -1953,7 +1953,7 @@ function add_source_group_chain_rule_source_weights_and_track!(
 
     for bond_index in source_group.outgoing_bond_indices_by_source[site_index]
         (_, target_site) = source_group.source_bonds[bond_index]
-        state_j = state_vector[target_site]
+        state_j = get_state_j(target_site)
         target_row = 2 * (target_site - 1) + row_offset
         bond_amplitude = T(source_group.source_amplitudes[bond_index])
         eta_contribution = compute_backflow_eta_contribution(
@@ -2012,13 +2012,51 @@ function fill_backflow_chain_rule_source_weights!(
     backflow_term::CompositeBackflowTerm,
     row_index::Int,
 )::Int where {T}
+    return fill_backflow_row_source_weights_from_state_getter!(
+        source_row_indices,
+        source_row_weights,
+        state_vector,
+        backflow_term,
+        row_index,
+        site_index -> state_vector[site_index],
+    )
+end
+
+"""
+用途: 根据给定 state getter 将一个 backflow output row 展开为 source row 权重列表。
+
+参数:
+- `source_row_indices::AbstractVector{Int}`: 输出 source row 编号 buffer, 长度至少为 `2 * length(state_vector)`。
+- `source_row_weights::AbstractVector{T}`: 输出 source row 权重 buffer, 与 `source_row_indices` 对齐。
+- `state_vector::Vector{Int8}`: 当前 Monte Carlo 构型, 用于确定总 site 数和 row 边界。
+- `backflow_term::CompositeBackflowTerm`: Emery grouped backflow 对象。
+- `row_index::Int`: 需要展开的 spin-resolved 全局行号。
+- `get_state::Function`: `(site_index) -> Int8`, 用于读取当前或 proposal 后的 site 状态。
+
+返回:
+- `Int`: 有效 source row 数量。
+
+公式:
+- `U_b(row,:) = sum_s w_s * U_0(s,:)`。
+- 初始恒等项为 `w_row = 1`。
+- eta 项对 target row 增加 `t_ij * eta_k * f_k(x)`。
+- epsilon 项只在对应 group 存在非零 eta contribution 时对本 row 增加 `epsilon_bf - 1`。
+"""
+function fill_backflow_row_source_weights_from_state_getter!(
+    source_row_indices::AbstractVector{Int},
+    source_row_weights::AbstractVector{T},
+    state_vector::Vector{Int8},
+    backflow_term::CompositeBackflowTerm,
+    row_index::Int,
+    get_state::Function,
+)::Int where {T}
     site_index, row_offset, source_count = initialize_backflow_chain_rule_source_weights!(
         source_row_indices,
         source_row_weights,
         state_vector,
         row_index,
     )
-    state_i = state_vector[site_index]
+    state_i = get_state(site_index)
     spin = backflow_spin_from_row_offset(row_offset)
 
     if backflow_n_sigma(state_i, spin) == 0.0
@@ -2032,7 +2070,7 @@ function fill_backflow_chain_rule_source_weights!(
             source_row_weights,
             source_count,
             state_i,
-            state_vector,
+            get_state,
             source_group,
             site_index,
             row_offset,
@@ -2040,7 +2078,6 @@ function fill_backflow_chain_rule_source_weights!(
         )
     end
 
-    # Add epsilon source weight if any owned group was active.
     for epsilon_term in backflow_term.epsilon_terms
         epsilon_shift = T(epsilon_term.epsilon_bf - 1.0)
         if epsilon_shift == zero(T)
