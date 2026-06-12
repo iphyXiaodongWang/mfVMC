@@ -288,7 +288,6 @@ end
 """
 function set_backflow!(vwf::vwf_det, backflow::Backflow.AbstractBackflowTerm)
     vwf.backflow = backflow
-    refresh_backflow_orbitals!(vwf)
     ensure_ws!(vwf)
     return nothing
 end
@@ -353,7 +352,6 @@ function update_vwf_backflow_params!(
     param_values::Vector{<:Real},
 )
     Backflow.update_backflow_params!(vwf.backflow, param_names, param_values)
-    refresh_backflow_orbitals!(vwf)
     ensure_ws!(vwf)
     return nothing
 end
@@ -367,14 +365,13 @@ end
 - `param_values::Vector{<:Real}`: 按内部顺序排列的参数值列表。
 
 返回:
-- `nothing`。
+- `nothing`.
 """
 function update_vwf_backflow_params!(
     vwf::vwf_det,
     param_values::Vector{<:Real},
 )
     Backflow.update_backflow_params!(vwf.backflow, param_values)
-    refresh_backflow_orbitals!(vwf)
     ensure_ws!(vwf)
     return nothing
 end
@@ -458,28 +455,35 @@ end
 
 
 """
-用途: 根据当前采样构型刷新 determinant 使用的有效轨道矩阵。
+用途: 刷新非 backflow determinant 使用的裸轨道矩阵缓存。
 
 参数:
 - `vwf::vwf_det{T}`: determinant 波函数对象。
 
 返回:
-- `nothing`。
+- `nothing`.
+"""
+function refresh_orbitals_without_backflow!(vwf::vwf_det{T}) where {T}
+    copyto!(vwf.gs_U, vwf.base_gs_U)
+    permutedims!(vwf.gs_U_t, vwf.gs_U, (2, 1))
+    return nothing
+end
+
+
+"""
+用途: 根据当前采样构型刷新 determinant 使用的有效轨道矩阵（已废弃全局缓存版本）。
+
+参数:
+- `vwf::vwf_det{T}`: determinant 波函数对象。
+
+返回:
+- `nothing`.
 """
 function refresh_backflow_orbitals!(vwf::vwf_det{T}) where {T}
     if Backflow.uses_backflow(vwf.backflow)
-        refreshed_orbitals = Backflow.build_backflow_orbitals(vwf.base_gs_U, vwf.sampler.state, vwf.backflow)
-        if size(vwf.backflow_u) != size(refreshed_orbitals)
-            vwf.backflow_u = similar(refreshed_orbitals)
-        end
-        copyto!(vwf.backflow_u, refreshed_orbitals)
-        copyto!(vwf.gs_U, vwf.backflow_u)
-    else
-        copyto!(vwf.backflow_u, vwf.base_gs_U)
-        copyto!(vwf.gs_U, vwf.base_gs_U)
+        error("Full U_b(x) cache is removed. Use selected-row backflow materialization instead.")
     end
-
-    permutedims!(vwf.gs_U_t, vwf.gs_U, (2, 1))
+    refresh_orbitals_without_backflow!(vwf)
     return nothing
 end
 
@@ -626,15 +630,19 @@ end
 function rebuild_slater_state!(vwf::vwf_det{T,S}) where {T,S}
     ss = vwf.sampler
     total_elec_count = total_elec(ss)
-    refresh_backflow_orbitals!(vwf)
 
     if size(vwf.awf_mat_t, 1) != total_elec_count
         vwf.awf_mat_t = zeros(T, total_elec_count, total_elec_count)
     end
 
-    for i in 1:total_elec_count
-        row_in_U = ss.electron_locs[i]
-        copyto!(@view(vwf.awf_mat_t[:, i]), @view(vwf.gs_U_t[:, row_in_U]))
+    if Backflow.uses_backflow(vwf.backflow)
+        fill_backflow_slater_matrix_from_occupied_rows!(vwf)
+    else
+        refresh_orbitals_without_backflow!(vwf)
+        for i in 1:total_elec_count
+            row_in_U = ss.electron_locs[i]
+            copyto!(@view(vwf.awf_mat_t[:, i]), @view(vwf.gs_U_t[:, row_in_U]))
+        end
     end
 
     A_physical = transpose(vwf.awf_mat_t)
@@ -1495,17 +1503,19 @@ function find_stable_config!(vwf::vwf_det{T}, kernel::AbstractMCMCKernel, rng::A
 
     for attempt in 1:max_attempts
         init_config_rand!(ss, kernel)
-        refresh_backflow_orbitals!(vwf)
 
         # === 2. 根据新构型重建矩阵 ===
-        # Sampler 已经更新了 electron_locs，直接利用它填充矩阵
         total_elec_count = total_elec(ss)
-        for i in 1:total_elec_count
-            # electron_locs[i] 存储的是基组索引 (2*site+spin)，对应 gs_U_t 的列
-            basis_idx = ss.electron_locs[i]
-
-            # awf_mat_t 是转置存储的 (列是电子，行是轨道)
-            copyto!(@view(vwf.awf_mat_t[:, i]), @view(vwf.gs_U_t[:, basis_idx]))
+        if Backflow.uses_backflow(vwf.backflow)
+            fill_backflow_slater_matrix_from_occupied_rows!(vwf)
+        else
+            refresh_orbitals_without_backflow!(vwf)
+            for i in 1:total_elec_count
+                # electron_locs[i] 存储的是基组索引 (2*site+spin), 对应 gs_U_t 的列
+                basis_idx = ss.electron_locs[i]
+                # awf_mat_t 是转置存储的 (列是电子, 行是轨道)
+                copyto!(@view(vwf.awf_mat_t[:, i]), @view(vwf.gs_U_t[:, basis_idx]))
+            end
         end
 
         # === 3. 检查数值稳定性 ===
