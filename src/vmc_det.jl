@@ -681,6 +681,9 @@ end
 end
 
 function ratio_rank1(vwf::vwf_det{T}, k::Int, new_row_idx_U::Int) where T
+    if Backflow.uses_backflow(vwf.backflow)
+        error("Backflow mode must use selected-row local rank-k update, not gs_U_t rank1/rank2 update.")
+    end
     val = zero(T)
     N = size(vwf.awf_inv, 1)
     @inbounds @simd for j in 1:N
@@ -690,6 +693,9 @@ function ratio_rank1(vwf::vwf_det{T}, k::Int, new_row_idx_U::Int) where T
 end
 
 function update_rank1!(vwf::vwf_det{T}, k::Int, new_row_idx_U::Int, ratio::T) where T
+    if Backflow.uses_backflow(vwf.backflow)
+        error("Backflow mode must use selected-row local rank-k update, not gs_U_t rank1/rank2 update.")
+    end
     ws = ensure_ws!(vwf)
     A_t = vwf.awf_mat_t
     Ainv = vwf.awf_inv
@@ -711,6 +717,9 @@ function update_rank1!(vwf::vwf_det{T}, k::Int, new_row_idx_U::Int, ratio::T) wh
 end
 
 function ratio_rank2(vwf::vwf_det{T}, k1::Int, k2::Int, new_row1_U::Int, new_row2_U::Int) where T
+    if Backflow.uses_backflow(vwf.backflow)
+        error("Backflow mode must use selected-row local rank-k update, not gs_U_t rank1/rank2 update.")
+    end
     Ainv = vwf.awf_inv
     U_t = vwf.gs_U_t
     N = size(Ainv, 1)
@@ -735,6 +744,9 @@ function ratio_rank2(vwf::vwf_det{T}, k1::Int, k2::Int, new_row1_U::Int, new_row
 end
 
 function update_rank2!(vwf::vwf_det{T}, k1::Int, k2::Int, new_row1_U::Int, new_row2_U::Int, ratio::T) where T
+    if Backflow.uses_backflow(vwf.backflow)
+        error("Backflow mode must use selected-row local rank-k update, not gs_U_t rank1/rank2 update.")
+    end
     ws = ensure_ws!(vwf)
     A_t = vwf.awf_mat_t
     Ainv = vwf.awf_inv

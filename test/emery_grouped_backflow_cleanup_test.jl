@@ -962,3 +962,10 @@ end
     vwf = build_grouped_emery_backflow_vwf_fixture()
     @test !hasproperty(vwf, :backflow_u)
 end
+
+@testset "Backflow rejects gs_U_t rank1 path" begin
+    vwf = build_grouped_emery_backflow_vwf_fixture()
+    init_gswf!(vwf)
+    @test_throws ErrorException mfVMC.VMC.ratio_rank1(vwf, 1, vwf.sampler.electron_locs[1])
+end
+
