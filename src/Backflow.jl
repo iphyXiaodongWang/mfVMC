@@ -1767,41 +1767,24 @@ function fill_backflow_chain_rule_row!(
     backflow_term::CompositeBackflowTerm,
     row_index::Int,
 ) where {T}
-    site_index, row_offset = initialize_backflow_chain_rule_row!(
-        output_row,
-        input_derivative_orbitals,
+    row_count = 2 * length(state_vector)
+    source_row_indices = Vector{Int}(undef, row_count)
+    source_row_weights = Vector{T}(undef, row_count)
+    source_count = fill_backflow_row_source_weights_from_state_getter!(
+        source_row_indices,
+        source_row_weights,
         state_vector,
+        backflow_term,
         row_index,
+        site_index -> state_vector[site_index],
     )
-    state_i = state_vector[site_index]
-    spin = backflow_spin_from_row_offset(row_offset)
-
-    if backflow_n_sigma(state_i, spin) == 0.0
-        return nothing
-    end
-
-    active_group_names = Set{Symbol}()
-    for source_group in backflow_term.source_groups
-        add_source_group_eta_contributions_and_track_activation!(
-            output_row,
-            input_derivative_orbitals,
-            state_i,
-            site_j -> state_vector[site_j],
-            source_group,
-            site_index,
-            row_offset,
-            active_group_names,
-        )
-    end
-
-    add_epsilon_contributions_from_active_groups!(
+    fill_backflow_row_from_source_weights!(
         output_row,
         input_derivative_orbitals,
-        backflow_term.epsilon_terms,
-        row_index,
-        active_group_names,
+        source_row_indices,
+        source_row_weights,
+        source_count,
     )
-
     return nothing
 end
 
@@ -1871,6 +1854,38 @@ function initialize_backflow_chain_rule_source_weights!(
     source_row_indices[1] = row_index
     source_row_weights[1] = one(T)
     return site_index, row_offset, 1
+end
+
+"""
+用途: 根据 source row 权重列表 materialize 一个 backflow row。
+
+参数:
+- `output_row::AbstractVector{T}`: 输出 buffer, 长度等于 orbital 列数。
+- `input_orbitals::AbstractMatrix{T}`: 被线性组合的输入轨道矩阵, 可以是 `U_0` 或 `dU_0/dp`。
+- `source_row_indices::AbstractVector{Int}`: source row 编号 buffer。
+- `source_row_weights::AbstractVector{T}`: source row 权重 buffer。
+- `source_count::Int`: 有效 source row 数量。
+
+返回:
+- `nothing`。
+
+公式:
+- `output_row[:] = sum_{k=1}^{source_count} source_row_weights[k] * input_orbitals[source_row_indices[k], :]`。
+"""
+function fill_backflow_row_from_source_weights!(
+    output_row::AbstractVector{T},
+    input_orbitals::AbstractMatrix{T},
+    source_row_indices::AbstractVector{Int},
+    source_row_weights::AbstractVector{T},
+    source_count::Int,
+) where {T}
+    fill!(output_row, zero(T))
+    for source_offset in 1:source_count
+        source_row_index = source_row_indices[source_offset]
+        source_weight = source_row_weights[source_offset]
+        @views output_row .+= source_weight .* input_orbitals[source_row_index, :]
+    end
+    return nothing
 end
 
 """

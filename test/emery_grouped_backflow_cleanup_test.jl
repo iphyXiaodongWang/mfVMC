@@ -709,3 +709,50 @@ end
     @test source_row_indices[1:no_up_count] == [1]
     @test source_row_weights[1:no_up_count] ≈ [1.0]
 end
+
+@testset "Backflow chain-rule row materializes from source weights" begin
+    input_derivative_orbitals = [
+        2.0 0.2
+        3.0 0.3
+        5.0 0.5
+        7.0 0.7
+    ]
+    state_up_hole = Int8[1, 0]
+    backflow = build_minimal_dd_eta4_backflow(
+        bf_epsilon_d=1.5,
+        bf_eta4_dd=0.5,
+        dd_amplitude=1.0,
+    )
+
+    source_row_indices = zeros(Int, 4)
+    source_row_weights = zeros(Float64, 4)
+    source_count = mfVMC.Backflow.fill_backflow_row_source_weights_from_state_getter!(
+        source_row_indices,
+        source_row_weights,
+        state_up_hole,
+        backflow,
+        1,
+        site_index -> state_up_hole[site_index],
+    )
+
+    expected_row = zeros(Float64, size(input_derivative_orbitals, 2))
+    mfVMC.Backflow.fill_backflow_row_from_source_weights!(
+        expected_row,
+        input_derivative_orbitals,
+        source_row_indices,
+        source_row_weights,
+        source_count,
+    )
+
+    actual_row = zeros(Float64, size(input_derivative_orbitals, 2))
+    mfVMC.Backflow.fill_backflow_chain_rule_row!(
+        actual_row,
+        input_derivative_orbitals,
+        state_up_hole,
+        backflow,
+        1,
+    )
+
+    @test actual_row ≈ expected_row
+    @test actual_row ≈ 1.5 .* input_derivative_orbitals[1, :] .+ 0.5 .* input_derivative_orbitals[3, :]
+end
