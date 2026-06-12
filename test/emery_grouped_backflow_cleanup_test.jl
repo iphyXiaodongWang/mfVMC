@@ -278,6 +278,79 @@ end
     @test backflow_eps_p[1, 1] ≈ 1.5  # epsilon_p 不应激活 (dd 不在 [:pd,:pp] 中)
 end
 
+@testset "Eta-driven epsilon derivative activation" begin
+    n_sites = 2
+    n_orbitals = 2
+    dd_bonds = Tuple{Int,Int}[(1, 2)]
+    dd_amplitudes = [1.0]
+    empty_bonds = Tuple{Int,Int}[]
+    empty_amplitudes = Float64[]
+    base_orbitals = ones(Float64, 2 * n_sites, n_orbitals)
+    state_up_hole = Int8[1, 0]
+
+    backflow_zero_eta = build_column_directed_emery_backflow(
+        dd_bonds, dd_amplitudes,
+        empty_bonds, empty_amplitudes,
+        empty_bonds, empty_amplitudes,
+        empty_bonds, empty_amplitudes,
+        2.0, 1.0,
+        0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0,
+    )
+    zero_eta_derivatives = mfVMC.Backflow.build_backflow_derivative_orbitals(
+        base_orbitals,
+        state_up_hole,
+        backflow_zero_eta,
+    )
+    epsilon_d_index = findfirst(pair -> first(pair) == :bf_epsilon_d, zero_eta_derivatives)
+    eta4_dd_index = findfirst(pair -> first(pair) == :bf_eta4_dd, zero_eta_derivatives)
+    @test epsilon_d_index !== nothing
+    @test eta4_dd_index !== nothing
+    @test zero_eta_derivatives[epsilon_d_index].second == zeros(Float64, size(base_orbitals))
+    @test zero_eta_derivatives[eta4_dd_index].second[1, :] == base_orbitals[3, :]
+
+    backflow_active_eta = build_column_directed_emery_backflow(
+        dd_bonds, dd_amplitudes,
+        empty_bonds, empty_amplitudes,
+        empty_bonds, empty_amplitudes,
+        empty_bonds, empty_amplitudes,
+        2.0, 1.0,
+        0.0, 0.0, 0.0, 0.5,
+        0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0,
+    )
+    active_eta_derivatives = mfVMC.Backflow.build_backflow_derivative_orbitals(
+        base_orbitals,
+        state_up_hole,
+        backflow_active_eta,
+    )
+    epsilon_d_active_index = findfirst(pair -> first(pair) == :bf_epsilon_d, active_eta_derivatives)
+    @test active_eta_derivatives[epsilon_d_active_index].second[1, :] == base_orbitals[1, :]
+    @test active_eta_derivatives[epsilon_d_active_index].second[2:end, :] == zeros(Float64, 3, n_orbitals)
+
+    zero_amp_backflow = build_column_directed_emery_backflow(
+        dd_bonds, [0.0],
+        empty_bonds, empty_amplitudes,
+        empty_bonds, empty_amplitudes,
+        empty_bonds, empty_amplitudes,
+        2.0, 1.0,
+        0.0, 0.0, 0.0, 0.5,
+        0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0,
+    )
+    zero_amp_derivatives = mfVMC.Backflow.build_backflow_derivative_orbitals(
+        base_orbitals,
+        state_up_hole,
+        zero_amp_backflow,
+    )
+    epsilon_d_zero_amp_index = findfirst(pair -> first(pair) == :bf_epsilon_d, zero_amp_derivatives)
+    @test zero_amp_derivatives[epsilon_d_zero_amp_index].second == zeros(Float64, size(base_orbitals))
+end
+
 @testset "Proposal row-block consistency" begin
     n_sites = 2
     n_orbitals = 2

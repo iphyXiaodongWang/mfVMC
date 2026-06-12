@@ -2171,6 +2171,10 @@ function build_backflow_derivative_orbitals(
         eta2_deriv = zeros(T, size(base_orbitals))
         eta3_deriv = zeros(T, size(base_orbitals))
         eta4_deriv = zeros(T, size(base_orbitals))
+        eta1_value = T(source_group.eta1_term.eta1_bf)
+        eta2_value = T(source_group.eta2_term.eta2_bf)
+        eta3_value = T(source_group.eta3_term.eta3_bf)
+        eta4_value = T(source_group.eta4_term.eta4_bf)
 
         for (bond_index, (site_i, site_j)) in enumerate(source_group.source_bonds)
             state_i = state_vector[site_i]
@@ -2182,33 +2186,37 @@ function build_backflow_derivative_orbitals(
                 row_i = 2 * (site_i - 1) + row_offset
                 row_j = 2 * (site_j - 1) + row_offset
 
-                has_eta = false
-
-                if state_i == DB && state_j == HOLE
+                eta1_factor = (state_i == DB && state_j == HOLE) ? one(T) : zero(T)
+                if eta1_factor != zero(T)
                     @views eta1_deriv[row_i, :] .+= bond_amplitude .* base_orbitals[row_j, :]
-                    has_eta = true
                 end
 
                 eta2_factor = compute_eta2_virtual_hopping_factor(state_i, state_j, spin)
                 if eta2_factor != 0.0
                     @views eta2_deriv[row_i, :] .+= bond_amplitude * T(eta2_factor) .* base_orbitals[row_j, :]
-                    has_eta = true
                 end
 
                 eta3_factor = compute_eta3_doublon_single_factor(state_i, state_j, spin)
                 if eta3_factor != 0.0
                     @views eta3_deriv[row_i, :] .+= bond_amplitude * T(eta3_factor) .* base_orbitals[row_j, :]
-                    has_eta = true
                 end
 
                 eta4_factor = compute_eta4_single_hole_factor(state_i, state_j, spin)
                 if eta4_factor != 0.0
                     @views eta4_deriv[row_i, :] .+= bond_amplitude * T(eta4_factor) .* base_orbitals[row_j, :]
-                    has_eta = true
                 end
 
+                eta_coefficient =
+                    bond_amplitude *
+                    (
+                        eta1_value * eta1_factor +
+                        eta2_value * T(eta2_factor) +
+                        eta3_value * T(eta3_factor) +
+                        eta4_value * T(eta4_factor)
+                    )
+
                 # Mark epsilon terms owned by this group as active for this row.
-                if has_eta && haskey(group_to_epsilon_indices, source_group.group_name)
+                if eta_coefficient != zero(T) && haskey(group_to_epsilon_indices, source_group.group_name)
                     for epsilon_index in group_to_epsilon_indices[source_group.group_name]
                         epsilon_active_rows[epsilon_index][row_i] = true
                     end
