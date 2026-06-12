@@ -4,9 +4,34 @@ push!(LOAD_PATH, joinpath(@__DIR__, "..", "src"))
 include(joinpath(@__DIR__, "..", "Emery.jl"))
 using mfVMC.Sampler
 
+function has_method_signature_containing(function_object, type_name::String)::Bool
+    return any(method -> occursin(type_name, sprint(show, method.sig)), methods(function_object))
+end
+
 @testset "Emery grouped backflow cleanup" begin
     @test !isdefined(mfVMC.Backflow, Symbol("fill_backflow_site_row_after_proposal_by_terms!"))
     @test !isdefined(mfVMC.Backflow, Symbol("fill_backflow_site_block_after_proposal_by_terms!"))
+
+    eta_type_names = [
+        "BackflowEta1DoublonHoleTerm",
+        "BackflowEta2SpinExchangeTerm",
+        "BackflowEta3DoublonSingleTerm",
+        "BackflowEta4SingleHoleTerm",
+    ]
+    source_dependent_helper_names = [
+        Symbol("add_backflow_correction_site_block_after_proposal!"),
+        Symbol("add_backflow_correction_site_row_after_proposal!"),
+        Symbol("add_backflow_correction_orbitals!"),
+        Symbol("add_backflow_correction_chain_rule_row!"),
+        Symbol("add_backflow_correction_chain_rule_source_weights!"),
+        Symbol("add_backflow_correction_derivative_orbitals!"),
+    ]
+    for helper_name in source_dependent_helper_names
+        helper_function = getproperty(mfVMC.Backflow, helper_name)
+        for eta_type_name in eta_type_names
+            @test !has_method_signature_containing(helper_function, eta_type_name)
+        end
+    end
 
     dd_source_bonds,
     dd_source_amplitudes,
