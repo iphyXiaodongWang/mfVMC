@@ -1393,15 +1393,15 @@ end
 - `nothing`。若校验失败则抛出 error。
 """
 function verify_backflow_local_accept(vwf::vwf_det{T}) where {T}
-    orbitals_check = Backflow.build_backflow_orbitals(
-        vwf.base_gs_U,
-        vwf.sampler.state,
-        vwf.backflow,
-    )
-    slater_check = build_slater_matrix_from_orbitals(
-        orbitals_check,
-        vwf.sampler.electron_locs,
-    )
+    slater_t_check = similar(vwf.awf_mat_t)
+    saved_awf_mat_t = vwf.awf_mat_t
+    try
+        vwf.awf_mat_t = slater_t_check
+        fill_backflow_slater_matrix_from_occupied_rows!(vwf)
+    finally
+        vwf.awf_mat_t = saved_awf_mat_t
+    end
+    slater_check = transpose(slater_t_check)
     awf_inv_check = inv(slater_check)
     awf_val_check = det(slater_check)
 
@@ -1459,7 +1459,6 @@ function accept_backflow_local_update!(vwf::vwf_det{T}, proposal::MoveProposal, 
 
         update_rankk_from_cache!(vwf, ratio)
         @timed "backflow_commit_move!" commit_move!(vwf.sampler, proposal)
-        @timed "backflow_refresh_accepted_rows" refresh_backflow_affected_orbital_rows_after_accept!(vwf, proposal)
         reset_cached_rankk_update!(ws)
 
         if vwf.backflow_debug_verify
@@ -1488,8 +1487,15 @@ function calc_ratio_rebuild(vwf::vwf_det{T}, proposal::MoveProposal) where {T}
     new_sampler = copy_config(vwf.sampler)
     commit_move!(new_sampler, proposal)
 
-    new_orbitals = Backflow.build_backflow_orbitals(vwf.base_gs_U, new_sampler.state, vwf.backflow)
-    new_slater = build_slater_matrix_from_orbitals(new_orbitals, new_sampler.electron_locs)
+    slater_t_new = similar(vwf.awf_mat_t)
+    fill_backflow_slater_matrix_from_sampler_state!(
+        slater_t_new,
+        vwf.base_gs_U,
+        new_sampler,
+        vwf.backflow,
+        ensure_ws!(vwf),
+    )
+    new_slater = transpose(slater_t_new)
     return det(new_slater) / vwf.awf_val
 end
 
