@@ -1550,24 +1550,18 @@ function build_column_directed_emery_backflow(
     bf_eta4_pp::Float64,
 )
     d_source_bonds = vcat(dd_source_bonds, dp_source_bonds)
-    d_source_amplitudes = vcat(dd_source_amplitudes, dp_source_amplitudes)
     p_source_bonds = vcat(pd_source_bonds, pp_source_bonds)
-    p_source_amplitudes = vcat(pd_source_amplitudes, pp_source_amplitudes)
 
     epsilon_terms = mfVMC.BackflowEpsilonTerm[
         mfVMC.Backflow.BackflowEpsilonTerm(
             param_name=:bf_epsilon_d,
             epsilon_bf=bf_epsilon_d,
-            epsilon_mask_terms=Symbol[:eta1, :eta2, :eta3_doublon_single, :eta4],
             source_bonds=d_source_bonds,
-            source_amplitudes=d_source_amplitudes,
         ),
         mfVMC.Backflow.BackflowEpsilonTerm(
             param_name=:bf_epsilon_p,
             epsilon_bf=bf_epsilon_p,
-            epsilon_mask_terms=Symbol[:eta1, :eta2, :eta3_doublon_single, :eta4],
             source_bonds=p_source_bonds,
-            source_amplitudes=p_source_amplitudes,
         ),
     ]
 

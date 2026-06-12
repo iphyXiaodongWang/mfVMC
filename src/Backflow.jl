@@ -57,8 +57,6 @@ export build_backflow_derivative_orbitals
 abstract type AbstractBackflowTerm end
 abstract type AbstractBackflowCorrectionTerm end
 
-const BACKFLOW_EPSILON_MASK_TERMS = (:eta1, :eta2, :eta3_doublon_single, :eta4)
-
 
 """
 用途: 保存 Eq.(5) 单个 backflow correction term 的公共 source 数据。
@@ -93,31 +91,6 @@ function build_backflow_correction_source_cache(
         outgoing_bond_indices_by_source=graph_cache.outgoing_bond_indices_by_source,
         incoming_source_sites_by_target=graph_cache.incoming_source_sites_by_target,
     )
-end
-
-"""
-用途: 规范化 `epsilon` prefactor 使用的 virtual hopping mask 通道列表。
-
-参数:
-- `epsilon_mask_terms::AbstractVector{Symbol}`: 允许的元素为 `:eta1`, `:eta2`,
-  `:eta3_doublon_single`, `:eta4`。
-
-返回:
-- `Vector{Symbol}`: 去重后且保持输入顺序的 mask 通道列表。
-"""
-function normalize_backflow_epsilon_mask_terms(
-    epsilon_mask_terms::AbstractVector{Symbol},
-)::Vector{Symbol}
-    normalized_terms = Symbol[]
-    for mask_term in epsilon_mask_terms
-        if !(mask_term in BACKFLOW_EPSILON_MASK_TERMS)
-            error("Unknown epsilon mask term $(mask_term). Allowed terms are :eta1, :eta2, :eta3_doublon_single, and :eta4.")
-        end
-        if !(mask_term in normalized_terms)
-            push!(normalized_terms, mask_term)
-        end
-    end
-    return normalized_terms
 end
 
 
@@ -161,6 +134,105 @@ end
 
 
 """
+用途: 基于 `BackflowEpsilonTerm` 的 site-neighbor adjacency 生成一致性签名.
+
+参数:
+- `source_sites::Vector{Int}`: 使用该 epsilon term 的 source site 列表.
+- `target_neighbors_by_source_site::Vector{Vector{Int}}`: 按 source site 存储的 target neighbor 列表.
+- `source_sites_by_target_neighbor::Vector{Vector{Int}}`: 按 target neighbor 反查的 source site 列表.
+
+返回:
+- `UInt`: 邻接数据内容签名.
+"""
+function compute_backflow_epsilon_neighbor_data_signature(
+    source_sites::Vector{Int},
+    target_neighbors_by_source_site::Vector{Vector{Int}},
+    source_sites_by_target_neighbor::Vector{Vector{Int}},
+)::UInt
+    neighbor_data_signature = hash(length(source_sites))
+    for source_site in source_sites
+        neighbor_data_signature = hash(source_site, neighbor_data_signature)
+    end
+
+    neighbor_data_signature = hash(length(target_neighbors_by_source_site), neighbor_data_signature)
+    for neighbors in target_neighbors_by_source_site
+        neighbor_data_signature = hash(length(neighbors), neighbor_data_signature)
+        for neighbor in neighbors
+            neighbor_data_signature = hash(neighbor, neighbor_data_signature)
+        end
+    end
+
+    neighbor_data_signature = hash(length(source_sites_by_target_neighbor), neighbor_data_signature)
+    for source_sites_for_target in source_sites_by_target_neighbor
+        neighbor_data_signature = hash(length(source_sites_for_target), neighbor_data_signature)
+        for source_site in source_sites_for_target
+            neighbor_data_signature = hash(source_site, neighbor_data_signature)
+        end
+    end
+
+    return neighbor_data_signature
+end
+
+
+"""
+用途: 从有向 bond 列表构造 `BackflowEpsilonTerm` 使用的 site-neighbor adjacency cache.
+
+与 `build_backflow_source_graph_cache` 的区别:
+- 本函数构造的是 site-site adjacency (而非 bond-index adjacency).
+- 不涉及 `source_amplitudes`, 只关心拓扑连通性.
+
+参数:
+- `source_bonds::Vector{Tuple{Int, Int}}`: 有向键 `(i, j)` 列表.
+
+返回:
+- `NamedTuple`: 包含 `target_neighbors_by_source_site`, `source_sites_by_target_neighbor`,
+  `source_sites` 与 `neighbor_data_signature`.
+"""
+function build_backflow_epsilon_neighbor_cache(
+    source_bonds::Vector{Tuple{Int,Int}},
+)
+    max_site_index = 0
+    for (bond_index, (site_i, site_j)) in enumerate(source_bonds)
+        if site_i < 1 || site_j < 1
+            error("Invalid source_bonds[$bond_index] = ($(site_i), $(site_j)): site indices must be positive.")
+        end
+        max_site_index = max(max_site_index, site_i, site_j)
+    end
+
+    target_neighbors_by_source_site = [Int[] for _ in 1:max_site_index]
+    source_sites_by_target_neighbor = [Int[] for _ in 1:max_site_index]
+
+    for (source_site, target_site) in source_bonds
+        push!(target_neighbors_by_source_site[source_site], target_site)
+        push!(source_sites_by_target_neighbor[target_site], source_site)
+    end
+
+    source_sites = Int[]
+    for source_site in 1:max_site_index
+        neighbors = target_neighbors_by_source_site[source_site]
+        if !isempty(neighbors)
+            sort!(unique!(neighbors))
+            push!(source_sites, source_site)
+        end
+        sort!(unique!(source_sites_by_target_neighbor[source_site]))
+    end
+
+    neighbor_data_signature = compute_backflow_epsilon_neighbor_data_signature(
+        source_sites,
+        target_neighbors_by_source_site,
+        source_sites_by_target_neighbor,
+    )
+
+    return (
+        target_neighbors_by_source_site=target_neighbors_by_source_site,
+        source_sites_by_target_neighbor=source_sites_by_target_neighbor,
+        source_sites=source_sites,
+        neighbor_data_signature=neighbor_data_signature,
+    )
+end
+
+
+"""
 用途: 表示未启用 backflow 的空对象。
 
 参数:
@@ -174,27 +246,28 @@ end
 
 
 """
-用途: Eq.(5) 中的 `epsilon` backflow correction term。
+用途: Eq.(5) 中的 `epsilon` backflow correction term.
 
 数学公式:
-- `delta U_epsilon(i, sigma) = (epsilon_bf - 1) * xi_{i,sigma} * U_0(i, sigma)`。
+- `delta U_epsilon(i, sigma) = (epsilon_bf - 1) * xi_{i,sigma} * U_0(i, sigma)`.
+- `xi_{i,sigma} = 1` 当且仅当 `n_{i,sigma} = 1` 且存在 target neighbor `j` 满足 `h_{j,sigma} = 1`.
 
 字段:
-- `param_name::Symbol`: 参数名。
-- `epsilon_bf::Float64`: `epsilon` 参数值。
-- `epsilon_mask_terms::Vector{Symbol}`: 控制 `xi_{i,sigma}` 的 virtual hopping 通道。
-- `source_bonds::Vector{Tuple{Int, Int}}`: 有向键 `(i, j)` 列表。
-- `source_amplitudes::Vector{Float64}`: 与有向键对齐的 hopping 振幅。
+- `param_name::Symbol`: 参数名.
+- `epsilon_bf::Float64`: `epsilon` 参数值.
+- `target_neighbors_by_source_site::Vector{Vector{Int}}`: 按 source site 存储的 target neighbor 去重列表.
+- `source_sites_by_target_neighbor::Vector{Vector{Int}}`: 按 target site 存储的 source site 去重列表,
+  用于 proposal 局域更新时反查受影响的 source site.
+- `source_sites::Vector{Int}`: 有至少一个 target neighbor 的 source site 列表, 升序.
+- `neighbor_data_signature::UInt`: 邻接数据内容签名, 用于检测构造后被手动修改的情况.
 """
 mutable struct BackflowEpsilonTerm <: AbstractBackflowCorrectionTerm
     param_name::Symbol
     epsilon_bf::Float64
-    epsilon_mask_terms::Vector{Symbol}
-    source_bonds::Vector{Tuple{Int,Int}}
-    source_amplitudes::Vector{Float64}
-    source_data_signature::UInt
-    outgoing_bond_indices_by_source::Vector{Vector{Int}}
-    incoming_source_sites_by_target::Vector{Vector{Int}}
+    target_neighbors_by_source_site::Vector{Vector{Int}}
+    source_sites_by_target_neighbor::Vector{Vector{Int}}
+    source_sites::Vector{Int}
+    neighbor_data_signature::UInt
 end
 
 """
@@ -344,14 +417,14 @@ function build_directed_backflow_source_group(
 end
 
 """
-用途: 从 directed source groups 和 epsilon terms 合并 composite 级别的 incoming source graph。
+用途: 从 directed source groups 和 epsilon terms 合并 composite 级别的 incoming source graph.
 
 参数:
-- `epsilon_terms::Vector{BackflowEpsilonTerm}`: composite 中的 epsilon terms。
-- `source_groups::Vector{DirectedBackflowSourceGroup}`: directed source groups。
+- `epsilon_terms::Vector{BackflowEpsilonTerm}`: composite 中的 epsilon terms.
+- `source_groups::Vector{DirectedBackflowSourceGroup}`: directed source groups.
 
 返回:
-- `Vector{Vector{Int}}`: composite 级别合并后的 incoming source graph。
+- `Vector{Vector{Int}}`: composite 级别合并后的 incoming source graph.
 """
 function build_composite_incoming_from_groups(
     epsilon_terms::Vector{BackflowEpsilonTerm},
@@ -359,7 +432,7 @@ function build_composite_incoming_from_groups(
 )::Vector{Vector{Int}}
     max_target_site = 0
     for epsilon_term in epsilon_terms
-        max_target_site = max(max_target_site, length(epsilon_term.incoming_source_sites_by_target))
+        max_target_site = max(max_target_site, length(epsilon_term.source_sites_by_target_neighbor))
     end
     for source_group in source_groups
         max_target_site = max(max_target_site, length(source_group.incoming_source_sites_by_target))
@@ -368,9 +441,9 @@ function build_composite_incoming_from_groups(
     incoming_source_sites_by_target = [Int[] for _ in 1:max_target_site]
 
     for epsilon_term in epsilon_terms
-        for target_site in eachindex(epsilon_term.incoming_source_sites_by_target)
+        for target_site in eachindex(epsilon_term.source_sites_by_target_neighbor)
             target_sources = incoming_source_sites_by_target[target_site]
-            for source_site in epsilon_term.incoming_source_sites_by_target[target_site]
+            for source_site in epsilon_term.source_sites_by_target_neighbor[target_site]
                 if !(source_site in target_sources)
                     push!(target_sources, source_site)
                 end
@@ -468,36 +541,29 @@ end
 
 
 """
-用途: 构造 Eq.(5) 的 `epsilon` backflow correction term。
+用途: 构造 Eq.(5) 的 `epsilon` backflow correction term.
 
 参数:
-- `param_name::Symbol`: 参数名, 默认 `:bf_epsilon`。
-- `epsilon_bf::Real`: `epsilon` 参数值。
-- `epsilon_mask_terms::AbstractVector{Symbol}`: 打开 `epsilon` prefactor 的 virtual hopping 通道,
-  允许 `:eta1`, `:eta2`, `:eta3_doublon_single`, `:eta4`。
-- `source_bonds::Vector{Tuple{Int, Int}}`: 有向键 `(i, j)` 列表。
-- `source_amplitudes::Vector{<:Real}`: 每条有向键对应的 hopping 振幅。
+- `param_name::Symbol`: 参数名, 默认 `:bf_epsilon`.
+- `epsilon_bf::Real`: `epsilon` 参数值.
+- `source_bonds::Vector{Tuple{Int, Int}}`: 有向键 `(i, j)` 列表, 仅用于构造 site-neighbor adjacency.
 
 返回:
-- `BackflowEpsilonTerm`: 带 source 缓存的 correction term。
+- `BackflowEpsilonTerm`: 带 site-neighbor adjacency cache 的 correction term.
 """
 function BackflowEpsilonTerm(;
     param_name::Symbol=:bf_epsilon,
     epsilon_bf::Real=1.0,
-    epsilon_mask_terms::AbstractVector{Symbol}=Symbol[:eta1],
     source_bonds::Vector{Tuple{Int,Int}}=Tuple{Int,Int}[],
-    source_amplitudes::Vector{<:Real}=ones(Float64, length(source_bonds)),
 )
-    source_cache = build_backflow_correction_source_cache(source_bonds, source_amplitudes)
+    neighbor_cache = build_backflow_epsilon_neighbor_cache(source_bonds)
     return BackflowEpsilonTerm(
         param_name,
         Float64(epsilon_bf),
-        normalize_backflow_epsilon_mask_terms(epsilon_mask_terms),
-        source_cache.source_bonds,
-        source_cache.source_amplitudes,
-        source_cache.source_data_signature,
-        source_cache.outgoing_bond_indices_by_source,
-        source_cache.incoming_source_sites_by_target,
+        neighbor_cache.target_neighbors_by_source_site,
+        neighbor_cache.source_sites_by_target_neighbor,
+        neighbor_cache.source_sites,
+        neighbor_cache.neighbor_data_signature,
     )
 end
 
@@ -775,7 +841,7 @@ function add_backflow_correction_site_block_after_proposal!(
     site_index::Int,
 ) where {T}
     site_state_after = get_site_state_after_proposal(state_vector, proposal, site_index)
-    if site_index > length(correction_term.outgoing_bond_indices_by_source)
+    if site_index > length(correction_term.target_neighbors_by_source_site)
         return nothing
     end
 
@@ -783,14 +849,12 @@ function add_backflow_correction_site_block_after_proposal!(
     for row_offset in 1:2
         spin = backflow_spin_from_row_offset(row_offset)
         xi_value = false
-        for bond_index in correction_term.outgoing_bond_indices_by_source[site_index]
-            (_, target_site) = correction_term.source_bonds[bond_index]
+        for target_site in correction_term.target_neighbors_by_source_site[site_index]
             target_state_after = get_site_state_after_proposal(state_vector, proposal, target_site)
-            if is_backflow_epsilon_row_active(
+            if is_backflow_epsilon_site_row_active(
                 site_state_after,
                 target_state_after,
                 spin,
-                correction_term.epsilon_mask_terms,
             )
                 xi_value = true
                 break
@@ -900,7 +964,7 @@ function add_backflow_correction_site_row_after_proposal!(
     row_offset::Int,
     row_index::Int,
 ) where {T}
-    if site_index > length(correction_term.outgoing_bond_indices_by_source)
+    if site_index > length(correction_term.target_neighbors_by_source_site)
         return nothing
     end
 
@@ -911,14 +975,12 @@ function add_backflow_correction_site_row_after_proposal!(
 
     state_i = get_site_state_after_proposal(state_vector, proposal, site_index)
     spin = backflow_spin_from_row_offset(row_offset)
-    for bond_index in correction_term.outgoing_bond_indices_by_source[site_index]
-        (_, target_site) = correction_term.source_bonds[bond_index]
+    for target_site in correction_term.target_neighbors_by_source_site[site_index]
         state_j = get_site_state_after_proposal(state_vector, proposal, target_site)
-        if is_backflow_epsilon_row_active(
+        if is_backflow_epsilon_site_row_active(
             state_i,
             state_j,
             spin,
-            correction_term.epsilon_mask_terms,
         )
             @views site_row_buffer .+= epsilon_shift .* base_orbitals[row_index, :]
             return nothing
@@ -1098,7 +1160,7 @@ function fill_grouped_source_composite_site_block_after_proposal!(
     state_i = get_site_state_after_proposal(state_vector, proposal, site_index)
 
     for epsilon_term in backflow_term.epsilon_terms
-        if site_index > length(epsilon_term.outgoing_bond_indices_by_source)
+        if site_index > length(epsilon_term.target_neighbors_by_source_site)
             continue
         end
         epsilon_shift = T(epsilon_term.epsilon_bf - 1.0)
@@ -1107,24 +1169,21 @@ function fill_grouped_source_composite_site_block_after_proposal!(
         end
         epsilon_up_is_active = false
         epsilon_down_is_active = false
-        for bond_index in epsilon_term.outgoing_bond_indices_by_source[site_index]
-            (_, target_site) = epsilon_term.source_bonds[bond_index]
+        for target_site in epsilon_term.target_neighbors_by_source_site[site_index]
             state_j = get_site_state_after_proposal(state_vector, proposal, target_site)
             if !epsilon_up_is_active &&
-               is_backflow_epsilon_row_active(
+               is_backflow_epsilon_site_row_active(
                 state_i,
                 state_j,
                 UP,
-                epsilon_term.epsilon_mask_terms,
             )
                 epsilon_up_is_active = true
             end
             if !epsilon_down_is_active &&
-               is_backflow_epsilon_row_active(
+               is_backflow_epsilon_site_row_active(
                 state_i,
                 state_j,
                 DN,
-                epsilon_term.epsilon_mask_terms,
             )
                 epsilon_down_is_active = true
             end
@@ -1424,13 +1483,13 @@ function validate_orbital_dimensions(base_orbitals::AbstractMatrix, n_sites::Int
 end
 
 """
-用途: 校验 Eq.(5) correction term 的 source 数据在构造后未被原地修改。
+用途: 校验 Eq.(5) correction term 的 source 数据在构造后未被原地修改.
 
 参数:
-- `correction_term::AbstractBackflowCorrectionTerm`: 待校验的 correction term。
+- `correction_term::AbstractBackflowCorrectionTerm`: 待校验的 correction term.
 
 返回:
-- `nothing`。若检测到原地修改则抛出异常。
+- `nothing`. 若检测到原地修改则抛出异常.
 """
 function validate_backflow_correction_source_data!(
     correction_term::AbstractBackflowCorrectionTerm,
@@ -1442,6 +1501,31 @@ function validate_backflow_correction_source_data!(
 
     if current_signature != correction_term.source_data_signature
         error("Backflow correction term source_bonds/source_amplitudes were mutated after construction. Please rebuild the correction term instead of modifying it in place.")
+    end
+
+    return nothing
+end
+
+"""
+用途: 校验 BackflowEpsilonTerm 的邻接数据在构造后未被原地修改.
+
+参数:
+- `correction_term::BackflowEpsilonTerm`: 待校验的 epsilon correction term.
+
+返回:
+- `nothing`. 若检测到原地修改则抛出异常.
+"""
+function validate_backflow_correction_source_data!(
+    correction_term::BackflowEpsilonTerm,
+)
+    current_signature = compute_backflow_epsilon_neighbor_data_signature(
+        correction_term.source_sites,
+        correction_term.target_neighbors_by_source_site,
+        correction_term.source_sites_by_target_neighbor,
+    )
+
+    if current_signature != correction_term.neighbor_data_signature
+        error("BackflowEpsilonTerm site-neighbor adjacency was mutated after construction. Please rebuild the correction term instead of modifying it in place.")
     end
 
     return nothing
@@ -1588,87 +1672,69 @@ function compute_eta4_single_hole_factor(
 end
 
 """
-用途: 判断 `epsilon` prefactor 是否应在某个 `(i, sigma)` 行打开。
+用途: 判断 `epsilon` prefactor 是否应在某个 `(i, sigma)` 行打开 (site-based).
 
 数学公式:
-- 若 `epsilon_mask_terms` 包含 `:eta1`, 则检查 `D_i H_j`。
-- 若包含 `:eta2`, 则检查
-  `n_{i,sigma} h_{i,-sigma} n_{j,-sigma} h_{j,sigma}`。
-- 若包含 `:eta3_doublon_single`, 则检查 `D_i n_{j,-sigma} h_{j,sigma}`。
-- 若包含 `:eta4`, 则检查 `n_{i,sigma} h_{i,-sigma} H_j`。
+- `xi_{i,sigma} = 1` 当且仅当 `n_{i,sigma} = 1` 且 `h_{j,sigma} = 1`.
+- 等价于四个 eta channel 的并集:
+  eta1 (doublon -> hole), eta2 (single-sigma -> single-opposite-spin),
+  eta3 (doublon -> single-opposite-spin), eta4 (single-sigma -> hole).
 
 参数:
-- `state_i::Int8`: source site `i` 的物理状态编码。
-- `state_j::Int8`: target site `j` 的物理状态编码。
-- `spin::Int8`: 当前行对应的物理自旋 `sigma`。
-- `epsilon_mask_terms::Vector{Symbol}`: 参与 `epsilon` mask 的 virtual hopping 通道。
+- `state_i::Int8`: source site `i` 的物理状态编码.
+- `state_j::Int8`: target site `j` 的物理状态编码.
+- `spin::Int8`: 当前行对应的物理自旋 `sigma`.
 
 返回:
-- `Bool`: 任一指定通道在该有向键上激活时返回 `true`。
+- `Bool`: 若 source site `i` 有 `sigma` 电子且 target site `j` 没有同自旋 `sigma` 电子, 返回 `true`.
 """
-function is_backflow_epsilon_row_active(
+function is_backflow_epsilon_site_row_active(
     state_i::Int8,
     state_j::Int8,
     spin::Int8,
-    epsilon_mask_terms::Vector{Symbol},
 )::Bool
-    for mask_term in epsilon_mask_terms
-        if mask_term == :eta1
-            if state_i == DB && state_j == HOLE
-                return true
-            end
-        elseif mask_term == :eta2
-            if compute_eta2_virtual_hopping_factor(state_i, state_j, spin) != 0.0
-                return true
-            end
-        elseif mask_term == :eta3_doublon_single
-            if compute_eta3_doublon_single_factor(state_i, state_j, spin) != 0.0
-                return true
-            end
-        elseif mask_term == :eta4
-            if compute_eta4_single_hole_factor(state_i, state_j, spin) != 0.0
-                return true
-            end
-        else
-            error("Unknown epsilon mask term $(mask_term).")
-        end
-    end
-    return false
+    return backflow_n_sigma(state_i, spin) != 0.0 &&
+           backflow_h_sigma(state_j, spin) != 0.0
 end
 
+
 """
-用途: 为 `BackflowEpsilonTerm` 构造 spin-resolved `xi_{i,sigma}` 行掩码。
+用途: 为 `BackflowEpsilonTerm` 构造 spin-resolved `xi_{i,sigma}` 行掩码.
 
 数学公式:
-- `xi_{i,sigma} = 1`, 当且仅当存在有向键 `(i, j)` 使得
-  `epsilon_mask_terms` 指定的任意 virtual hopping 因子非零。
+- `xi_{i,sigma} = 1`, 当且仅当存在 target neighbor `j` 使得
+  `n_{i,sigma} = 1` 且 `h_{j,sigma} = 1`.
 
 参数:
-- `state_vector::Vector{Int8}`: 当前 Monte Carlo 构型。
-- `correction_term::BackflowEpsilonTerm`: `epsilon` correction term。
+- `state_vector::Vector{Int8}`: 当前 Monte Carlo 构型.
+- `correction_term::BackflowEpsilonTerm`: `epsilon` correction term.
 
 返回:
 - `Vector{Bool}`: 长度为 `2 * N_sites` 的行掩码, 第 `2i-1` 行为 up,
-  第 `2i` 行为 down。
+  第 `2i` 行为 down.
 """
 function compute_backflow_epsilon_row_mask(
     state_vector::Vector{Int8},
     correction_term::BackflowEpsilonTerm,
 )::Vector{Bool}
     epsilon_row_mask = falses(2 * length(state_vector))
-    for (site_i, site_j) in correction_term.source_bonds
-        state_i = state_vector[site_i]
-        state_j = state_vector[site_j]
-        for row_offset in 1:2
-            spin = backflow_spin_from_row_offset(row_offset)
-            if is_backflow_epsilon_row_active(
-                state_i,
-                state_j,
-                spin,
-                correction_term.epsilon_mask_terms,
-            )
-                row_i = 2 * (site_i - 1) + row_offset
-                epsilon_row_mask[row_i] = true
+    for source_site in correction_term.source_sites
+        state_i = state_vector[source_site]
+        for target_site in correction_term.target_neighbors_by_source_site[source_site]
+            state_j = state_vector[target_site]
+            for row_offset in 1:2
+                row_i = 2 * (source_site - 1) + row_offset
+                if epsilon_row_mask[row_i]
+                    continue
+                end
+                spin = backflow_spin_from_row_offset(row_offset)
+                if is_backflow_epsilon_site_row_active(
+                    state_i,
+                    state_j,
+                    spin,
+                )
+                    epsilon_row_mask[row_i] = true
+                end
             end
         end
     end
@@ -2064,7 +2130,7 @@ function add_backflow_correction_chain_rule_row!(
     row_offset::Int,
     row_index::Int,
 ) where {T}
-    if site_index > length(correction_term.outgoing_bond_indices_by_source)
+    if site_index > length(correction_term.target_neighbors_by_source_site)
         return nothing
     end
 
@@ -2075,14 +2141,12 @@ function add_backflow_correction_chain_rule_row!(
 
     state_i = state_vector[site_index]
     spin = backflow_spin_from_row_offset(row_offset)
-    for bond_index in correction_term.outgoing_bond_indices_by_source[site_index]
-        (_, target_site) = correction_term.source_bonds[bond_index]
+    for target_site in correction_term.target_neighbors_by_source_site[site_index]
         state_j = state_vector[target_site]
-        if is_backflow_epsilon_row_active(
+        if is_backflow_epsilon_site_row_active(
             state_i,
             state_j,
             spin,
-            correction_term.epsilon_mask_terms,
         )
             @views output_row .+= epsilon_shift .* input_derivative_orbitals[row_index, :]
             return nothing
@@ -2349,7 +2413,7 @@ function add_backflow_correction_chain_rule_source_weights!(
     row_offset::Int,
     row_index::Int,
 )::Int where {T}
-    if site_index > length(correction_term.outgoing_bond_indices_by_source)
+    if site_index > length(correction_term.target_neighbors_by_source_site)
         return source_count
     end
 
@@ -2360,14 +2424,12 @@ function add_backflow_correction_chain_rule_source_weights!(
 
     state_i = state_vector[site_index]
     spin = backflow_spin_from_row_offset(row_offset)
-    for bond_index in correction_term.outgoing_bond_indices_by_source[site_index]
-        (_, target_site) = correction_term.source_bonds[bond_index]
+    for target_site in correction_term.target_neighbors_by_source_site[site_index]
         state_j = state_vector[target_site]
-        if is_backflow_epsilon_row_active(
+        if is_backflow_epsilon_site_row_active(
             state_i,
             state_j,
             spin,
-            correction_term.epsilon_mask_terms,
         )
             return add_backflow_chain_rule_source_weight!(
                 source_row_indices,
