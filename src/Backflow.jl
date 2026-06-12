@@ -764,185 +764,6 @@ function initialize_site_row_base_after_proposal!(
 end
 
 """
-用途: 计算 source site `site_index` 在给定 row_offset 和 states 时, 对各 source group
-的 eta contribution 系数并累加到 output_row, 同时收集产生非零 eta 的 group 名称。
-
-数学公式:
-- `eta_coefficient = t_ij * (
-      eta1_bf * eta1_factor + eta2_bf * eta2_factor
-      + eta3_bf * eta3_factor + eta4_bf * eta4_factor)`.
-- 只要系数非零, 就将对应的 group_name 记录到 active_group_names 集合。
-
-参数:
-- `output_row::AbstractVector{T}`: 待累加的轨道行.
-- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`.
-- `state_i::Int8`: source site 的状态编码.
-- `get_state_j::Function`: `(site_index) -> Int8`, 获取 target site 的状态.
-- `source_group::DirectedBackflowSourceGroup`: directed source group.
-- `site_index::Int`: source site 编号.
-- `row_offset::Int`: 站点内部自旋行偏移.
-- `active_group_names::Set{Symbol}`: 用于收集中产生非零 eta 的 group 名称.
-
-返回:
-- `nothing`.
-
-说明:
-- proposal 路径传入 `get_site_state_after_proposal` 闭包, 全重建路径传入 `state_j -> state_vector[site_j]` 函数.
-"""
-function add_source_group_eta_contributions_and_track_activation!(
-    output_row::AbstractVector{T},
-    base_orbitals::AbstractMatrix{T},
-    state_i::Int8,
-    get_state_j::Function,
-    source_group::DirectedBackflowSourceGroup,
-    site_index::Int,
-    row_offset::Int,
-    active_group_names::Set{Symbol},
-) where {T}
-    if site_index > length(source_group.outgoing_bond_indices_by_source)
-        return nothing
-    end
-
-    eta1_value = T(source_group.eta1_term.eta1_bf)
-    eta2_value = T(source_group.eta2_term.eta2_bf)
-    eta3_value = T(source_group.eta3_term.eta3_bf)
-    eta4_value = T(source_group.eta4_term.eta4_bf)
-    spin = backflow_spin_from_row_offset(row_offset)
-    has_eta = false
-
-    for bond_index in source_group.outgoing_bond_indices_by_source[site_index]
-        (_, target_site) = source_group.source_bonds[bond_index]
-        state_j = get_state_j(target_site)
-        bond_amplitude = T(source_group.source_amplitudes[bond_index])
-        eta_contribution = compute_backflow_eta_contribution(
-            state_i,
-            state_j,
-            spin,
-            bond_amplitude,
-            eta1_value,
-            eta2_value,
-            eta3_value,
-            eta4_value,
-        )
-        coefficient = eta_contribution.coefficient
-        if coefficient == zero(T)
-            continue
-        end
-
-        target_row = 2 * (target_site - 1) + row_offset
-        @views output_row .+= coefficient .* base_orbitals[target_row, :]
-        has_eta = true
-    end
-
-    if has_eta
-        push!(active_group_names, source_group.group_name)
-    end
-
-    return nothing
-end
-
-"""
-用途: 在 eta 贡献计算完成后, 根据 active_group_names 添加 epsilon correction。
-
-数学公式:
-- 对每个 epsilon term, 若其 group_names 中至少有一个在 active_group_names 中,
-  则 `output_row += (epsilon_bf - 1.0) * base_orbitals[row_index, :]`.
-
-参数:
-- `output_row::AbstractVector{T}`: 待累加的轨道行.
-- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`.
-- `epsilon_terms::Vector{BackflowEpsilonTerm}`: composite 中的所有 epsilon term.
-- `row_index::Int`: 当前全局行号.
-- `active_group_names::Set{Symbol}`: 产生了非零 eta 贡献的 group 名称集合.
-
-返回:
-- `nothing`.
-"""
-function add_epsilon_contributions_from_active_groups!(
-    output_row::AbstractVector{T},
-    base_orbitals::AbstractMatrix{T},
-    epsilon_terms::Vector{BackflowEpsilonTerm},
-    row_index::Int,
-    active_group_names::Set{Symbol},
-) where {T}
-    for epsilon_term in epsilon_terms
-        epsilon_shift = T(epsilon_term.epsilon_bf - 1.0)
-        if epsilon_shift == zero(T)
-            continue
-        end
-        for group_name in epsilon_term.group_names
-            if group_name in active_group_names
-                @views output_row .+= epsilon_shift .* base_orbitals[row_index, :]
-                break
-            end
-        end
-    end
-    return nothing
-end
-
-"""
-用途: 使用统一 eta-driven epsilon 逻辑构造单个 `(site, spin)` backflow row。
-
-数学公式:
-- `U_b(i,sigma) = U_0(i,sigma) + sum_g sum_j eta_coeff_g(i,j,sigma) U_0(j,sigma)
-  + sum_e I_e(i,sigma) (epsilon_e - 1) U_0(i,sigma)`.
-- `I_e(i,sigma)=1` 当且仅当该 epsilon term 控制的任一 source group 对该 row
-  产生非零 eta coefficient。
-
-参数:
-- `output_row::AbstractVector{T}`: 输出 row buffer, 长度等于轨道数.
-- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`.
-- `backflow_term::CompositeBackflowTerm`: directed split 组合式 backflow 对象.
-- `site_index::Int`: source site 编号.
-- `row_offset::Int`: site 内部自旋行偏移, `1` 为 up, `2` 为 down.
-- `get_state::Function`: `(site_index) -> Int8`, 用于读取当前或 proposal 后的 site 状态.
-
-返回:
-- `Int`: 当前 row 在 spin-resolved 轨道矩阵中的全局行号.
-"""
-function fill_backflow_site_row_from_state_getter!(
-    output_row::AbstractVector{T},
-    base_orbitals::AbstractMatrix{T},
-    backflow_term::CompositeBackflowTerm,
-    site_index::Int,
-    row_offset::Int,
-    get_state::Function,
-)::Int where {T}
-    row_index = 2 * (site_index - 1) + row_offset
-    copyto!(output_row, @view(base_orbitals[row_index, :]))
-
-    state_i = get_state(site_index)
-    spin = backflow_spin_from_row_offset(row_offset)
-    if backflow_n_sigma(state_i, spin) == 0.0
-        return row_index
-    end
-
-    active_group_names = Set{Symbol}()
-    for source_group in backflow_term.source_groups
-        add_source_group_eta_contributions_and_track_activation!(
-            output_row,
-            base_orbitals,
-            state_i,
-            get_state,
-            source_group,
-            site_index,
-            row_offset,
-            active_group_names,
-        )
-    end
-
-    add_epsilon_contributions_from_active_groups!(
-        output_row,
-        base_orbitals,
-        backflow_term.epsilon_terms,
-        row_index,
-        active_group_names,
-    )
-
-    return row_index
-end
-
-"""
 用途: 对 directed split backflow 使用 eta-driven epsilon 逻辑写入 proposal 后的单个 occupied row。
 
 数学公式:
@@ -970,22 +791,25 @@ function fill_grouped_source_composite_site_row_after_proposal!(
     site_index::Int,
     row_offset::Int,
 ) where {T}
-    initialize_site_row_base_after_proposal!(
-        site_row_buffer,
-        base_orbitals,
+    row_index = 2 * (site_index - 1) + row_offset
+    row_count = size(base_orbitals, 1)
+    source_row_indices = Vector{Int}(undef, row_count)
+    source_row_weights = Vector{T}(undef, row_count)
+    source_count = fill_backflow_row_source_weights_from_state_getter!(
+        source_row_indices,
+        source_row_weights,
         state_vector,
-        site_index,
-        row_offset,
-    )
-    fill_backflow_site_row_from_state_getter!(
-        site_row_buffer,
-        base_orbitals,
         backflow_term,
-        site_index,
-        row_offset,
+        row_index,
         site_j -> get_site_state_after_proposal(state_vector, proposal, site_j),
     )
-
+    fill_backflow_row_from_source_weights!(
+        site_row_buffer,
+        base_orbitals,
+        source_row_indices,
+        source_row_weights,
+        source_count,
+    )
     return nothing
 end
 
@@ -1061,22 +885,28 @@ function fill_grouped_source_composite_site_block_after_proposal!(
         site_index,
     )
     get_state = site_j -> get_site_state_after_proposal(state_vector, proposal, site_j)
-    fill_backflow_site_row_from_state_getter!(
-        @view(site_block_buffer[1, :]),
-        base_orbitals,
-        backflow_term,
-        site_index,
-        1,
-        get_state,
-    )
-    fill_backflow_site_row_from_state_getter!(
-        @view(site_block_buffer[2, :]),
-        base_orbitals,
-        backflow_term,
-        site_index,
-        2,
-        get_state,
-    )
+    row_count = size(base_orbitals, 1)
+    source_row_indices = Vector{Int}(undef, row_count)
+    source_row_weights = Vector{T}(undef, row_count)
+
+    for row_offset in 1:2
+        row_i = 2 * (site_index - 1) + row_offset
+        source_count = fill_backflow_row_source_weights_from_state_getter!(
+            source_row_indices,
+            source_row_weights,
+            state_vector,
+            backflow_term,
+            row_i,
+            get_state,
+        )
+        fill_backflow_row_from_source_weights!(
+            @view(site_block_buffer[row_offset, :]),
+            base_orbitals,
+            source_row_indices,
+            source_row_weights,
+            source_count,
+        )
+    end
 
     return nothing
 end
@@ -1580,17 +1410,27 @@ function build_backflow_orbitals(
     validate_orbital_dimensions(base_orbitals, length(state_vector))
     backflow_orbitals = Matrix{T}(base_orbitals)
     n_sites = length(state_vector)
+    row_count = 2 * n_sites
+    source_row_indices = Vector{Int}(undef, row_count)
+    source_row_weights = Vector{T}(undef, row_count)
 
     for site_i in 1:n_sites
         for row_offset in 1:2
             row_i = 2 * (site_i - 1) + row_offset
-            fill_backflow_site_row_from_state_getter!(
+            source_count = fill_backflow_row_source_weights_from_state_getter!(
+                source_row_indices,
+                source_row_weights,
+                state_vector,
+                backflow_term,
+                row_i,
+                site_j -> state_vector[site_j],
+            )
+            fill_backflow_row_from_source_weights!(
                 @view(backflow_orbitals[row_i, :]),
                 base_orbitals,
-                backflow_term,
-                site_i,
-                row_offset,
-                site_j -> state_vector[site_j],
+                source_row_indices,
+                source_row_weights,
+                source_count,
             )
         end
     end
@@ -1673,6 +1513,9 @@ function fill_backflow_chain_rule_orbitals!(
     validate_chain_rule_output_dimensions(output_orbitals, input_derivative_orbitals)
     copyto!(output_orbitals, input_derivative_orbitals)
     n_sites = length(state_vector)
+    row_count = 2 * n_sites
+    source_row_indices = Vector{Int}(undef, row_count)
+    source_row_weights = Vector{T}(undef, row_count)
 
     for site_i in 1:n_sites
         state_i = state_vector[site_i]
@@ -1683,26 +1526,20 @@ function fill_backflow_chain_rule_orbitals!(
             end
             row_i = 2 * (site_i - 1) + row_offset
 
-            active_group_names = Set{Symbol}()
-            for source_group in backflow_term.source_groups
-                add_source_group_eta_contributions_and_track_activation!(
-                    @view(output_orbitals[row_i, :]),
-                    input_derivative_orbitals,
-                    state_i,
-                    site_j -> state_vector[site_j],
-                    source_group,
-                    site_i,
-                    row_offset,
-                    active_group_names,
-                )
-            end
-
-            add_epsilon_contributions_from_active_groups!(
+            source_count = fill_backflow_row_source_weights_from_state_getter!(
+                source_row_indices,
+                source_row_weights,
+                state_vector,
+                backflow_term,
+                row_i,
+                site_j -> state_vector[site_j],
+            )
+            fill_backflow_row_from_source_weights!(
                 @view(output_orbitals[row_i, :]),
                 input_derivative_orbitals,
-                backflow_term.epsilon_terms,
-                row_i,
-                active_group_names,
+                source_row_indices,
+                source_row_weights,
+                source_count,
             )
         end
     end

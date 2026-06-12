@@ -157,12 +157,22 @@ end
 
     # 验证新的 eta-driven 辅助函数存在.
     new_helpers = [
-        Symbol("add_source_group_eta_contributions_and_track_activation!"),
-        Symbol("add_epsilon_contributions_from_active_groups!"),
+        Symbol("fill_backflow_row_source_weights_from_state_getter!"),
+        Symbol("fill_backflow_row_from_source_weights!"),
         Symbol("add_source_group_chain_rule_source_weights_and_track!"),
     ]
     for helper_name in new_helpers
         @test isdefined(mfVMC.Backflow, helper_name)
+    end
+
+    # 验证已废弃的直接 row 构建函数不再存在.
+    obsolete_row_helpers = [
+        Symbol("add_source_group_eta_contributions_and_track_activation!"),
+        Symbol("add_epsilon_contributions_from_active_groups!"),
+        Symbol("fill_backflow_site_row_from_state_getter!"),
+    ]
+    for helper_name in obsolete_row_helpers
+        @test !isdefined(mfVMC.Backflow, helper_name)
     end
 
     dd_source_bonds,
@@ -755,4 +765,59 @@ end
 
     @test actual_row ≈ expected_row
     @test actual_row ≈ 1.5 .* input_derivative_orbitals[1, :] .+ 0.5 .* input_derivative_orbitals[3, :]
+end
+
+@testset "Backflow full and proposal rows materialize from source weights" begin
+    base_orbitals = [
+        2.0 0.2
+        3.0 0.3
+        5.0 0.5
+        7.0 0.7
+    ]
+    state_vector = Int8[1, 0]
+    backflow = build_minimal_dd_eta4_backflow(
+        bf_epsilon_d=1.5,
+        bf_eta4_dd=0.5,
+        dd_amplitude=1.0,
+    )
+
+    source_row_indices = zeros(Int, 4)
+    source_row_weights = zeros(Float64, 4)
+    source_count = mfVMC.Backflow.fill_backflow_row_source_weights_from_state_getter!(
+        source_row_indices,
+        source_row_weights,
+        state_vector,
+        backflow,
+        1,
+        site_index -> state_vector[site_index],
+    )
+    expected_row = zeros(Float64, size(base_orbitals, 2))
+    mfVMC.Backflow.fill_backflow_row_from_source_weights!(
+        expected_row,
+        base_orbitals,
+        source_row_indices,
+        source_row_weights,
+        source_count,
+    )
+
+    full_orbitals = mfVMC.build_backflow_orbitals(base_orbitals, state_vector, backflow)
+    @test full_orbitals[1, :] ≈ expected_row
+
+    proposal = MoveProposal(
+        1, 2,
+        Int8(1), Int8(0),    # old_state1=UP, old_state2=HOLE
+        Int8(1), Int8(0),    # new_state1=UP, new_state2=HOLE (不变)
+        0, 0, 0, 0, 0, 0, 0,
+    )
+    proposal_row = zeros(Float64, size(base_orbitals, 2))
+    mfVMC.Backflow.fill_grouped_source_composite_site_row_after_proposal!(
+        proposal_row,
+        base_orbitals,
+        state_vector,
+        backflow,
+        proposal,
+        1,
+        1,
+    )
+    @test proposal_row ≈ expected_row
 end
