@@ -873,3 +873,92 @@ end
         1,
     )
 end
+
+"""
+用途: 构造一个小尺寸 Emery grouped backflow determinant 测试对象。
+
+参数:
+- 无。
+
+返回:
+- `vwf_det`: 已设置 grouped Emery backflow 的 determinant 波函数对象。
+"""
+function build_grouped_emery_backflow_vwf_fixture()
+    lx = 2
+    ly = 2
+    n_sites = emery_n_sites(lx, ly)
+    state_chars = join(("Dhud"[mod1(site_index, 4)] for site_index in 1:n_sites))
+    sampler = mfVMC.Sampler.init_config_Hubbard_by_state_char(state_chars)
+
+    dd_source_bonds,
+    dd_source_amplitudes,
+    dp_source_bonds,
+    dp_source_amplitudes,
+    pd_source_bonds,
+    pd_source_amplitudes,
+    pp_source_bonds,
+    pp_source_amplitudes = build_emery_backflow_source_data_by_directed_orbital_type(
+        lx,
+        ly;
+        tpd=1.0,
+        tpp=0.45,
+        bcy=1.0,
+    )
+    backflow = build_column_directed_emery_backflow(
+        dd_source_bonds,
+        dd_source_amplitudes,
+        dp_source_bonds,
+        dp_source_amplitudes,
+        pd_source_bonds,
+        pd_source_amplitudes,
+        pp_source_bonds,
+        pp_source_amplitudes,
+        0.91,
+        1.08,
+        0.11,
+        -0.07,
+        0.05,
+        -0.03,
+        -0.13,
+        0.17,
+        -0.19,
+        0.23,
+        0.29,
+        -0.31,
+        0.37,
+        -0.41,
+        -0.43,
+        0.47,
+        -0.53,
+        0.59,
+    )
+
+    n_rows = 2 * n_sites
+    n_electrons = length(sampler.electron_locs)
+    base_orbitals = [
+        0.2 * row_index + 0.07 * orbital_index + 0.003 * row_index * orbital_index
+        for row_index in 1:n_rows, orbital_index in 1:n_electrons
+    ]
+    return mfVMC.vwf_det(base_orbitals, sampler; backflow=backflow)
+end
+
+@testset "Backflow rebuild materializes only occupied rows" begin
+    vwf = build_grouped_emery_backflow_vwf_fixture()
+    init_gswf!(vwf)
+
+    full_orbitals = mfVMC.Backflow.build_backflow_orbitals(
+        vwf.base_gs_U,
+        vwf.sampler.state,
+        vwf.backflow,
+    )
+    expected_slater = Matrix(full_orbitals[vwf.sampler.electron_locs, :])
+
+    @test vwf.awf_mat_t ≈ transpose(expected_slater)
+    @test vwf.awf_val ≈ det(expected_slater)
+    @test vwf.awf_inv ≈ inv(expected_slater)
+end
+
+@testset "vwf_det does not store full backflow cache" begin
+    vwf = build_grouped_emery_backflow_vwf_fixture()
+    @test !hasproperty(vwf, :backflow_u)
+end
