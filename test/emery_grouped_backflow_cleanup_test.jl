@@ -821,3 +821,55 @@ end
     )
     @test proposal_row ≈ expected_row
 end
+
+@testset "Backflow proposal row validates site row inputs" begin
+    base_orbitals = [
+        2.0 0.2
+        3.0 0.3
+        5.0 0.5
+        7.0 0.7
+    ]
+    state_vector = Int8[1, 0]
+    backflow = build_minimal_dd_eta4_backflow(
+        bf_epsilon_d=1.5,
+        bf_eta4_dd=0.5,
+        dd_amplitude=1.0,
+    )
+    proposal = MoveProposal(
+        1, 2,
+        Int8(1), Int8(0),
+        Int8(1), Int8(0),
+        0, 0, 0, 0, 0, 0, 0,
+    )
+
+    valid_row_buffer = zeros(Float64, size(base_orbitals, 2))
+    short_row_buffer = zeros(Float64, size(base_orbitals, 2) - 1)
+
+    @test_throws ErrorException mfVMC.Backflow.fill_backflow_site_row_after_proposal!(
+        valid_row_buffer,
+        base_orbitals,
+        state_vector,
+        backflow,
+        proposal,
+        1,
+        3,
+    )
+    @test_throws ErrorException mfVMC.Backflow.fill_backflow_site_row_after_proposal!(
+        valid_row_buffer,
+        base_orbitals,
+        state_vector,
+        backflow,
+        proposal,
+        3,
+        1,
+    )
+    @test_throws ErrorException mfVMC.Backflow.fill_backflow_site_row_after_proposal!(
+        short_row_buffer,
+        base_orbitals,
+        state_vector,
+        backflow,
+        proposal,
+        1,
+        1,
+    )
+end

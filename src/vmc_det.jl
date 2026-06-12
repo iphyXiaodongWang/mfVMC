@@ -710,6 +710,7 @@ function collect_backflow_local_column_updates(
     vwf::vwf_det{T},
     proposal::MoveProposal,
 ) where {T}
+    ws = ensure_ws!(vwf)
     backflow_term = vwf.backflow
 
     affected_sites = Backflow.collect_affected_site_indices(
@@ -738,6 +739,8 @@ function collect_backflow_local_column_updates(
             backflow_term,
             proposal,
             site_index,
+            ws.backflow_chain_rule_source_rows,
+            ws.backflow_chain_rule_source_weights,
         )
         for local_row_offset in 1:2
             row_index = 2 * (site_index - 1) + local_row_offset
@@ -950,6 +953,8 @@ function collect_backflow_local_column_updates_into_cache!(
                     proposal,
                     site_index,
                     local_row_offset,
+                    ws.backflow_chain_rule_source_rows,
+                    ws.backflow_chain_rule_source_weights,
                 )
 
                 changed_count += 1
@@ -1028,6 +1033,8 @@ function refresh_backflow_affected_orbital_rows_after_accept!(
             vwf.backflow,
             proposal,
             site_index,
+            ws.backflow_chain_rule_source_rows,
+            ws.backflow_chain_rule_source_weights,
         )
 
         orbital_row = 2 * (site_index - 1) + 1

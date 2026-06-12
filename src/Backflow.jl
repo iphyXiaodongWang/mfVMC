@@ -728,6 +728,40 @@ function initialize_site_block_base_after_proposal!(
 end
 
 """
+用途: 校验 proposal 后局域 site row 写入所需的输入参数。
+
+参数:
+- `site_row_buffer::AbstractVector{T}`: 输出 buffer, 长度必须等于轨道数。
+- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
+- `state_vector::Vector{Int8}`: proposal 提交前的构型状态数组。
+- `site_index::Int`: 待写入的站点编号。
+- `row_offset::Int`: 站点内部自旋行偏移, `1` 为 up, `2` 为 down。
+
+返回:
+- `Int`: 该 site row 在 spin-resolved 轨道矩阵中的全局行号。
+"""
+function validate_site_row_after_proposal_inputs(
+    site_row_buffer::AbstractVector{T},
+    base_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    site_index::Int,
+    row_offset::Int,
+)::Int where {T}
+    validate_orbital_dimensions(base_orbitals, length(state_vector))
+    if length(site_row_buffer) != size(base_orbitals, 2)
+        error("Local site row buffer must have length $(size(base_orbitals, 2)), got $(length(site_row_buffer)).")
+    end
+    if !(1 <= site_index <= length(state_vector))
+        error("Affected site $site_index is out of bounds for a state vector with $(length(state_vector)) sites.")
+    end
+    if row_offset != 1 && row_offset != 2
+        error("row_offset must be 1 or 2, got $(row_offset).")
+    end
+
+    return 2 * (site_index - 1) + row_offset
+end
+
+"""
 用途: 校验局域 site row 尺寸并写入裸轨道基准行。
 
 参数:
@@ -747,18 +781,13 @@ function initialize_site_row_base_after_proposal!(
     site_index::Int,
     row_offset::Int,
 )::Int where {T}
-    validate_orbital_dimensions(base_orbitals, length(state_vector))
-    if length(site_row_buffer) != size(base_orbitals, 2)
-        error("Local site row buffer must have length $(size(base_orbitals, 2)), got $(length(site_row_buffer)).")
-    end
-    if !(1 <= site_index <= length(state_vector))
-        error("Affected site $site_index is out of bounds for a state vector with $(length(state_vector)) sites.")
-    end
-    if row_offset != 1 && row_offset != 2
-        error("row_offset must be 1 or 2, got $(row_offset).")
-    end
-
-    row_index = 2 * (site_index - 1) + row_offset
+    row_index = validate_site_row_after_proposal_inputs(
+        site_row_buffer,
+        base_orbitals,
+        state_vector,
+        site_index,
+        row_offset,
+    )
     copyto!(site_row_buffer, @view(base_orbitals[row_index, :]))
     return row_index
 end
@@ -791,10 +820,57 @@ function fill_grouped_source_composite_site_row_after_proposal!(
     site_index::Int,
     row_offset::Int,
 ) where {T}
-    row_index = 2 * (site_index - 1) + row_offset
     row_count = size(base_orbitals, 1)
     source_row_indices = Vector{Int}(undef, row_count)
     source_row_weights = Vector{T}(undef, row_count)
+    return fill_grouped_source_composite_site_row_after_proposal!(
+        site_row_buffer,
+        base_orbitals,
+        state_vector,
+        backflow_term,
+        proposal,
+        site_index,
+        row_offset,
+        source_row_indices,
+        source_row_weights,
+    )
+end
+
+"""
+用途: 使用外部 source-weight buffer 写入 proposal 后的单个 backflow row, 避免热路径重复分配。
+
+参数:
+- `site_row_buffer::AbstractVector{T}`: 输出 row buffer, 长度必须等于轨道数。
+- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
+- `state_vector::Vector{Int8}`: proposal 提交前的构型状态数组。
+- `backflow_term::CompositeBackflowTerm`: directed split 组合式 backflow 对象。
+- `proposal::MoveProposal`: Monte Carlo proposal。
+- `site_index::Int`: 待写入的站点编号。
+- `row_offset::Int`: 站点内部自旋行偏移, `1` 为 up, `2` 为 down。
+- `source_row_indices::AbstractVector{Int}`: source row 编号工作缓冲区。
+- `source_row_weights::AbstractVector{T}`: source row 权重工作缓冲区。
+
+返回:
+- `nothing`。
+"""
+function fill_grouped_source_composite_site_row_after_proposal!(
+    site_row_buffer::AbstractVector{T},
+    base_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    backflow_term::CompositeBackflowTerm,
+    proposal::MoveProposal,
+    site_index::Int,
+    row_offset::Int,
+    source_row_indices::AbstractVector{Int},
+    source_row_weights::AbstractVector{T},
+) where {T}
+    row_index = validate_site_row_after_proposal_inputs(
+        site_row_buffer,
+        base_orbitals,
+        state_vector,
+        site_index,
+        row_offset,
+    )
     source_count = fill_backflow_row_source_weights_from_state_getter!(
         source_row_indices,
         source_row_weights,
@@ -849,6 +925,47 @@ function fill_backflow_site_row_after_proposal!(
 end
 
 """
+用途: 使用外部 source-weight buffer 写入 proposal 后的单个 occupied row。
+
+参数:
+- `site_row_buffer::AbstractVector{T}`: 输出 buffer, 长度必须等于轨道数。
+- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
+- `state_vector::Vector{Int8}`: proposal 提交前的构型状态数组。
+- `backflow_term::CompositeBackflowTerm`: 组合式 Eq.(5) backflow 对象。
+- `proposal::MoveProposal`: Monte Carlo proposal。
+- `site_index::Int`: 待写入的站点编号。
+- `row_offset::Int`: 站点内部自旋行偏移, `1` 为 up, `2` 为 down。
+- `source_row_indices::AbstractVector{Int}`: source row 编号工作缓冲区。
+- `source_row_weights::AbstractVector{T}`: source row 权重工作缓冲区。
+
+返回:
+- `nothing`。
+"""
+function fill_backflow_site_row_after_proposal!(
+    site_row_buffer::AbstractVector{T},
+    base_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    backflow_term::CompositeBackflowTerm,
+    proposal::MoveProposal,
+    site_index::Int,
+    row_offset::Int,
+    source_row_indices::AbstractVector{Int},
+    source_row_weights::AbstractVector{T},
+) where {T}
+    return fill_grouped_source_composite_site_row_after_proposal!(
+        site_row_buffer,
+        base_orbitals,
+        state_vector,
+        backflow_term,
+        proposal,
+        site_index,
+        row_offset,
+        source_row_indices,
+        source_row_weights,
+    )
+end
+
+"""
 用途: 对 directed split backflow 使用 eta-driven epsilon 逻辑写入 proposal 后的局域 site block。
 
 数学公式:
@@ -878,6 +995,47 @@ function fill_grouped_source_composite_site_block_after_proposal!(
     proposal::MoveProposal,
     site_index::Int,
 ) where {T}
+    row_count = size(base_orbitals, 1)
+    source_row_indices = Vector{Int}(undef, row_count)
+    source_row_weights = Vector{T}(undef, row_count)
+    return fill_grouped_source_composite_site_block_after_proposal!(
+        site_block_buffer,
+        base_orbitals,
+        state_vector,
+        backflow_term,
+        proposal,
+        site_index,
+        source_row_indices,
+        source_row_weights,
+    )
+end
+
+"""
+用途: 使用外部 source-weight buffer 写入 proposal 后的局域 backflow site block。
+
+参数:
+- `site_block_buffer::AbstractMatrix{T}`: 输出 buffer, 形状必须为 `2 x N_orb`。
+- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
+- `state_vector::Vector{Int8}`: proposal 提交前的构型状态数组。
+- `backflow_term::CompositeBackflowTerm`: 组合式 Eq.(5) backflow 对象。
+- `proposal::MoveProposal`: Monte Carlo proposal。
+- `site_index::Int`: 待写入的站点编号。
+- `source_row_indices::AbstractVector{Int}`: source row 编号工作缓冲区。
+- `source_row_weights::AbstractVector{T}`: source row 权重工作缓冲区。
+
+返回:
+- `nothing`。
+"""
+function fill_grouped_source_composite_site_block_after_proposal!(
+    site_block_buffer::AbstractMatrix{T},
+    base_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    backflow_term::CompositeBackflowTerm,
+    proposal::MoveProposal,
+    site_index::Int,
+    source_row_indices::AbstractVector{Int},
+    source_row_weights::AbstractVector{T},
+) where {T}
     initialize_site_block_base_after_proposal!(
         site_block_buffer,
         base_orbitals,
@@ -885,9 +1043,6 @@ function fill_grouped_source_composite_site_block_after_proposal!(
         site_index,
     )
     get_state = site_j -> get_site_state_after_proposal(state_vector, proposal, site_j)
-    row_count = size(base_orbitals, 1)
-    source_row_indices = Vector{Int}(undef, row_count)
-    source_row_weights = Vector{T}(undef, row_count)
 
     for row_offset in 1:2
         row_i = 2 * (site_index - 1) + row_offset
@@ -944,6 +1099,44 @@ function fill_backflow_site_block_after_proposal!(
         backflow_term,
         proposal,
         site_index,
+    )
+end
+
+"""
+用途: 使用外部 source-weight buffer 写入 proposal 后的局域 site block。
+
+参数:
+- `site_block_buffer::AbstractMatrix{T}`: 输出 buffer, 形状必须为 `2 x N_orb`。
+- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
+- `state_vector::Vector{Int8}`: proposal 提交前的构型状态数组。
+- `backflow_term::CompositeBackflowTerm`: 组合式 Eq.(5) backflow 对象。
+- `proposal::MoveProposal`: Monte Carlo proposal。
+- `site_index::Int`: 待写入的站点编号。
+- `source_row_indices::AbstractVector{Int}`: source row 编号工作缓冲区。
+- `source_row_weights::AbstractVector{T}`: source row 权重工作缓冲区。
+
+返回:
+- `nothing`。
+"""
+function fill_backflow_site_block_after_proposal!(
+    site_block_buffer::AbstractMatrix{T},
+    base_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    backflow_term::CompositeBackflowTerm,
+    proposal::MoveProposal,
+    site_index::Int,
+    source_row_indices::AbstractVector{Int},
+    source_row_weights::AbstractVector{T},
+) where {T}
+    return fill_grouped_source_composite_site_block_after_proposal!(
+        site_block_buffer,
+        base_orbitals,
+        state_vector,
+        backflow_term,
+        proposal,
+        site_index,
+        source_row_indices,
+        source_row_weights,
     )
 end
 
@@ -1607,6 +1800,47 @@ function fill_backflow_chain_rule_row!(
     row_count = 2 * length(state_vector)
     source_row_indices = Vector{Int}(undef, row_count)
     source_row_weights = Vector{T}(undef, row_count)
+    return fill_backflow_chain_rule_row!(
+        output_row,
+        input_derivative_orbitals,
+        state_vector,
+        backflow_term,
+        row_index,
+        source_row_indices,
+        source_row_weights,
+    )
+end
+
+"""
+用途: 使用外部 source-weight buffer 只计算指定 occupied row 的 backflow chain-rule 轨道导数。
+
+参数:
+- `output_row::AbstractVector{T}`: 输出 buffer, 长度必须等于轨道数。
+- `input_derivative_orbitals::AbstractMatrix{T}`: 输入裸轨道导数 `dU_0 / dp`。
+- `state_vector::Vector{Int8}`: 当前 Monte Carlo 构型。
+- `backflow_term::CompositeBackflowTerm`: 组合式 Eq.(5) backflow 对象。
+- `row_index::Int`: 需要计算的 spin-resolved 全局行号。
+- `source_row_indices::AbstractVector{Int}`: source row 编号工作缓冲区。
+- `source_row_weights::AbstractVector{T}`: source row 权重工作缓冲区。
+
+返回:
+- `nothing`。
+"""
+function fill_backflow_chain_rule_row!(
+    output_row::AbstractVector{T},
+    input_derivative_orbitals::AbstractMatrix{T},
+    state_vector::Vector{Int8},
+    backflow_term::CompositeBackflowTerm,
+    row_index::Int,
+    source_row_indices::AbstractVector{Int},
+    source_row_weights::AbstractVector{T},
+) where {T}
+    initialize_backflow_chain_rule_row!(
+        output_row,
+        input_derivative_orbitals,
+        state_vector,
+        row_index,
+    )
     source_count = fill_backflow_row_source_weights_from_state_getter!(
         source_row_indices,
         source_row_weights,
