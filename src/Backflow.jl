@@ -814,19 +814,17 @@ function add_source_group_eta_contributions_and_track_activation!(
         (_, target_site) = source_group.source_bonds[bond_index]
         state_j = get_state_j(target_site)
         bond_amplitude = T(source_group.source_amplitudes[bond_index])
-
-        eta1_factor = (state_i == DB && state_j == HOLE) ? one(T) : zero(T)
-        eta2_factor = compute_eta2_virtual_hopping_factor(state_i, state_j, spin)
-        eta3_factor = compute_eta3_doublon_single_factor(state_i, state_j, spin)
-        eta4_factor = compute_eta4_single_hole_factor(state_i, state_j, spin)
-        coefficient =
-            bond_amplitude *
-            (
-                eta1_value * eta1_factor +
-                eta2_value * T(eta2_factor) +
-                eta3_value * T(eta3_factor) +
-                eta4_value * T(eta4_factor)
-            )
+        eta_contribution = compute_backflow_eta_contribution(
+            state_i,
+            state_j,
+            spin,
+            bond_amplitude,
+            eta1_value,
+            eta2_value,
+            eta3_value,
+            eta4_value,
+        )
+        coefficient = eta_contribution.coefficient
         if coefficient == zero(T)
             continue
         end
@@ -1045,26 +1043,19 @@ function fill_grouped_source_composite_site_block_after_proposal!(
             target_row_up = 2 * (target_site - 1) + 1
             target_row_down = target_row_up + 1
 
-            if eta1_value != zero(T) && state_i == DB && state_j == HOLE
-                coefficient = eta1_value * bond_amplitude
-                @views site_block_buffer[1, :] .+= coefficient .* base_orbitals[target_row_up, :]
-                @views site_block_buffer[2, :] .+= coefficient .* base_orbitals[target_row_down, :]
-                has_eta_up = true
-                has_eta_down = true
-            end
-
             for row_offset in 1:2
                 spin = backflow_spin_from_row_offset(row_offset)
-                eta2_factor = compute_eta2_virtual_hopping_factor(state_i, state_j, spin)
-                eta3_factor = compute_eta3_doublon_single_factor(state_i, state_j, spin)
-                eta4_factor = compute_eta4_single_hole_factor(state_i, state_j, spin)
-                coefficient =
-                    bond_amplitude *
-                    (
-                        eta2_value * T(eta2_factor) +
-                        eta3_value * T(eta3_factor) +
-                        eta4_value * T(eta4_factor)
-                    )
+                eta_contribution = compute_backflow_eta_contribution(
+                    state_i,
+                    state_j,
+                    spin,
+                    bond_amplitude,
+                    eta1_value,
+                    eta2_value,
+                    eta3_value,
+                    eta4_value,
+                )
+                coefficient = eta_contribution.coefficient
                 if coefficient == zero(T)
                     continue
                 end
@@ -1484,6 +1475,58 @@ function compute_eta4_single_hole_factor(
     return backflow_n_sigma(state_i, spin) *
            backflow_h_sigma(state_i, opposite_spin) *
            (state_j == HOLE ? 1.0 : 0.0)
+end
+
+"""
+用途: 统一计算单条有向 source bond 对某个 `(i, sigma)` row 的 eta factors 与实际 eta coefficient。
+
+数学公式:
+- `coefficient = t_ij * (eta1 * f1 + eta2 * f2 + eta3 * f3 + eta4 * f4)`,
+  其中 `f1 = D_i H_j`,
+  `f2 = n_{i,sigma} h_{i,-sigma} n_{j,-sigma} h_{j,sigma}`,
+  `f3 = D_i n_{j,-sigma} h_{j,sigma}`,
+  `f4 = n_{i,sigma} h_{i,-sigma} H_j`.
+
+参数:
+- `state_i::Int8`: source site `i` 的物理状态编码.
+- `state_j::Int8`: target site `j` 的物理状态编码.
+- `spin::Int8`: 当前 row 对应的物理自旋 `sigma`.
+- `bond_amplitude::T`: 有向键 hopping 振幅 `t_ij`.
+- `eta1_value, eta2_value, eta3_value, eta4_value::T`: 当前 source group 的 eta 参数值.
+
+返回:
+- `NamedTuple`: 包含 `coefficient`, `eta1_factor`, `eta2_factor`,
+  `eta3_factor`, `eta4_factor`, 均为类型 `T`.
+"""
+function compute_backflow_eta_contribution(
+    state_i::Int8,
+    state_j::Int8,
+    spin::Int8,
+    bond_amplitude::T,
+    eta1_value::T,
+    eta2_value::T,
+    eta3_value::T,
+    eta4_value::T,
+) where {T}
+    eta1_factor = (state_i == DB && state_j == HOLE) ? one(T) : zero(T)
+    eta2_factor = T(compute_eta2_virtual_hopping_factor(state_i, state_j, spin))
+    eta3_factor = T(compute_eta3_doublon_single_factor(state_i, state_j, spin))
+    eta4_factor = T(compute_eta4_single_hole_factor(state_i, state_j, spin))
+    coefficient =
+        bond_amplitude *
+        (
+            eta1_value * eta1_factor +
+            eta2_value * eta2_factor +
+            eta3_value * eta3_factor +
+            eta4_value * eta4_factor
+        )
+    return (
+        coefficient=coefficient,
+        eta1_factor=eta1_factor,
+        eta2_factor=eta2_factor,
+        eta3_factor=eta3_factor,
+        eta4_factor=eta4_factor,
+    )
 end
 
 
@@ -1951,19 +1994,17 @@ function add_source_group_chain_rule_source_weights_and_track!(
         state_j = state_vector[target_site]
         target_row = 2 * (target_site - 1) + row_offset
         bond_amplitude = T(source_group.source_amplitudes[bond_index])
-
-        eta1_factor = (state_i == DB && state_j == HOLE) ? one(T) : zero(T)
-        eta2_factor = compute_eta2_virtual_hopping_factor(state_i, state_j, spin)
-        eta3_factor = compute_eta3_doublon_single_factor(state_i, state_j, spin)
-        eta4_factor = compute_eta4_single_hole_factor(state_i, state_j, spin)
-        coefficient =
-            bond_amplitude *
-            (
-                eta1_value * eta1_factor +
-                eta2_value * T(eta2_factor) +
-                eta3_value * T(eta3_factor) +
-                eta4_value * T(eta4_factor)
-            )
+        eta_contribution = compute_backflow_eta_contribution(
+            state_i,
+            state_j,
+            spin,
+            bond_amplitude,
+            eta1_value,
+            eta2_value,
+            eta3_value,
+            eta4_value,
+        )
+        coefficient = eta_contribution.coefficient
         if coefficient == zero(T)
             continue
         end
@@ -2186,37 +2227,35 @@ function build_backflow_derivative_orbitals(
                 row_i = 2 * (site_i - 1) + row_offset
                 row_j = 2 * (site_j - 1) + row_offset
 
-                eta1_factor = (state_i == DB && state_j == HOLE) ? one(T) : zero(T)
-                if eta1_factor != zero(T)
+                eta_contribution = compute_backflow_eta_contribution(
+                    state_i,
+                    state_j,
+                    spin,
+                    bond_amplitude,
+                    eta1_value,
+                    eta2_value,
+                    eta3_value,
+                    eta4_value,
+                )
+
+                if eta_contribution.eta1_factor != zero(T)
                     @views eta1_deriv[row_i, :] .+= bond_amplitude .* base_orbitals[row_j, :]
                 end
 
-                eta2_factor = compute_eta2_virtual_hopping_factor(state_i, state_j, spin)
-                if eta2_factor != 0.0
-                    @views eta2_deriv[row_i, :] .+= bond_amplitude * T(eta2_factor) .* base_orbitals[row_j, :]
+                if eta_contribution.eta2_factor != zero(T)
+                    @views eta2_deriv[row_i, :] .+= bond_amplitude * eta_contribution.eta2_factor .* base_orbitals[row_j, :]
                 end
 
-                eta3_factor = compute_eta3_doublon_single_factor(state_i, state_j, spin)
-                if eta3_factor != 0.0
-                    @views eta3_deriv[row_i, :] .+= bond_amplitude * T(eta3_factor) .* base_orbitals[row_j, :]
+                if eta_contribution.eta3_factor != zero(T)
+                    @views eta3_deriv[row_i, :] .+= bond_amplitude * eta_contribution.eta3_factor .* base_orbitals[row_j, :]
                 end
 
-                eta4_factor = compute_eta4_single_hole_factor(state_i, state_j, spin)
-                if eta4_factor != 0.0
-                    @views eta4_deriv[row_i, :] .+= bond_amplitude * T(eta4_factor) .* base_orbitals[row_j, :]
+                if eta_contribution.eta4_factor != zero(T)
+                    @views eta4_deriv[row_i, :] .+= bond_amplitude * eta_contribution.eta4_factor .* base_orbitals[row_j, :]
                 end
-
-                eta_coefficient =
-                    bond_amplitude *
-                    (
-                        eta1_value * eta1_factor +
-                        eta2_value * T(eta2_factor) +
-                        eta3_value * T(eta3_factor) +
-                        eta4_value * T(eta4_factor)
-                    )
 
                 # Mark epsilon terms owned by this group as active for this row.
-                if eta_coefficient != zero(T) && haskey(group_to_epsilon_indices, source_group.group_name)
+                if eta_contribution.coefficient != zero(T) && haskey(group_to_epsilon_indices, source_group.group_name)
                     for epsilon_index in group_to_epsilon_indices[source_group.group_name]
                         epsilon_active_rows[epsilon_index][row_i] = true
                     end
