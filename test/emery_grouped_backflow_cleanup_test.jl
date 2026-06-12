@@ -1,4 +1,5 @@
 using Test
+using LinearAlgebra
 
 push!(LOAD_PATH, joinpath(@__DIR__, "..", "src"))
 include(joinpath(@__DIR__, "..", "Emery.jl"))
@@ -23,6 +24,117 @@ function build_test_epsilon_term()
         epsilon_bf=1.2,
         group_names=Symbol[:dd, :dp],
     )
+end
+
+"""
+用途: 构造只含一条 `dd` source bond 的最小 Emery directed backflow, 用于梯度测试.
+
+参数:
+- `bf_epsilon_d::Float64`: `bf_epsilon_d` 参数值.
+- `bf_eta4_dd::Float64`: `bf_eta4_dd` 参数值.
+- `dd_amplitude::Float64`: directed bond `(1, 2)` 的 hopping 振幅.
+
+返回:
+- `mfVMC.Backflow.CompositeBackflowTerm`: 只在 `dd` group 中含一条 source bond 的 backflow.
+"""
+function build_minimal_dd_eta4_backflow(;
+    bf_epsilon_d::Float64,
+    bf_eta4_dd::Float64,
+    dd_amplitude::Float64=1.0,
+)
+    empty_bonds = Tuple{Int,Int}[]
+    empty_amplitudes = Float64[]
+    return build_column_directed_emery_backflow(
+        Tuple{Int,Int}[(1, 2)], [dd_amplitude],
+        empty_bonds, empty_amplitudes,
+        empty_bonds, empty_amplitudes,
+        empty_bonds, empty_amplitudes,
+        bf_epsilon_d, 1.0,
+        0.0, 0.0, 0.0, bf_eta4_dd,
+        0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0,
+    )
+end
+
+"""
+用途: 对给定 backflow 和 occupied rows 计算 determinant 的 `log(abs(det(A)))`.
+
+参数:
+- `base_orbitals::Matrix{Float64}`: 裸轨道矩阵 `U_0`.
+- `state_vector::Vector{Int8}`: 当前构型.
+- `backflow`: 待测试的 backflow 对象.
+- `electron_rows::Vector{Int}`: determinant 选取的 occupied row 列表.
+
+返回:
+- `Float64`: `log(abs(det(U_b[electron_rows, 1:N_e])))`.
+"""
+function compute_backflow_logabsdet(
+    base_orbitals::Matrix{Float64},
+    state_vector::Vector{Int8},
+    backflow,
+    electron_rows::Vector{Int},
+)::Float64
+    backflow_orbitals = mfVMC.build_backflow_orbitals(base_orbitals, state_vector, backflow)
+    electron_count = length(electron_rows)
+    slater_matrix = Matrix(backflow_orbitals[electron_rows, 1:electron_count])
+    return log(abs(det(slater_matrix)))
+end
+
+"""
+用途: 由 backflow 参数导数矩阵计算 determinant log-derivative.
+
+参数:
+- `base_orbitals::Matrix{Float64}`: 裸轨道矩阵 `U_0`.
+- `state_vector::Vector{Int8}`: 当前构型.
+- `backflow`: 待测试的 backflow 对象.
+- `param_name::Symbol`: 目标 backflow 参数名.
+- `electron_rows::Vector{Int}`: determinant 选取的 occupied row 列表.
+
+返回:
+- `Float64`: `Tr(A^{-1} dA/dp)`.
+"""
+function compute_backflow_param_log_derivative(
+    base_orbitals::Matrix{Float64},
+    state_vector::Vector{Int8},
+    backflow,
+    param_name::Symbol,
+    electron_rows::Vector{Int},
+)::Float64
+    backflow_orbitals = mfVMC.build_backflow_orbitals(base_orbitals, state_vector, backflow)
+    electron_count = length(electron_rows)
+    slater_matrix = Matrix(backflow_orbitals[electron_rows, 1:electron_count])
+    derivative_pairs = mfVMC.Backflow.build_backflow_derivative_orbitals(
+        base_orbitals,
+        state_vector,
+        backflow,
+    )
+    pair_index = findfirst(pair -> first(pair) == param_name, derivative_pairs)
+    pair_index === nothing && error("Missing backflow derivative for $(param_name).")
+    derivative_matrix = Matrix(derivative_pairs[pair_index].second[electron_rows, 1:electron_count])
+    return tr(inv(slater_matrix) * derivative_matrix)
+end
+
+"""
+用途: 用 central finite difference 估计 determinant 的 `d log(abs(det(A))) / dp`.
+
+参数:
+- `evaluate_logabsdet::Function`: 输入参数值并返回 `log(abs(det(A(p))))` 的函数.
+- `param_value::Float64`: 当前参数值 `p`.
+- `step_size::Float64`: 有限差分步长 `h`.
+
+返回:
+- `Float64`: `(f(p+h)-f(p-h))/(2h)`.
+"""
+function compute_central_finite_difference_log_derivative(
+    evaluate_logabsdet::Function,
+    param_value::Float64,
+    step_size::Float64,
+)::Float64
+    return (
+        evaluate_logabsdet(param_value + step_size) -
+        evaluate_logabsdet(param_value - step_size)
+    ) / (2.0 * step_size)
 end
 
 @testset "Emery grouped backflow cleanup" begin
@@ -349,6 +461,126 @@ end
     )
     epsilon_d_zero_amp_index = findfirst(pair -> first(pair) == :bf_epsilon_d, zero_amp_derivatives)
     @test zero_amp_derivatives[epsilon_d_zero_amp_index].second == zeros(Float64, size(base_orbitals))
+end
+
+@testset "Eta-driven determinant gradient correctness" begin
+    base_orbitals = [
+        2.0 0.3
+        3.0 0.4
+        5.0 0.5
+        7.0 0.6
+    ]
+    state_up_hole = Int8[1, 0]
+    electron_rows = [1]
+    step_size = 1.0e-6
+
+    # 默认点 epsilon=1, eta=0: epsilon 不激活, 但 eta4 的线性响应应该仍然存在.
+    backflow_default = build_minimal_dd_eta4_backflow(
+        bf_epsilon_d=1.0,
+        bf_eta4_dd=0.0,
+        dd_amplitude=1.2,
+    )
+    eta_default_analytic = compute_backflow_param_log_derivative(
+        base_orbitals,
+        state_up_hole,
+        backflow_default,
+        :bf_eta4_dd,
+        electron_rows,
+    )
+    eta_default_numeric = compute_central_finite_difference_log_derivative(
+        eta4_value -> compute_backflow_logabsdet(
+            base_orbitals,
+            state_up_hole,
+            build_minimal_dd_eta4_backflow(
+                bf_epsilon_d=1.0,
+                bf_eta4_dd=eta4_value,
+                dd_amplitude=1.2,
+            ),
+            electron_rows,
+        ),
+        0.0,
+        step_size,
+    )
+    @test eta_default_analytic ≈ eta_default_numeric rtol = 1.0e-8 atol = 1.0e-8
+
+    epsilon_default_analytic = compute_backflow_param_log_derivative(
+        base_orbitals,
+        state_up_hole,
+        backflow_default,
+        :bf_epsilon_d,
+        electron_rows,
+    )
+    epsilon_default_numeric = compute_central_finite_difference_log_derivative(
+        epsilon_value -> compute_backflow_logabsdet(
+            base_orbitals,
+            state_up_hole,
+            build_minimal_dd_eta4_backflow(
+                bf_epsilon_d=epsilon_value,
+                bf_eta4_dd=0.0,
+                dd_amplitude=1.2,
+            ),
+            electron_rows,
+        ),
+        1.0,
+        step_size,
+    )
+    @test epsilon_default_analytic ≈ 0.0 atol = 1.0e-12
+    @test epsilon_default_analytic ≈ epsilon_default_numeric rtol = 1.0e-8 atol = 1.0e-8
+
+    # 激活点 eta!=0: epsilon 与 eta4 的 determinant log-derivative 都应匹配有限差分.
+    active_epsilon = 1.3
+    active_eta4 = 0.4
+    active_backflow = build_minimal_dd_eta4_backflow(
+        bf_epsilon_d=active_epsilon,
+        bf_eta4_dd=active_eta4,
+        dd_amplitude=1.2,
+    )
+
+    eta_active_analytic = compute_backflow_param_log_derivative(
+        base_orbitals,
+        state_up_hole,
+        active_backflow,
+        :bf_eta4_dd,
+        electron_rows,
+    )
+    eta_active_numeric = compute_central_finite_difference_log_derivative(
+        eta4_value -> compute_backflow_logabsdet(
+            base_orbitals,
+            state_up_hole,
+            build_minimal_dd_eta4_backflow(
+                bf_epsilon_d=active_epsilon,
+                bf_eta4_dd=eta4_value,
+                dd_amplitude=1.2,
+            ),
+            electron_rows,
+        ),
+        active_eta4,
+        step_size,
+    )
+    @test eta_active_analytic ≈ eta_active_numeric rtol = 1.0e-8 atol = 1.0e-8
+
+    epsilon_active_analytic = compute_backflow_param_log_derivative(
+        base_orbitals,
+        state_up_hole,
+        active_backflow,
+        :bf_epsilon_d,
+        electron_rows,
+    )
+    epsilon_active_numeric = compute_central_finite_difference_log_derivative(
+        epsilon_value -> compute_backflow_logabsdet(
+            base_orbitals,
+            state_up_hole,
+            build_minimal_dd_eta4_backflow(
+                bf_epsilon_d=epsilon_value,
+                bf_eta4_dd=active_eta4,
+                dd_amplitude=1.2,
+            ),
+            electron_rows,
+        ),
+        active_epsilon,
+        step_size,
+    )
+    @test epsilon_active_analytic ≈ epsilon_active_numeric rtol = 1.0e-8 atol = 1.0e-8
 end
 
 @testset "Proposal row-block consistency" begin
