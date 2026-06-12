@@ -881,6 +881,68 @@ function add_epsilon_contributions_from_active_groups!(
 end
 
 """
+用途: 使用统一 eta-driven epsilon 逻辑构造单个 `(site, spin)` backflow row。
+
+数学公式:
+- `U_b(i,sigma) = U_0(i,sigma) + sum_g sum_j eta_coeff_g(i,j,sigma) U_0(j,sigma)
+  + sum_e I_e(i,sigma) (epsilon_e - 1) U_0(i,sigma)`.
+- `I_e(i,sigma)=1` 当且仅当该 epsilon term 控制的任一 source group 对该 row
+  产生非零 eta coefficient。
+
+参数:
+- `output_row::AbstractVector{T}`: 输出 row buffer, 长度等于轨道数.
+- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`.
+- `backflow_term::CompositeBackflowTerm`: directed split 组合式 backflow 对象.
+- `site_index::Int`: source site 编号.
+- `row_offset::Int`: site 内部自旋行偏移, `1` 为 up, `2` 为 down.
+- `get_state::Function`: `(site_index) -> Int8`, 用于读取当前或 proposal 后的 site 状态.
+
+返回:
+- `Int`: 当前 row 在 spin-resolved 轨道矩阵中的全局行号.
+"""
+function fill_backflow_site_row_from_state_getter!(
+    output_row::AbstractVector{T},
+    base_orbitals::AbstractMatrix{T},
+    backflow_term::CompositeBackflowTerm,
+    site_index::Int,
+    row_offset::Int,
+    get_state::Function,
+)::Int where {T}
+    row_index = 2 * (site_index - 1) + row_offset
+    copyto!(output_row, @view(base_orbitals[row_index, :]))
+
+    state_i = get_state(site_index)
+    spin = backflow_spin_from_row_offset(row_offset)
+    if backflow_n_sigma(state_i, spin) == 0.0
+        return row_index
+    end
+
+    active_group_names = Set{Symbol}()
+    for source_group in backflow_term.source_groups
+        add_source_group_eta_contributions_and_track_activation!(
+            output_row,
+            base_orbitals,
+            state_i,
+            get_state,
+            source_group,
+            site_index,
+            row_offset,
+            active_group_names,
+        )
+    end
+
+    add_epsilon_contributions_from_active_groups!(
+        output_row,
+        base_orbitals,
+        backflow_term.epsilon_terms,
+        row_index,
+        active_group_names,
+    )
+
+    return row_index
+end
+
+"""
 用途: 对 directed split backflow 使用 eta-driven epsilon 逻辑写入 proposal 后的单个 occupied row。
 
 数学公式:
@@ -908,40 +970,20 @@ function fill_grouped_source_composite_site_row_after_proposal!(
     site_index::Int,
     row_offset::Int,
 ) where {T}
-    row_index = initialize_site_row_base_after_proposal!(
+    initialize_site_row_base_after_proposal!(
         site_row_buffer,
         base_orbitals,
         state_vector,
         site_index,
         row_offset,
     )
-    state_i = get_site_state_after_proposal(state_vector, proposal, site_index)
-    spin = backflow_spin_from_row_offset(row_offset)
-
-    if backflow_n_sigma(state_i, spin) == 0.0
-        return nothing
-    end
-
-    active_group_names = Set{Symbol}()
-    for source_group in backflow_term.source_groups
-        add_source_group_eta_contributions_and_track_activation!(
-            site_row_buffer,
-            base_orbitals,
-            state_i,
-            site_j -> get_site_state_after_proposal(state_vector, proposal, site_j),
-            source_group,
-            site_index,
-            row_offset,
-            active_group_names,
-        )
-    end
-
-    add_epsilon_contributions_from_active_groups!(
+    fill_backflow_site_row_from_state_getter!(
         site_row_buffer,
         base_orbitals,
-        backflow_term.epsilon_terms,
-        row_index,
-        active_group_names,
+        backflow_term,
+        site_index,
+        row_offset,
+        site_j -> get_site_state_after_proposal(state_vector, proposal, site_j),
     )
 
     return nothing
@@ -1012,90 +1054,29 @@ function fill_grouped_source_composite_site_block_after_proposal!(
     proposal::MoveProposal,
     site_index::Int,
 ) where {T}
-    row_up, row_down = initialize_site_block_base_after_proposal!(
+    initialize_site_block_base_after_proposal!(
         site_block_buffer,
         base_orbitals,
         state_vector,
         site_index,
     )
-    state_i = get_site_state_after_proposal(state_vector, proposal, site_index)
-
-    # Per-spin active group tracking for epsilon activation.
-    active_group_up = Set{Symbol}()
-    active_group_down = Set{Symbol}()
-
-    for source_group in backflow_term.source_groups
-        if site_index > length(source_group.outgoing_bond_indices_by_source)
-            continue
-        end
-
-        eta1_value = T(source_group.eta1_term.eta1_bf)
-        eta2_value = T(source_group.eta2_term.eta2_bf)
-        eta3_value = T(source_group.eta3_term.eta3_bf)
-        eta4_value = T(source_group.eta4_term.eta4_bf)
-        has_eta_up = false
-        has_eta_down = false
-
-        for bond_index in source_group.outgoing_bond_indices_by_source[site_index]
-            (_, target_site) = source_group.source_bonds[bond_index]
-            state_j = get_site_state_after_proposal(state_vector, proposal, target_site)
-            bond_amplitude = T(source_group.source_amplitudes[bond_index])
-            target_row_up = 2 * (target_site - 1) + 1
-            target_row_down = target_row_up + 1
-
-            for row_offset in 1:2
-                spin = backflow_spin_from_row_offset(row_offset)
-                eta_contribution = compute_backflow_eta_contribution(
-                    state_i,
-                    state_j,
-                    spin,
-                    bond_amplitude,
-                    eta1_value,
-                    eta2_value,
-                    eta3_value,
-                    eta4_value,
-                )
-                coefficient = eta_contribution.coefficient
-                if coefficient == zero(T)
-                    continue
-                end
-
-                target_row = row_offset == 1 ? target_row_up : target_row_down
-                @views site_block_buffer[row_offset, :] .+= coefficient .* base_orbitals[target_row, :]
-                if row_offset == 1
-                    has_eta_up = true
-                else
-                    has_eta_down = true
-                end
-            end
-        end
-
-        if has_eta_up
-            push!(active_group_up, source_group.group_name)
-        end
-        if has_eta_down
-            push!(active_group_down, source_group.group_name)
-        end
-    end
-
-    for epsilon_term in backflow_term.epsilon_terms
-        epsilon_shift = T(epsilon_term.epsilon_bf - 1.0)
-        if epsilon_shift == zero(T)
-            continue
-        end
-        for group_name in epsilon_term.group_names
-            if group_name in active_group_up
-                @views site_block_buffer[1, :] .+= epsilon_shift .* base_orbitals[row_up, :]
-                break
-            end
-        end
-        for group_name in epsilon_term.group_names
-            if group_name in active_group_down
-                @views site_block_buffer[2, :] .+= epsilon_shift .* base_orbitals[row_down, :]
-                break
-            end
-        end
-    end
+    get_state = site_j -> get_site_state_after_proposal(state_vector, proposal, site_j)
+    fill_backflow_site_row_from_state_getter!(
+        @view(site_block_buffer[1, :]),
+        base_orbitals,
+        backflow_term,
+        site_index,
+        1,
+        get_state,
+    )
+    fill_backflow_site_row_from_state_getter!(
+        @view(site_block_buffer[2, :]),
+        base_orbitals,
+        backflow_term,
+        site_index,
+        2,
+        get_state,
+    )
 
     return nothing
 end
@@ -1601,34 +1582,15 @@ function build_backflow_orbitals(
     n_sites = length(state_vector)
 
     for site_i in 1:n_sites
-        state_i = state_vector[site_i]
         for row_offset in 1:2
-            spin = backflow_spin_from_row_offset(row_offset)
-            if backflow_n_sigma(state_i, spin) == 0.0
-                continue
-            end
             row_i = 2 * (site_i - 1) + row_offset
-
-            active_group_names = Set{Symbol}()
-            for source_group in backflow_term.source_groups
-                add_source_group_eta_contributions_and_track_activation!(
-                    @view(backflow_orbitals[row_i, :]),
-                    base_orbitals,
-                    state_i,
-                    site_j -> state_vector[site_j],
-                    source_group,
-                    site_i,
-                    row_offset,
-                    active_group_names,
-                )
-            end
-
-            add_epsilon_contributions_from_active_groups!(
+            fill_backflow_site_row_from_state_getter!(
                 @view(backflow_orbitals[row_i, :]),
                 base_orbitals,
-                backflow_term.epsilon_terms,
-                row_i,
-                active_group_names,
+                backflow_term,
+                site_i,
+                row_offset,
+                site_j -> state_vector[site_j],
             )
         end
     end
