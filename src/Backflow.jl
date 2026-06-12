@@ -1351,53 +1351,6 @@ function add_backflow_correction_site_row_after_proposal!(
 end
 
 """
-用途: 使用逐 correction term 逻辑写入 proposal 后的单个 occupied row。
-
-参数:
-- `site_row_buffer::AbstractVector{T}`: 输出 buffer, 长度必须等于轨道数。
-- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
-- `state_vector::Vector{Int8}`: proposal 提交前的构型状态数组。
-- `backflow_term::CompositeBackflowTerm`: 组合式 Eq.(5) backflow 对象。
-- `proposal::MoveProposal`: Monte Carlo proposal。
-- `site_index::Int`: 待写入的站点编号。
-- `row_offset::Int`: 站点内部自旋行偏移, `1` 为 up, `2` 为 down。
-
-返回:
-- `nothing`。
-"""
-function fill_backflow_site_row_after_proposal_by_terms!(
-    site_row_buffer::AbstractVector{T},
-    base_orbitals::AbstractMatrix{T},
-    state_vector::Vector{Int8},
-    backflow_term::CompositeBackflowTerm,
-    proposal::MoveProposal,
-    site_index::Int,
-    row_offset::Int,
-) where {T}
-    row_index = initialize_site_row_base_after_proposal!(
-        site_row_buffer,
-        base_orbitals,
-        state_vector,
-        site_index,
-        row_offset,
-    )
-    for correction_term in backflow_term.terms
-        add_backflow_correction_site_row_after_proposal!(
-            site_row_buffer,
-            base_orbitals,
-            state_vector,
-            correction_term,
-            proposal,
-            site_index,
-            row_offset,
-            row_index,
-        )
-    end
-
-    return nothing
-end
-
-"""
 用途: 对 directed split backflow 使用 grouped fused 逻辑写入 proposal 后的单个 occupied row。
 
 数学公式:
@@ -1525,48 +1478,6 @@ function fill_backflow_site_row_after_proposal!(
         site_index,
         row_offset,
     )
-end
-
-"""
-用途: 使用逐 correction term 的旧逻辑写入 proposal 后的局域 site block。
-
-参数:
-- `site_block_buffer::AbstractMatrix{T}`: 输出 buffer, 形状必须为 `2 x N_orb`。
-- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
-- `state_vector::Vector{Int8}`: proposal 提交前的构型状态数组。
-- `backflow_term::CompositeBackflowTerm`: 组合式 Eq.(5) backflow 对象。
-- `proposal::MoveProposal`: Monte Carlo proposal。
-- `site_index::Int`: 待写入的站点编号。
-
-返回:
-- `nothing`。
-"""
-function fill_backflow_site_block_after_proposal_by_terms!(
-    site_block_buffer::AbstractMatrix{T},
-    base_orbitals::AbstractMatrix{T},
-    state_vector::Vector{Int8},
-    backflow_term::CompositeBackflowTerm,
-    proposal::MoveProposal,
-    site_index::Int,
-) where {T}
-    initialize_site_block_base_after_proposal!(
-        site_block_buffer,
-        base_orbitals,
-        state_vector,
-        site_index,
-    )
-    for correction_term in backflow_term.terms
-        add_backflow_correction_site_block_after_proposal!(
-            site_block_buffer,
-            base_orbitals,
-            state_vector,
-            correction_term,
-            proposal,
-            site_index,
-        )
-    end
-
-    return nothing
 end
 
 """
