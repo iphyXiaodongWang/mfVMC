@@ -485,6 +485,118 @@ end
 
 
 """
+用途: 根据当前构型按需写入一条 backflow orbital row, 不构造完整 `U_b(x)` 矩阵。
+
+数学公式:
+- `U_b(row,:) = sum_s w_s(row,x) * U_0(s,:)`.
+- `row_index` 是 PH 基底内部行编号, 即 `2 * (site_index - 1) + row_offset`.
+
+参数:
+- `row_buffer::AbstractVector{T}`: 输出 row buffer, 长度等于轨道数.
+- `vwf::vwf_det{T}`: determinant 波函数对象.
+- `row_index::Int`: 需要 materialize 的 PH 基底行编号.
+
+返回:
+- `nothing`.
+"""
+function fill_current_backflow_orbital_row!(
+    row_buffer::AbstractVector{T},
+    vwf::vwf_det{T},
+    row_index::Int,
+) where {T}
+    ws = ensure_ws!(vwf)
+    source_count = Backflow.fill_backflow_chain_rule_source_weights!(
+        ws.backflow_chain_rule_source_rows,
+        ws.backflow_chain_rule_source_weights,
+        vwf.sampler.state,
+        vwf.backflow,
+        row_index,
+    )
+    Backflow.fill_backflow_row_from_source_weights!(
+        row_buffer,
+        vwf.base_gs_U,
+        ws.backflow_chain_rule_source_rows,
+        ws.backflow_chain_rule_source_weights,
+        source_count,
+    )
+    return nothing
+end
+
+
+"""
+用途: 在 backflow 模式下只对当前 occupied basis rows 构造 Slater 矩阵.
+
+数学公式:
+- 第 `elec` 个 determinant column 为 `U_b(row_index,x)`.
+- `row_index = vwf.sampler.electron_locs[elec]`.
+
+参数:
+- `vwf::vwf_det{T}`: determinant 波函数对象.
+
+返回:
+- `nothing`. 结果写入 `vwf.awf_mat_t`.
+"""
+function fill_backflow_slater_matrix_from_occupied_rows!(vwf::vwf_det{T}) where {T}
+    ss = vwf.sampler
+    total_elec_count = total_elec(ss)
+    if size(vwf.awf_mat_t, 1) != total_elec_count
+        vwf.awf_mat_t = zeros(T, total_elec_count, total_elec_count)
+    end
+
+    for elec in 1:total_elec_count
+        row_index = ss.electron_locs[elec]
+        fill_current_backflow_orbital_row!(
+            @view(vwf.awf_mat_t[:, elec]),
+            vwf,
+            row_index,
+        )
+    end
+    return nothing
+end
+
+
+"""
+用途: 使用给定 sampler 的当前构型, 只对 occupied basis rows 构造 backflow Slater 矩阵.
+
+参数:
+- `output_matrix_t::AbstractMatrix{T}`: 输出转置 Slater 矩阵, 形状为 `N_elec x N_elec`.
+- `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`.
+- `sampler`: 已包含 `state` 与 `electron_locs` 的采样器.
+- `backflow::Backflow.AbstractBackflowTerm`: backflow 项.
+- `ws::R1R2WS{T}`: 工作缓冲区.
+
+返回:
+- `nothing`.
+"""
+function fill_backflow_slater_matrix_from_sampler_state!(
+    output_matrix_t::AbstractMatrix{T},
+    base_orbitals::AbstractMatrix{T},
+    sampler,
+    backflow::Backflow.AbstractBackflowTerm,
+    ws::R1R2WS{T},
+) where {T}
+    for elec in 1:total_elec(sampler)
+        row_index = sampler.electron_locs[elec]
+        source_count = Backflow.fill_backflow_chain_rule_source_weights!(
+            ws.backflow_chain_rule_source_rows,
+            ws.backflow_chain_rule_source_weights,
+            sampler.state,
+            backflow,
+            row_index,
+        )
+        Backflow.fill_backflow_row_from_source_weights!(
+            @view(output_matrix_t[:, elec]),
+            base_orbitals,
+            ws.backflow_chain_rule_source_rows,
+            ws.backflow_chain_rule_source_weights,
+            source_count,
+        )
+    end
+    return nothing
+end
+
+
+"""
 用途: 根据给定轨道矩阵与电子位置列表构造 Slater 方阵。
 
 参数:
