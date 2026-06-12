@@ -46,8 +46,6 @@ mutable struct vwf_det{T,S}
     base_gs_U::Matrix{T}
     gs_U::Matrix{T}
     gs_U_t::Matrix{T}
-    backflow_u::Matrix{T}
-
     awf_mat_t::Matrix{T}
     awf_inv::Matrix{T}
     awf_val::T
@@ -148,13 +146,11 @@ function vwf_det(
     base_gs_u = copy(U)
     gs_u = copy(U)
     gs_u_t = permutedims(U)
-    backflow_u = copy(U)
 
     return vwf_det{T,typeof(sampler)}(
         base_gs_u,      # base_gs_U
         gs_u,           # gs_U
         gs_u_t,         # gs_U_t
-        backflow_u,     # backflow_u
         awf_mat_t,      # awf_mat_t
         awf_inv,        # awf_inv (placeholder)
         T(0),
@@ -1118,74 +1114,6 @@ function collect_backflow_local_column_updates_into_cache!(
     return changed_count
 end
 
-"""
-用途: 在 proposal 被接受后, 重算所有 affected site rows 并刷新全局 backflow 轨道缓存。
-
-数学公式:
-- 对每个受影响站点 `i`, 写回 `U_b(i, up; x')` 与 `U_b(i, down; x')`。
-- ratio 阶段只需要 proposal 后 occupied rows; accept 后必须补全所有 affected rows,
-  保证后续电子移动到当前未占据 row 时 `gs_U/backflow_u` 仍与当前构型一致。
-
-参数:
-- `vwf::vwf_det{T}`: determinant 波函数对象。
-- `proposal::MoveProposal`: 已被接受的 Monte Carlo proposal。
-
-返回:
-- `nothing`。
-"""
-function refresh_backflow_affected_orbital_rows_after_accept!(
-    vwf::vwf_det{T},
-    proposal::MoveProposal,
-) where {T}
-    ws = ensure_ws!(vwf)
-    affected_sites = Backflow.collect_affected_site_indices(
-        vwf.sampler.state,
-        vwf.backflow,
-        proposal,
-    )
-    site_block_buffer = ws.cached_site_block_buffer
-
-    for site_index in affected_sites
-        Backflow.fill_backflow_site_block_after_proposal!(
-            site_block_buffer,
-            vwf.base_gs_U,
-            vwf.sampler.state,
-            vwf.backflow,
-            proposal,
-            site_index,
-            ws.backflow_chain_rule_source_rows,
-            ws.backflow_chain_rule_source_weights,
-        )
-
-        orbital_row = 2 * (site_index - 1) + 1
-        copyto!(
-            @view(vwf.backflow_u[orbital_row, :]),
-            @view(site_block_buffer[1, :]),
-        )
-        copyto!(
-            @view(vwf.backflow_u[orbital_row+1, :]),
-            @view(site_block_buffer[2, :]),
-        )
-        copyto!(
-            @view(vwf.gs_U[orbital_row, :]),
-            @view(site_block_buffer[1, :]),
-        )
-        copyto!(
-            @view(vwf.gs_U[orbital_row+1, :]),
-            @view(site_block_buffer[2, :]),
-        )
-        copyto!(
-            @view(vwf.gs_U_t[:, orbital_row]),
-            @view(site_block_buffer[1, :]),
-        )
-        copyto!(
-            @view(vwf.gs_U_t[:, orbital_row+1]),
-            @view(site_block_buffer[2, :]),
-        )
-    end
-
-    return nothing
-end
 
 
 """
@@ -1289,57 +1217,6 @@ function update_rankk!(
 end
 
 
-"""
-用途: 使用当前 rank-k cache 中保存的 proposal 后局域 backflow 行块刷新全局轨道矩阵。
-
-数学公式:
-- 对每个缓存站点 `i`, 将 `U_b(i, sigma; x')` 写回 `backflow_u`, `gs_U` 和转置缓存 `gs_U_t`。
-
-参数:
-- `vwf::vwf_det{T}`: determinant 波函数对象, 必须已经通过 `calc_backflow_ratio_local_update` 建立 cache。
-
-返回:
-- `nothing`。
-"""
-function apply_cached_backflow_orbital_rows!(vwf::vwf_det{T}) where {T}
-    ws = ensure_ws!(vwf)
-    if !ws.has_cached_rankk_update
-        error("Backflow rank-k cache is invalid. Call calc_backflow_ratio_local_update(vwf, proposal) before apply_cached_backflow_orbital_rows!(vwf).")
-    end
-
-    for affected_offset in 1:ws.cached_affected_count
-        site_index = ws.cached_affected_site_indices[affected_offset]
-        orbital_row = 2 * (site_index - 1) + 1
-        cached_block_row = 2 * (affected_offset - 1) + 1
-
-        copyto!(
-            @view(vwf.backflow_u[orbital_row, :]),
-            @view(ws.cached_affected_site_blocks[cached_block_row, :]),
-        )
-        copyto!(
-            @view(vwf.backflow_u[orbital_row+1, :]),
-            @view(ws.cached_affected_site_blocks[cached_block_row+1, :]),
-        )
-        copyto!(
-            @view(vwf.gs_U[orbital_row, :]),
-            @view(ws.cached_affected_site_blocks[cached_block_row, :]),
-        )
-        copyto!(
-            @view(vwf.gs_U[orbital_row+1, :]),
-            @view(ws.cached_affected_site_blocks[cached_block_row+1, :]),
-        )
-        copyto!(
-            @view(vwf.gs_U_t[:, orbital_row]),
-            @view(ws.cached_affected_site_blocks[cached_block_row, :]),
-        )
-        copyto!(
-            @view(vwf.gs_U_t[:, orbital_row+1]),
-            @view(ws.cached_affected_site_blocks[cached_block_row+1, :]),
-        )
-    end
-
-    return nothing
-end
 
 
 """

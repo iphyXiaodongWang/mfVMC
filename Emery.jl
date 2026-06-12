@@ -1913,7 +1913,6 @@ function update_column_nonph_ansatz!(
 
     copyto!(vwf.base_gs_U, gs_u)
     copyto!(vwf.gs_U, gs_u)
-    copyto!(vwf.backflow_u, gs_u)
     copyto!(vwf.gs_U_t, permutedims(gs_u))
 
     d_ut_matrix = zeros(Float64, size(gs_u, 2), size(gs_u, 1), length(wf_param_names))

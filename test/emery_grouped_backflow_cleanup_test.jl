@@ -951,7 +951,7 @@ end
         vwf.sampler.state,
         vwf.backflow,
     )
-    expected_slater = Matrix(full_orbitals[vwf.sampler.electron_locs, :])
+    expected_slater = full_orbitals[vwf.sampler.electron_locs, :]
 
     @test vwf.awf_mat_t ≈ transpose(expected_slater)
     @test vwf.awf_val ≈ det(expected_slater)
