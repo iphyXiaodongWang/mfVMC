@@ -30,9 +30,11 @@ export build_backflow_derivative_orbitals
 
 当前代码采用的组合式写法为:
 
-- `U_b(i, sigma, k; x) = U_0(i, sigma, k) + sum_m delta U_m(i, sigma, k; x)`,
-  其中 `m` 遍历 `epsilon`, `eta1`, `eta2`, `eta3_doublon_single`, `eta4`
-  correction terms。
+- 对固定 row `(i, sigma)`, 当前实现先生成 source-row 权重
+  `(source_row, weight)`, 再 materialize:
+  `U_b(row, k; x) = sum_s weight_s(row, x) * U_0(source_row_s, k)`。
+- eta 项贡献 target row 权重; epsilon 项只在对应 source group 有非零 eta contribution
+  时贡献本 row 权重 `epsilon_bf - 1`。
 
 其中:
 - `i, j` 为格点指标, `sigma` 为物理自旋标签, `k` 为轨道指标。
@@ -793,11 +795,12 @@ function initialize_site_row_base_after_proposal!(
 end
 
 """
-用途: 对 directed split backflow 使用 eta-driven epsilon 逻辑写入 proposal 后的单个 occupied row。
+用途: 为 proposal 后的单个 occupied row 分配临时 source-weight buffer 并写入 backflow row。
 
 数学公式:
-- 对固定 `(i,sigma)` 只计算该 row 需要的 eta1/eta2/eta3/eta4 contribution。
-- epsilon 仅在对应 source group 产生了非零 eta contribution 时激活。
+- 先调用 source-weight helper 得到 `U_b(row,:) = sum_s w_s U_0(s,:)` 的 `(s,w_s)`,
+  再将该线性组合写入 `site_row_buffer`。
+- 若调用方已有工作缓冲区, 优先使用带 `source_row_indices/source_row_weights` 的重载。
 
 参数:
 - `site_row_buffer::AbstractVector{T}`: 输出 buffer, 长度必须等于轨道数。
@@ -837,7 +840,12 @@ function fill_grouped_source_composite_site_row_after_proposal!(
 end
 
 """
-用途: 使用外部 source-weight buffer 写入 proposal 后的单个 backflow row, 避免热路径重复分配。
+用途: 使用外部 source-weight buffer 写入 proposal 后的单个 backflow row。
+
+数学公式:
+- `U_b(row,:) = sum_s w_s(row,x') * U_0(s,:)`。
+- `w_s(row,x')` 由 proposal 后的构型 `x'` 决定, eta 与 epsilon 激活逻辑只在
+  source-weight helper 中计算一次。
 
 参数:
 - `site_row_buffer::AbstractVector{T}`: 输出 row buffer, 长度必须等于轨道数。
@@ -966,15 +974,11 @@ function fill_backflow_site_row_after_proposal!(
 end
 
 """
-用途: 对 directed split backflow 使用 eta-driven epsilon 逻辑写入 proposal 后的局域 site block。
+用途: 为 proposal 后的局域 site block 分配临时 source-weight buffer 并写入两条 backflow row。
 
 数学公式:
-- 对每个 directed 组 `g in {dd, dp, pd, pp}` 和有向键 `(i,j)` 一次性计算
-  `eta1_g D_i H_j U_0(j,sigma)`,
-  `eta2_g n_{i,sigma} h_{i,-sigma} n_{j,-sigma} h_{j,sigma} U_0(j,sigma)`,
-  `eta3_g D_i n_{j,-sigma} h_{j,sigma} U_0(j,sigma)`,
-  `eta4_g n_{i,sigma} h_{i,-sigma} H_j U_0(j,sigma)`。
-- epsilon 仅在对应 source group 产生了非零 eta contribution 时激活。
+- 对 `row_offset in (1,2)` 分别生成 source-row 权重并 materialize。
+- 若调用方已有工作缓冲区, 优先使用带 `source_row_indices/source_row_weights` 的重载。
 
 参数:
 - `site_block_buffer::AbstractMatrix{T}`: 输出 buffer, 形状必须为 `2 x N_orb`。
@@ -1012,6 +1016,11 @@ end
 
 """
 用途: 使用外部 source-weight buffer 写入 proposal 后的局域 backflow site block。
+
+数学公式:
+- 对 site `i` 的两个 spin row 分别计算
+  `U_b(row,:) = sum_s w_s(row,x') * U_0(s,:)`。
+- 两个 row 共用同一组工作缓冲区, 每次 row 计算会覆盖缓冲区中的有效前缀。
 
 参数:
 - `site_block_buffer::AbstractMatrix{T}`: 输出 buffer, 形状必须为 `2 x N_orb`。
@@ -1070,8 +1079,9 @@ end
 用途: 写入组合式 Eq.(5) backflow 在 proposal 提交后的局域站点行块。
 
 数学公式:
-- `U_b(i, sigma; x') = U_0(i, sigma) + sum_m delta U_m(i, sigma; x')`,
-  其中 `m` 遍历 `epsilon, eta1, eta2, eta3_doublon_single, eta4` correction terms。
+- 对 site `i` 的两个 spin row 分别构造
+  `U_b(row,:) = sum_s w_s(row,x') * U_0(s,:)`。
+- 默认重载会分配临时 source-weight buffer; 热路径应使用带外部 buffer 的重载。
 
 参数:
 - `site_block_buffer::AbstractMatrix{T}`: 输出 buffer, 形状必须为 `2 x N_orb`。
@@ -1582,10 +1592,11 @@ end
 用途: 构造组合式 Eq.(5) backflow 的构型依赖轨道矩阵。
 
 数学公式:
-- `U_b = U_0 + sum_m delta U_m`, 其中每个 `delta U_m` 由一个
-  `AbstractBackflowCorrectionTerm` 提供。
-- epsilon 由 eta contribution 的实际数值驱动: 只有当某行对应的 source group
-  中有至少一条有向键产生非零 eta coefficient 时, epsilon 才激活。
+- 对每个 spin-resolved row 先构造 source-row 权重列表 `(s,w_s)`, 再写入
+  `U_b(row,:) = sum_s w_s(row,x) * U_0(s,:)`。
+- eta 项负责给 target row 添加权重; epsilon 由 eta contribution 的实际数值驱动:
+  只有当某行对应的 source group 中有至少一条有向键产生非零 eta coefficient 时,
+  epsilon 才对本 row 添加 `epsilon_bf - 1` 权重。
 
 参数:
 - `base_orbitals::AbstractMatrix{T}`: 裸轨道矩阵 `U_0`。
@@ -1889,7 +1900,7 @@ function fill_backflow_chain_rule_row!(
 end
 
 """
-用途: 初始化指定 row 的 backflow chain-rule source-row 权重列表。
+用途: 初始化指定 row 的 backflow source-row 权重列表。
 
 参数:
 - `source_row_indices::AbstractVector{Int}`: 输出 source row 编号 buffer, 长度至少为 `2 * length(state_vector)`。
@@ -1901,7 +1912,8 @@ end
 - `Tuple{Int, Int, Int}`: `(site_index, row_offset, source_count)`。
 
 公式:
-- 初始项为恒等变换, 即 `dU_b(row) = 1 * dU_0(row) + ...`。
+- 初始项为恒等变换, 即 `U_b(row,:) = 1 * U_0(row,:) + ...`。
+- 同一组权重也可用于 chain rule: `dU_b(row,:) = sum_s w_s dU_0(s,:)`。
 """
 function initialize_backflow_chain_rule_source_weights!(
     source_row_indices::AbstractVector{Int},
@@ -1999,7 +2011,7 @@ function add_backflow_chain_rule_source_weight!(
 end
 
 """
-用途: 使用 grouped source 逻辑将单个 source group 的 chain rule source-weight 贡献累加到列表, 同时跟踪产生了非零 eta 的 group 名称.
+用途: 使用 grouped source 逻辑将单个 source group 的 source-weight 贡献累加到列表, 同时跟踪产生了非零 eta 的 group 名称.
 
 参数:
 - `source_row_indices::AbstractVector{Int}`: source row 编号 buffer.
@@ -2075,7 +2087,7 @@ function add_source_group_chain_rule_source_weights_and_track!(
 end
 
 """
-用途: 将指定 output row 的 backflow chain-rule 展开为 source rows 与权重。
+用途: 将指定 output row 的 backflow 线性变换展开为 source rows 与权重。
 
 参数:
 - `source_row_indices::AbstractVector{Int}`: 输出 source row 编号 buffer。
@@ -2088,8 +2100,11 @@ end
 - `Int`: 有效 source row 数量。
 
 公式:
-- 若 `(B_x[dU_0])(row,:) = sum_s w_s dU_0(s,:)`, 本函数返回所有 `(s,w_s)`。
-- epsilon 只在对应 source group 产生非零 eta contribution 时才贡献权重。
+- 若 `U_b(row,:) = (B_x[U_0])(row,:) = sum_s w_s U_0(s,:)`,
+  本函数返回所有 `(s,w_s)`。
+- chain rule 路径可复用同一组权重:
+  `(B_x[dU_0])(row,:) = sum_s w_s dU_0(s,:)`。
+- epsilon 只在对应 source group 产生非零 eta contribution 时才贡献本 row 权重。
 """
 function fill_backflow_chain_rule_source_weights!(
     source_row_indices::AbstractVector{Int},
