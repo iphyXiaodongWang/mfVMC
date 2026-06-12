@@ -968,4 +968,3 @@ end
     init_gswf!(vwf)
     @test_throws ErrorException mfVMC.VMC.ratio_rank1(vwf, 1, vwf.sampler.electron_locs[1])
 end
-
