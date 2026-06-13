@@ -403,6 +403,66 @@ function parse_column_bool_flag(raw_value::AbstractString, option_name::Abstract
     error("Invalid value for $(option_name): $(raw_value).")
 end
 
+"""
+用途: 判断参数名是否属于 Hubbard_bf.jl 的 backflow 参数。
+
+参数:
+- `param_name::Symbol`: 当前 ansatz 的参数名。
+
+返回:
+- `Bool`: 参数名以 `bf_` 开头时返回 `true`。
+"""
+function is_column_backflow_parameter(param_name::Symbol)::Bool
+    return startswith(String(param_name), "bf_")
+end
+
+"""
+用途: 从 JSON 构造 Hubbard_bf.jl 的初始参数, 并允许 JSON 缺失当前 backflow 参数。
+
+参数:
+- `json_path::AbstractString`: 参数 JSON 路径。
+- `param_names::Vector{Symbol}`: 当前 ansatz 的参数名顺序。
+- `default_params::Vector{Float64}`: 当前命令行和构造器给出的默认参数。
+
+返回:
+- `Vector{Float64}`: 按 `param_names` 顺序排列的初始参数。
+
+说明:
+- 若从不含 backflow 的 JSON 启动 backflow 计算, 缺失的 `bf_*` 参数使用
+  `default_params` 中对应位置的默认值。
+- 非 backflow 参数缺失仍然报错。
+"""
+function build_column_init_params_from_json(
+    json_path::AbstractString,
+    param_names::Vector{Symbol},
+    default_params::Vector{Float64},
+)::Vector{Float64}
+    isfile(json_path) || error("JSON file not found: $(json_path)")
+    if length(default_params) != length(param_names)
+        error("default_params length $(length(default_params)) does not match param_names length $(length(param_names)).")
+    end
+
+    raw_dict = JSON.parsefile(json_path)
+    init_params = Float64[]
+    missing_keys = String[]
+
+    for param_name in param_names
+        key = String(param_name)
+        if haskey(raw_dict, key)
+            push!(init_params, Float64(raw_dict[key]))
+        elseif is_column_backflow_parameter(param_name)
+            push!(init_params, default_params[length(init_params) + 1])
+        else
+            push!(missing_keys, key)
+        end
+    end
+
+    if !isempty(missing_keys)
+        error("Missing parameters in json: $(join(missing_keys, ", "))")
+    end
+    return init_params
+end
+
 #=
 """
 用途: 更新 column nonPH determinant 波函数和参数导数。
@@ -892,7 +952,7 @@ function main_column_nonph_backflow()::Nothing
     param_names = vcat(wf_param_names, proj_param_names, backflow_param_name_list)
 
     if !isempty(args["init_params_json"])
-        init_params = build_init_params_from_json(args["init_params_json"], param_names)
+        init_params = build_column_init_params_from_json(args["init_params_json"], param_names, init_params)
         if is_root
             println("Loaded initial parameters from json: $(args["init_params_json"])")
         end
