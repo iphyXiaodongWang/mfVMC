@@ -17,10 +17,8 @@ mutable struct R1R2WS{T}
 
     has_cached_rankk_update::Bool
     cached_changed_count::Int
-    cached_affected_count::Int
     cached_changed_electron_ids::Vector{Int}
     cached_changed_row_indices::Vector{Int}
-    cached_affected_site_indices::Vector{Int}
     cached_sorted_electron_ids::Vector{Int}
     cached_sorted_row_indices::Vector{Int}
     cached_permutation::Vector{Int}
@@ -28,8 +26,6 @@ mutable struct R1R2WS{T}
     cached_c_matrix::Matrix{T}
     cached_small_k_matrix::Matrix{T}
     cached_small_k_inverse::Matrix{T}
-    cached_site_block_buffer::Matrix{T}
-    cached_affected_site_blocks::Matrix{T}
 
     backflow_chain_rule_buffer::Matrix{T}
     orbital_log_derivative_row_buffer::Matrix{T}
@@ -117,15 +113,11 @@ function vwf_det(
         T[],
         false,
         0,
-        0,
         Int[],
         Int[],
         Int[],
         Int[],
         Int[],
-        Int[],
-        Matrix{T}(undef, 0, 0),
-        Matrix{T}(undef, 0, 0),
         Matrix{T}(undef, 0, 0),
         Matrix{T}(undef, 0, 0),
         Matrix{T}(undef, 0, 0),
@@ -177,7 +169,6 @@ end
 function reset_cached_rankk_update!(ws::R1R2WS)
     ws.has_cached_rankk_update = false
     ws.cached_changed_count = 0
-    ws.cached_affected_count = 0
     return nothing
 end
 
@@ -194,10 +185,8 @@ function ensure_ws!(v::vwf_det{T,S}) where {T,S}
             Vector{T}(undef, N), Vector{T}(undef, N),
             false,
             0,
-            0,
             Vector{Int}(undef, N),
             Vector{Int}(undef, N),
-            Vector{Int}(undef, n_sites),
             Vector{Int}(undef, N),
             Vector{Int}(undef, N),
             Vector{Int}(undef, N),
@@ -205,8 +194,6 @@ function ensure_ws!(v::vwf_det{T,S}) where {T,S}
             Matrix{T}(undef, N, N),
             Matrix{T}(undef, N, N),
             Matrix{T}(undef, N, N),
-            Matrix{T}(undef, 2, N),
-            Matrix{T}(undef, 2 * n_sites, N),
             Matrix{T}(undef, 2 * n_sites, N),
             Matrix{T}(undef, N, N),
             Vector{Int}(undef, 2 * n_sites),
@@ -273,7 +260,12 @@ end
 
 
 """
-用途: 为 determinant 波函数设置 backflow 对象, 并立即刷新当前有效轨道矩阵。
+用途: 为 determinant 波函数设置 backflow 对象, 并刷新 workspace 缓冲区尺寸。
+
+注意:
+- 本函数不会重建 determinant 的 Slater 矩阵。
+- 调用后若需要立即使用新 backflow, 应显式调用 `init_gswf!` 或
+  `rebuild_slater_state!`。
 
 参数:
 - `vwf::vwf_det`: determinant 波函数对象。
@@ -1060,7 +1052,6 @@ function collect_backflow_local_column_updates_into_cache!(
         proposal,
     )
 
-    ws.cached_affected_count = 0
     changed_count = 0
     site_row_buffer = ws.dr1
 
