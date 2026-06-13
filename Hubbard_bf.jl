@@ -304,10 +304,10 @@ end
 
 参数:
 - `source_bonds, source_amplitudes`: backflow source 数据。
-- `bf_epsilon, bf_eta1, bf_eta2, bf_eta3::Float64`: Eq.(5) 参数。
+- `bf_epsilon, bf_eta1, bf_eta2, bf_eta3, bf_eta4::Float64`: Eq.(5) 参数。
 
 返回:
-- `CompositeBackflowTerm`: 按 `epsilon, eta1, eta2, eta3` 排列。
+- `CompositeBackflowTerm`: 按 `epsilon, eta1, eta2, eta3, eta4` 排列。
 """
 function build_column_composite_backflow(
     source_bonds::Vector{Tuple{Int,Int}},
@@ -316,34 +316,37 @@ function build_column_composite_backflow(
     bf_eta1::Float64,
     bf_eta2::Float64,
     bf_eta3::Float64,
+    bf_eta4::Float64,
 )
-    return CompositeBackflowTerm([
+    epsilon_terms = [
         BackflowEpsilonTerm(
             param_name=:bf_epsilon,
             epsilon_bf=bf_epsilon,
-            epsilon_mask_terms=Symbol[:eta1, :eta2, :eta3],
-            source_bonds=source_bonds,
-            source_amplitudes=source_amplitudes,
+            group_names=Symbol[:hubbard],
         ),
+    ]
+    hubbard_group = mfVMC.Backflow.build_directed_backflow_source_group(
+        :hubbard,
+        source_bonds,
+        source_amplitudes,
         BackflowEta1DoublonHoleTerm(
             param_name=:bf_eta1,
             eta1_bf=bf_eta1,
-            source_bonds=source_bonds,
-            source_amplitudes=source_amplitudes,
         ),
         BackflowEta2SpinExchangeTerm(
             param_name=:bf_eta2,
             eta2_bf=bf_eta2,
-            source_bonds=source_bonds,
-            source_amplitudes=source_amplitudes,
         ),
-        BackflowEta3MixedVirtualHopTerm(
+        BackflowEta3DoublonSingleTerm(
             param_name=:bf_eta3,
             eta3_bf=bf_eta3,
-            source_bonds=source_bonds,
-            source_amplitudes=source_amplitudes,
         ),
-    ])
+        BackflowEta4SingleHoleTerm(
+            param_name=:bf_eta4,
+            eta4_bf=bf_eta4,
+        ),
+    )
+    return CompositeBackflowTerm(epsilon_terms, [hubbard_group])
 end
 
 """
@@ -364,6 +367,7 @@ function build_column_optional_backflow(
     bf_eta1::Float64,
     bf_eta2::Float64,
     bf_eta3::Float64,
+    bf_eta4::Float64,
 )
     if !enable_backflow
         return NoBackflowTerm()
@@ -375,6 +379,7 @@ function build_column_optional_backflow(
         bf_eta1,
         bf_eta2,
         bf_eta3,
+        bf_eta4,
     )
 end
 
@@ -663,7 +668,6 @@ function update_column_nonph_ansatz!(
 
     copyto!(vwf.base_gs_U, gs_u)
     copyto!(vwf.gs_U, gs_u)
-    copyto!(vwf.backflow_u, gs_u)
     copyto!(vwf.gs_U_t, permutedims(gs_u))
 
     d_ut_matrix = zeros(Float64, size(gs_u, 2), size(gs_u, 1), length(wf_param_names))
@@ -805,6 +809,9 @@ function parse_column_bf_commandline()
         "--bf_eta3"
         arg_type = Float64
         default = 0.0
+        "--bf_eta4"
+        arg_type = Float64
+        default = 0.0
     end
     return parse_args(settings)
 end
@@ -871,6 +878,7 @@ function main_column_nonph_backflow()::Nothing
         args["bf_eta1"],
         args["bf_eta2"],
         args["bf_eta3"],
+        args["bf_eta4"],
     )
     projector = build_hubbard_truncated_projector(lx, ly, args["g"], x_boundary; vj1=args["vj1"], vj2=args["vj2"])
 

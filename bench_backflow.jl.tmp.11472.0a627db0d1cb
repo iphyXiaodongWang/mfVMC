@@ -1,0 +1,165 @@
+# 用途: 对比 simplify 分支与主分支 Emery backflow 性能。
+# 用法: julia --project=. bench_backflow.jl
+# 在目标分支的 repo 根目录运行。
+
+using Random
+using LinearAlgebra
+using Printf
+
+push!(LOAD_PATH, joinpath(@__DIR__, "src"))
+push!(LOAD_PATH, @__DIR__)
+
+using mfVMC
+import mfVMC.Backflow
+import mfVMC.VMC: rebuild_slater_state!, init_gswf!
+import mfVMC.VMC: calc_backflow_ratio_local_update, accept_backflow_local_update!
+import mfVMC.VMC: calc_ratio_rebuild
+
+const N_SITES_X = 4
+const N_SITES_Y = 2
+const N_THERM = 200
+const N_STEPS = 2000
+
+"""
+用途: 构造小尺寸 Emery grouped backflow 测试用 vwf_det 对象。
+
+参数:
+- seed::Int: 随机种子.
+
+返回:
+- `vwf_det`: 已初始化的 determinant 波函数对象。
+"""
+function build_bench_vwf(seed::Int=42)
+    rng = MersenneTwister(seed)
+    lx = N_SITES_X
+    ly = N_SITES_Y
+    n_sites = Backflow.emery_n_sites(lx, ly)
+
+    # 构造掺杂态构型: "Dhud" 周期重复
+    state_chars = join(("Dhud"[mod1(site_index, 4)] for site_index in 1:n_sites))
+    sampler = mfVMC.Sampler.init_config_Hubbard_by_state_char(state_chars)
+
+    # 构造 backflow source data
+    dd_src_bonds, dd_src_amps, dp_src_bonds, dp_src_amps,
+    pd_src_bonds, pd_src_amps, pp_src_bonds, pp_src_amps =
+        mfVMC.Backflow.build_emery_backflow_source_data_by_directed_orbital_type(
+            lx, ly; tpd=1.0, tpp=0.45, bcy=1.0)
+
+    backflow = mfVMC.Backflow.build_column_directed_emery_backflow(
+        dd_src_bonds, dd_src_amps, dp_src_bonds, dp_src_amps,
+        pd_src_bonds, pd_src_amps, pp_src_bonds, pp_src_amps,
+        0.91, 1.08, 0.11, -0.07, 0.05, -0.03, -0.13, 0.17,
+        -0.19, 0.23, 0.29, -0.31, 0.37, -0.41, -0.43, 0.47,
+        -0.53, 0.59)
+
+    n_rows = 2 * n_sites
+    n_electrons = length(sampler.electron_locs)
+    base_orbitals = [
+        0.2 * row_idx + 0.07 * orb_idx + 0.003 * row_idx * orb_idx
+        for row_idx in 1:n_rows, orb_idx in 1:n_electrons
+    ]
+    return mfVMC.vwf_det(base_orbitals, sampler; backflow=backflow)
+end
+
+"""
+用途: 运行 MC 预热, 跳过初始不稳定态。
+
+参数:
+- vwf: 波函数对象.
+- kernel: MC kernel.
+- rng: 随机数生成器.
+- n_therm: 预热步数.
+"""
+function thermalize!(vwf, kernel, rng, n_therm::Int)
+    for _ in 1:n_therm
+        proposal = propose_move!(vwf, kernel, rng)
+        ratio = calc_backflow_ratio_local_update(vwf, proposal)
+        if proposal.site1 != 0 && rand(rng) < min(1.0, abs2(ratio))
+            accept_backflow_local_update!(vwf, proposal, ratio)
+        end
+    end
+end
+
+"""
+用途: 运行基准 MC 步骤并计时。
+
+参数:
+- vwf: 波函数对象.
+- kernel: MC kernel.
+- rng: 随机数生成器.
+- n_steps: MC 步数.
+
+返回:
+- `(elapsed_sec, n_accepted)`: 耗时(秒)与接受次数。
+"""
+function benchmark_mc_steps!(vwf, kernel, rng, n_steps::Int)
+    n_accepted = 0
+    t_start = time()
+    for _ in 1:n_steps
+        proposal = propose_move!(vwf, kernel, rng)
+        ratio = calc_backflow_ratio_local_update(vwf, proposal)
+        if proposal.site1 != 0 && rand(rng) < min(1.0, abs2(ratio))
+            accept_backflow_local_update!(vwf, proposal, ratio)
+            n_accepted += 1
+        end
+    end
+    elapsed = time() - t_start
+    return elapsed, n_accepted
+end
+
+function main()
+    println("="^60)
+    println("Emery Backflow 性能基准测试")
+    println("系统: $(N_SITES_X)x$(N_SITES_Y), 预热=$N_THERM, MC步数=$N_STEPS")
+    println("="^60)
+
+    # --- 1. 构建与初始化 ---
+    t0 = time()
+    vwf = build_bench_vwf(42)
+    t_build = time() - t0
+    @printf("[Build]  构造 vwf_det:           %.4f s\n", t_build)
+
+    t0 = time()
+    init_gswf!(vwf)
+    t_init = time() - t0
+    @printf("[Init]   init_gswf! (全量重建):   %.4f s\n", t_init)
+
+    # --- 2. 全量重建 ---
+    t0 = time()
+    for _ in 1:100
+        rebuild_slater_state!(vwf)
+    end
+    t_rebuild = (time() - t0) / 100
+    @printf("[Rebuild] rebuild_slater_state! 平均: %.6f s (100次)\n", t_rebuild)
+
+    # --- 3. 预热 ---
+    rng = MersenneTwister(123)
+    kernel = build_kernel(vwf)
+    t0 = time()
+    thermalize!(vwf, kernel, rng, N_THERM)
+    t_therm = time() - t0
+    @printf("[Therm]   预热 %d 步:              %.4f s\n", N_THERM, t_therm)
+
+    # --- 4. MC 采样 ---
+    rng = MersenneTwister(456)
+    kernel = build_kernel(vwf)
+    elapsed, n_acc = benchmark_mc_steps!(vwf, kernel, rng, N_STEPS)
+    @printf("[MC]      %d 步 (接受=%d):        %.4f s\n", N_STEPS, n_acc, elapsed)
+    @printf("[MC]      平均每步:               %.6f s\n", elapsed / N_STEPS)
+
+    # --- 5. calc_ratio_rebuild ---
+    rng = MersenneTwister(789)
+    kernel = build_kernel(vwf)
+    proposal = propose_move!(vwf, kernel, rng)
+    t0 = time()
+    for _ in 1:100
+        calc_ratio_rebuild(vwf, proposal)
+    end
+    t_ratio = (time() - t0) / 100
+    @printf("[Rebuild] calc_ratio_rebuild 平均: %.6f s (100次)\n", t_ratio)
+
+    println("="^60)
+    println("测试完成")
+end
+
+main()
