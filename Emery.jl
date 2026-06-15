@@ -1696,6 +1696,37 @@ function parse_column_bool_flag(raw_value::AbstractString, option_name::Abstract
 end
 
 """
+用途: 解析 column Emery 命令行中的 doping 参数, 支持小数和分数字符串。
+
+参数:
+- `raw_value::AbstractString`: doping 输入, 例如 `"0.125"` 或 `"5/36"`。
+- `option_name::AbstractString`: 选项名, 用于错误信息。
+
+返回:
+- `Float64`: 解析后的 doping 数值。
+
+公式:
+- 小数输入直接解析为 `Float64`。
+- 分数输入按 `numerator / denominator` 计算, 即 `"5/36" -> 5 / 36`。
+"""
+function parse_column_doping_value(raw_value::AbstractString, option_name::AbstractString)::Float64
+    normalized_value = strip(raw_value)
+    if occursin("/", normalized_value)
+        fraction_parts = split(normalized_value, "/")
+        if length(fraction_parts) != 2
+            error("Invalid fraction for $(option_name): $(raw_value). Expected numerator/denominator.")
+        end
+        numerator = parse(Float64, strip(fraction_parts[1]))
+        denominator = parse(Float64, strip(fraction_parts[2]))
+        if denominator == 0.0
+            error("Invalid fraction for $(option_name): denominator must be nonzero.")
+        end
+        return numerator / denominator
+    end
+    return parse(Float64, normalized_value)
+end
+
+"""
 用途: 判断参数名是否属于 Emery backflow 参数。
 
 参数:
@@ -2034,8 +2065,8 @@ function parse_column_bf_commandline()
         arg_type = String
         default = "SR"
         "--doping"
-        arg_type = Float64
-        default = 0.125
+        arg_type = String
+        default = "0.125"
         "--ansatz"
         arg_type = String
         default = "Stripe"
@@ -2156,7 +2187,7 @@ function main_column_nonph_backflow()::Nothing
     bcy = args["bcy"]
     n_sites = emery_n_sites(lx, ly)
     target_sz = args["target_sz"]
-    doping = args["doping"]
+    doping = parse_column_doping_value(args["doping"], "--doping")
     lr = args["lr"]
     lr_end = isnan(args["lr_end"]) ? lr : args["lr_end"]
     job = args["job"]

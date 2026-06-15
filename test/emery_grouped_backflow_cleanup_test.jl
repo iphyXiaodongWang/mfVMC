@@ -968,3 +968,9 @@ end
     init_gswf!(vwf)
     @test_throws ErrorException mfVMC.VMC.ratio_rank1(vwf, 1, vwf.sampler.electron_locs[1])
 end
+
+@testset "Emery doping parser accepts fractions" begin
+    @test parse_column_doping_value("5/36", "--doping") ≈ 5 / 36
+    @test parse_column_doping_value("0.125", "--doping") == 0.125
+    @test_throws ErrorException parse_column_doping_value("5/0", "--doping")
+end
