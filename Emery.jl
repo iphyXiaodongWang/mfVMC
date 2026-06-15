@@ -2018,6 +2018,10 @@ function parse_column_bf_commandline()
         "--lr_end"
         arg_type = Float64
         default = NaN
+        "--eigen_cutoff"
+        arg_type = Float64
+        default = 0.0
+        help = "SR 特征值截断阈值, 保留 lambda_i / lambda_max >= eigen_cutoff 的方向. 0 表示不做截断"
         "--init_params_json"
         arg_type = String
         default = ""
@@ -2312,7 +2316,12 @@ function main_column_nonph_backflow()::Nothing
     folder = "logs"
     mkpath(folder)
     if job == "SR"
-        sr_params = SRParams(vmc_params=meas_params, n_steps=args["nSR"], lr=lr)
+        sr_params = SRParams(
+            vmc_params=meas_params,
+            n_steps=args["nSR"],
+            lr=lr,
+            eigen_cutoff=args["eigen_cutoff"],
+        )
         exp_lr_func = build_exponential_lr_func(lr, lr_end, args["nSR"])
         update_vwf_func! = (vwf, params) -> @timed "update_column_nonph_ansatz!" update_column_nonph_ansatz!(
             vwf,
