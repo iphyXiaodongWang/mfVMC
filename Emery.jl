@@ -12,7 +12,6 @@ push!(LOAD_PATH, @__DIR__)
 
 using mfVMC
 import mfVMC.Timing: @timed, ENABLE_TIMING, timing_reset!, timing_report
-using Utils: add_term_ij_nonPH, compute_eig_and_dU_reg1
 
 ENABLE_TIMING[] = false
 
@@ -883,48 +882,6 @@ function build_column_emery_nonph_dh_dparam(
 
     derivative_params = ColumnEmeryNonPHParams(; derivative_params_kwargs...)
     return Matrix(build_column_emery_nonph_hamiltonian(derivative_params))
-end
-
-"""
-用途: 生成 column-resolved nonPH Emery determinant 的占据轨道和参数导数。
-
-数学公式:
-- 对 number-conserving Hamiltonian `H U = U epsilon` 对角化。
-- nonPH determinant 取最低 `N_e` 个单粒子轨道。
-
-参数:
-- `params::ColumnEmeryNonPHParams`: mean-field 参数。
-- `param_names::Vector{Symbol}`: 需要求导的 mean-field 参数名。
-- `n_occupied_orbitals::Int`: 占据轨道数, 等于真实电子数。
-
-返回:
-- `(epsilon, occupied_orbitals, d_ut_params)`。
-"""
-function make_column_emery_nonph_ansatz_and_derivs(
-    params::ColumnEmeryNonPHParams;
-    param_names::Vector{Symbol}=Symbol[],
-    n_occupied_orbitals::Int,
-)
-    hamiltonian = Matrix(build_column_emery_nonph_hamiltonian(params))
-    hamiltonian_derivatives = Dict{Symbol,Matrix{Float64}}()
-    for param_name in param_names
-        hamiltonian_derivatives[param_name] = build_column_emery_nonph_dh_dparam(params, param_name)
-    end
-
-    epsilon, full_orbitals, _, orbital_derivatives = compute_eig_and_dU_reg1(
-        hamiltonian,
-        hamiltonian_derivatives,
-    )
-    if n_occupied_orbitals < 0 || n_occupied_orbitals > size(full_orbitals, 2)
-        error("n_occupied_orbitals=$(n_occupied_orbitals) is outside 0:$(size(full_orbitals, 2)).")
-    end
-
-    occupied_orbitals = real.(full_orbitals[:, 1:n_occupied_orbitals])
-    d_ut_params = Dict{Symbol,Matrix{Float64}}()
-    for param_name in param_names
-        d_ut_params[param_name] = permutedims(real.(orbital_derivatives[param_name][:, 1:n_occupied_orbitals]))
-    end
-    return epsilon, occupied_orbitals, d_ut_params
 end
 
 """
@@ -1917,6 +1874,7 @@ function update_column_nonph_ansatz!(
     nparams_proj::Int=0,
     nparams_backflow::Int=0,
     fixed_chi1_dp::Float64=0.0,
+    dense_derivative_workspace=nothing,
 )::Nothing
     total_param_count = length(param_names)
     nparams_wf = total_param_count - nparams_proj - nparams_backflow
@@ -1936,21 +1894,23 @@ function update_column_nonph_ansatz!(
         bcy;
         fixed_chi1_dp=fixed_chi1_dp,
     )
-    _, gs_u, d_ut_params = make_column_emery_nonph_ansatz_and_derivs(
+
+    n_spinful = 2 * emery_n_sites(lx, ly)
+    dense_ansatz = make_column_emery_dense_tensor_shared(
         nonph_params;
         param_names=wf_param_names,
         n_occupied_orbitals=n_occupied_orbitals,
+        workspace=dense_derivative_workspace,
+        nspin=n_spinful,
+        build_hamiltonian=params_ref -> Matrix(build_column_emery_nonph_hamiltonian(params_ref)),
+        build_dh_dparam=build_column_emery_nonph_dh_dparam,
     )
 
-    copyto!(vwf.base_gs_U, gs_u)
-    copyto!(vwf.gs_U, gs_u)
-    copyto!(vwf.gs_U_t, permutedims(gs_u))
+    copyto!(vwf.base_gs_U, dense_ansatz.U_occ)
+    copyto!(vwf.gs_U, dense_ansatz.U_occ)
+    copyto!(vwf.gs_U_t, permutedims(dense_ansatz.U_occ))
 
-    d_ut_matrix = zeros(Float64, size(gs_u, 2), size(gs_u, 1), length(wf_param_names))
-    for (param_index, param_name) in enumerate(wf_param_names)
-        d_ut_matrix[:, :, param_index] = d_ut_params[param_name]
-    end
-    update_vwf_params!(vwf, wf_param_names, d_ut_matrix)
+    update_vwf_params!(vwf, wf_param_names, dense_ansatz.dUt_tensor)
 
     if !isempty(projector_param_names)
         update_vwf_projector_params!(vwf, projector_param_names, projector_param_values)
@@ -2327,6 +2287,13 @@ function main_column_nonph_backflow()::Nothing
         println("column Emery nonPH particle numbers: N_up=$(nup), N_down=$(ndn), N_e=$(nelec), N_sites=$(n_sites)")
     end
 
+    dense_derivative_workspace = setup_emery_dense_derivative_workspace(
+        session,
+        nelec,
+        2 * n_sites,
+        length(wf_param_names),
+    )
+
     update_column_nonph_ansatz!(
         vwf,
         param_names,
@@ -2339,6 +2306,7 @@ function main_column_nonph_backflow()::Nothing
         nparams_proj=nparams_proj,
         nparams_backflow=nparams_backflow,
         fixed_chi1_dp=fixed_chi1_dp,
+        dense_derivative_workspace=dense_derivative_workspace,
     )
 
     folder = "logs"
@@ -2358,6 +2326,7 @@ function main_column_nonph_backflow()::Nothing
             nparams_proj=nparams_proj,
             nparams_backflow=nparams_backflow,
             fixed_chi1_dp=fixed_chi1_dp,
+            dense_derivative_workspace=dense_derivative_workspace,
         )
         run_sr_optimization(
             ham,

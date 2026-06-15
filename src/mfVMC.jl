@@ -46,12 +46,25 @@ export build_backflow_orbitals
 export fill_backflow_chain_rule_orbitals!
 
 # ------------------
+include("MPI_VMC_Utils.jl")
+using .MPI_VMC_Utils
+
+export MPISession, init_mpi_session, init_node_mpi_session
+export ObservableBuffer, register_scalar!, register_vector!, register_matrix!
+export reset_buffers!, increment_counter!, accumulate_sample!, accumulate_sr_matrix!
+export record_scalar!
+export mpi_reduce_all, mpi_gather_scalar
+
+# ------------------
 include("Utils.jl")
 using .Utils
 using .Utils
 export compute_eig_and_dU_reg1, expand_spatial_to_spinful, add_term_ij_PH, add_term_ij_nonPH, add_term_ij_pfa_pairing, blocking_binning, extract_min_energy
 export pinv_derivative
 export build_init_params_from_json
+export setup_emery_dense_derivative_workspace
+export fill_emery_dense_derivative_slice!
+export make_column_emery_dense_tensor_shared
 # ------------------
 include("Timing.jl")
 using .Timing
@@ -73,15 +86,6 @@ export get_Sz, get_Hole, get_Doublon
 include("Model.jl")
 using .Model
 export HeisenbergModel, HubbardModel, GeneralModel, OperatorTerm, local_energy
-
-include("MPI_VMC_Utils.jl")
-using .MPI_VMC_Utils
-
-export MPISession, init_mpi_session, init_node_mpi_session
-export ObservableBuffer, register_scalar!, register_vector!, register_matrix!
-export reset_buffers!, increment_counter!, accumulate_sample!, accumulate_sr_matrix!
-export record_scalar!
-export mpi_reduce_all, mpi_gather_scalar
 
 include("Driver.jl")
 using .Driver

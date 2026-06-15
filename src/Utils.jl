@@ -3,12 +3,18 @@ module Utils
 using LinearAlgebra
 using Statistics
 using JSON
+using MPI
+
+using ..MPI_VMC_Utils: init_node_mpi_session
 
 export compute_eig_and_dU_reg1, expand_spatial_to_spinful, add_term_ij_PH, add_term_ij_nonPH, add_term_ij_pfa_pairing
 export pinv_derivative
 export blocking_binning
 export extract_min_energy
 export build_init_params_from_json
+export setup_emery_dense_derivative_workspace
+export fill_emery_dense_derivative_slice!
+export make_column_emery_dense_tensor_shared
 
 """
     build_init_params_from_json(
@@ -438,6 +444,203 @@ function extract_min_energy(
     println("Min step: $(min_step)")
     println("Saved params to: $(final_output_path)")
     return min_energy
+end
+
+"""
+用途: 构造 MPI 共享内存中的 dUt 3D 张量 workspace, 同节点所有 rank 共享一份物理内存.
+
+参数:
+- session: MPISession, 全局 MPI session.
+- nocc::Int: 占据轨道数.
+- nspin::Int: spinful 单粒子基底维度.
+- nparams::Int: mean-field 参数数量.
+
+返回:
+- 若 nparams <= 0 或单 rank 运行, 返回 nothing.
+- 否则返回 NamedTuple (session, session_shm, win, shared_tensor).
+  shared_tensor 维度为 (nocc, nspin, nparams), 同节点多 rank 共享物理内存.
+"""
+function setup_emery_dense_derivative_workspace(
+    session,
+    nocc::Integer,
+    nspin::Integer,
+    nparams::Integer,
+)
+    Int(nparams) <= 0 && return nothing
+    session_size = hasproperty(session, :size) ? session.size : 1
+    session_size <= 1 && return nothing
+
+    session_shm = init_node_mpi_session(session)
+    local_length = session_shm.rank == 0 ? Int(nocc) * Int(nspin) * Int(nparams) : 0
+    win, _ = MPI.Win_allocate_shared(Ptr{Float64}, local_length, session_shm.comm)
+    shared_tensor_storage = MPI.Win_shared_query(
+        Array{Float64},
+        (Int(nocc), Int(nspin), Int(nparams)),
+        win;
+        rank=0,
+    )
+    shared_tensor = @view shared_tensor_storage[:, :, :]
+    return (
+        session=session,
+        session_shm=session_shm,
+        win=win,
+        shared_tensor=shared_tensor,
+    )
+end
+
+"""
+用途: 计算单个 mean-field 参数的 dU/dp 切片, 写入共享张量的一个切片.
+
+参数:
+- dest::AbstractMatrix{Float64}: 输出, 形状为 (nocc, nspin).
+- params: mean-field 参数对象, 传给 build_dh_dparam 的第二个参数.
+- param_name::Symbol: 参数名.
+- U_full::AbstractMatrix: 完整本征矢矩阵 (nspin × nspin), 实矩阵.
+- response_F::AbstractMatrix: 响应矩阵 F[mo, occ] = -1/(epsilon_mo - epsilon_occ).
+- nocc::Integer: 占据轨道数.
+- build_dh_dparam::Function: (params, param_name) -> Matrix{Float64}, 构造 dH/dp.
+
+公式:
+- dH = build_dh_dparam(params, param_name)
+- dH_MO = U_full' * dH * U_full
+- dU = U_full * (response_F .* dH_MO)
+- dest .= permutedims(real.(dU[:, 1:nocc]))
+"""
+function fill_emery_dense_derivative_slice!(
+    dest::AbstractMatrix{Float64},
+    params,
+    param_name::Symbol,
+    U_full::AbstractMatrix,
+    response_F::AbstractMatrix,
+    nocc::Integer,
+    build_dh_dparam::Function,
+)
+    nocc_int = Int(nocc)
+    if size(dest, 1) != nocc_int || size(dest, 2) != size(U_full, 1)
+        throw(DimensionMismatch(
+            "dense derivative slice shape $(size(dest)) does not match " *
+            "(nocc=$nocc_int, nspin=$(size(U_full,1)))."
+        ))
+    end
+
+    dH = build_dh_dparam(params, param_name)
+    dH_MO = U_full' * dH * U_full
+    dU = U_full * (response_F .* dH_MO)
+    dest .= permutedims(real.(dU[:, 1:nocc_int]))
+    return dest
+end
+
+"""
+用途: 构造 column-resolved nonPH Emery determinant 的占据轨道和参数导数,
+使用 MPI 共享内存避免多 rank 重复存储.
+
+参数:
+- params: mean-field 参数对象.
+- param_names::Vector{Symbol}: 需要求导的 mean-field 参数名.
+- n_occupied_orbitals::Int: 占据轨道数.
+- workspace: setup_emery_dense_derivative_workspace 返回的对象, 或 nothing.
+- nspin::Int: spinful 单粒子基底维度.
+- build_hamiltonian::Function: (params) -> Matrix{Float64}, 构造 H.
+- build_dh_dparam::Function: (params, param_name) -> Matrix{Float64}, 构造 dH/dp.
+
+返回:
+- (U_occ::Matrix{Float64}, dUt_tensor::AbstractArray{Float64,3}).
+
+实现:
+- 若 workspace === nothing (单 rank), 各 rank 独立对角化并分配本地 tensor.
+- 否则只有 root rank 对角化, 广播结果, 分布式填充共享 tensor.
+"""
+function make_column_emery_dense_tensor_shared(
+    params;
+    param_names::Vector{Symbol},
+    n_occupied_orbitals::Int,
+    workspace,
+    nspin::Int,
+    build_hamiltonian::Function,
+    build_dh_dparam::Function,
+)
+    nocc = Int(n_occupied_orbitals)
+    nparam = length(param_names)
+    nparam > 0 || error("param_names must not be empty.")
+
+    if workspace === nothing
+        # 单 rank 路径: 不使用共享内存, 各 rank 独立分配.
+        hamiltonian = build_hamiltonian(params)
+        H_sym = Hermitian(hamiltonian)
+        evals, U_full = eigen(H_sym)
+        U_full = real.(U_full)
+
+        response_F = _build_response_F(evals)
+
+        dUt_tensor = zeros(Float64, nocc, nspin, nparam)
+        for (param_idx, param_name) in enumerate(param_names)
+            fill_emery_dense_derivative_slice!(
+                @view(dUt_tensor[:, :, param_idx]),
+                params,
+                param_name,
+                U_full,
+                response_F,
+                nocc,
+                build_dh_dparam,
+            )
+        end
+        return (U_occ=copy(U_full[:, 1:nocc]), dUt_tensor=dUt_tensor)
+    end
+
+    # MPI 共享内存路径.
+    session = workspace.session
+    world_rank = session.rank
+    world_size = session.size
+    world_root = session.root
+
+    evals = nothing
+    U_full = nothing
+    if world_rank == world_root
+        hamiltonian = build_hamiltonian(params)
+        H_sym = Hermitian(hamiltonian)
+        evals, U_full = eigen(H_sym)
+        U_full = real.(U_full)
+    end
+    evals = MPI.bcast(evals, world_root, session.comm)
+    U_full = MPI.bcast(U_full, world_root, session.comm)
+
+    response_F = _build_response_F(evals)
+
+    for param_idx in (world_rank + 1):world_size:nparam
+        fill_emery_dense_derivative_slice!(
+            @view(workspace.shared_tensor[:, :, param_idx]),
+            params,
+            param_names[param_idx],
+            U_full,
+            response_F,
+            nocc,
+            build_dh_dparam,
+        )
+    end
+    MPI.Barrier(workspace.session_shm.comm)
+
+    return (U_occ=copy(U_full[:, 1:nocc]), dUt_tensor=workspace.shared_tensor)
+end
+
+"""
+用途: 从本征值计算响应矩阵 F.
+
+公式:
+- F[mo, occ] = -real(1 / (epsilon_mo - epsilon_occ + i*eta))  for mo != occ
+- F[mo, occ] = 0  for mo == occ
+
+参数:
+- evals::AbstractVector{<:Real}: 本征值向量.
+- eta::Real=1e-8: 正则化小量.
+
+返回:
+- Matrix{Float64}: 响应矩阵.
+"""
+function _build_response_F(evals::AbstractVector{<:Real}; eta::Real=1e-8)
+    diff_mat = evals .- evals' .+ im * Float64(eta)
+    F = -real.(1.0 ./ diff_mat)
+    F[diagind(F)] .= 0.0
+    return F
 end
 
 end
