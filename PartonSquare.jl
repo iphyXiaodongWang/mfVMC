@@ -3,7 +3,7 @@ module PartonSquare
 push!(LOAD_PATH, "./src/")
 using LinearAlgebra
 using OrderedCollections
-using Utils
+using mfVMC.Utils
 using MPI
 
 export U1SFlux, make_ansatz_and_derivs

@@ -10,9 +10,11 @@ push!(LOAD_PATH, joinpath(@__DIR__, "src"))
 push!(LOAD_PATH, @__DIR__)
 
 using mfVMC
-using Utils: add_term_ij_nonPH, compute_eig_and_dU_reg1
+using mfVMC.Utils: add_term_ij_nonPH, compute_eig_and_dU_reg1
 
-include("Hubbard.jl")
+if !isdefined(@__MODULE__, :build_hubbard_column_bonds)
+    include("Hubbard.jl")
+end
 
 struct ColumnHubbardNonPHParams
     lx::Int

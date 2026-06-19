@@ -41,18 +41,196 @@ function is_twist_root_rank()::Bool
 end
 
 """
-用途: 构造 twist Hubbard 第一版使用的 projector。
+用途: 构造 twist Hubbard PBC 有限距离 Jastrow 的位移标签列表。
 
 参数:
-- `g::Float64`: Gutzwiller projector 参数。
+- `lx, ly::Int`: 二维晶格尺寸。
+- `dx_max, dy_max::Int`: x/y 方向最大位移截断。
 
 返回:
-- `CompositeProjector`: 只包含单个 Gutzwiller term 的 projector。
+- `Vector{Tuple{Int, Int}}`: 按 `(dx, dy)` 排序的位移标签, 不包含 `(0, 0)`。
 """
-function build_twist_projector(g::Float64)::CompositeProjector
-    return CompositeProjector(AbstractProjectorTerm[
+function build_twist_jastrow_displacement_labels(
+    lx::Int,
+    ly::Int;
+    dx_max::Int=div(lx, 2),
+    dy_max::Int=div(ly, 2),
+)::Vector{Tuple{Int,Int}}
+    if lx <= 0 || ly <= 0
+        error("lx and ly must be positive, got lx=$(lx), ly=$(ly).")
+    end
+    if dx_max < 0 || dy_max < 0
+        error("dx_max and dy_max must be non-negative, got dx_max=$(dx_max), dy_max=$(dy_max).")
+    end
+
+    labels = Tuple{Int,Int}[]
+    for dx in 0:min(dx_max, lx-1)
+        for dy in 0:min(dy_max, div(ly, 2))
+            if dx == 0 && dy == 0
+                continue
+            end
+            push!(labels, (dx, dy))
+        end
+    end
+    return labels
+end
+
+"""
+用途: 为 twist Hubbard 有限距离 Jastrow 构造参数名。
+
+参数:
+- `dx, dy::Int`: x/y 方向位移。
+
+返回:
+- `Symbol`: 形如 `:vj_dx_dy` 的参数名。
+"""
+function build_twist_jastrow_param_name(dx::Int, dy::Int)::Symbol
+    return Symbol("vj_$(dx)_$(dy)")
+end
+
+"""
+用途: 将 twist Hubbard 二维 PBC 坐标转换成一维 site index。
+
+参数:
+- `x, y::Int`: 从 1 开始的格点坐标, 函数内部按 PBC wrap。
+- `lx, ly::Int`: 晶格尺寸。
+
+返回:
+- `Int`: 从 1 开始的一维 site index。
+"""
+function twist_pbc_site_index(x::Int, y::Int, lx::Int, ly::Int)::Int
+    return twist_site_index(mod(x - 1, lx) + 1, mod(y - 1, ly) + 1, ly)
+end
+
+"""
+用途: 为给定 displacement 生成 twist Hubbard PBC Jastrow 的唯一无序 pair 集合。
+
+数学公式:
+- 对每个格点 `i = (x, y)`, 连接 `j = (x + dx, y ± dy)`。
+- x/y 方向均使用 PBC。
+- 每个 pair 规范化为 `(min(i,j), max(i,j))`, 因此正反方向共享同一个 `vj_dx_dy` 参数。
+
+参数:
+- `lx, ly::Int`: 二维晶格尺寸。
+- `dx, dy::Int`: x/y 方向位移, 必须非负。
+
+返回:
+- `Vector{Tuple{Int, Int}}`: 去重并排序后的 site pair 列表。
+"""
+function build_twist_jastrow_pair_set_for_displacement(
+    lx::Int,
+    ly::Int,
+    dx::Int,
+    dy::Int,
+)::Vector{Tuple{Int,Int}}
+    if dx < 0 || dy < 0
+        error("dx and dy must be non-negative, got dx=$(dx), dy=$(dy).")
+    end
+
+    y_offsets = dy == 0 ? (0,) : (dy, -dy)
+    unique_pairs = Set{Tuple{Int,Int}}()
+    for x in 1:lx, y in 1:ly
+        site_index = twist_pbc_site_index(x, y, lx, ly)
+        for offset_y in y_offsets
+            neighbor_index = twist_pbc_site_index(x + dx, y + offset_y, lx, ly)
+            if neighbor_index == site_index
+                continue
+            end
+            push!(unique_pairs, (min(site_index, neighbor_index), max(site_index, neighbor_index)))
+        end
+    end
+    return sort!(collect(unique_pairs))
+end
+
+"""
+用途: 为给定 displacement 构造 twist Hubbard PBC Jastrow 对称邻接表。
+
+参数:
+- `lx, ly::Int`: 二维晶格尺寸。
+- `dx, dy::Int`: x/y 方向位移。
+
+返回:
+- `Vector{Vector{Int}}`: 每个 site 的 Jastrow 邻居列表, 无自环且对称。
+"""
+function build_twist_jastrow_neighbor_table_for_displacement(
+    lx::Int,
+    ly::Int,
+    dx::Int,
+    dy::Int,
+)::Vector{Vector{Int}}
+    unique_pairs = build_twist_jastrow_pair_set_for_displacement(lx, ly, dx, dy)
+    neighbor_table = [Int[] for _ in 1:(lx*ly)]
+    for (site_i, site_j) in unique_pairs
+        push!(neighbor_table[site_i], site_j)
+        push!(neighbor_table[site_j], site_i)
+    end
+    for neighbors in neighbor_table
+        sort!(neighbors)
+    end
+    return neighbor_table
+end
+
+"""
+用途: 构造 twist Hubbard PBC 有限距离 Jastrow terms。
+
+参数:
+- `lx, ly::Int`: 二维晶格尺寸。
+- `dx_max, dy_max::Int`: x/y 方向 Jastrow 截断。
+
+返回:
+- `Vector{JastrowProjectorTerm{Float64}}`: 初值均为 `0.0` 的有限距离 Jastrow terms。
+"""
+function build_twist_finite_distance_jastrow_terms(
+    lx::Int,
+    ly::Int;
+    dx_max::Int=div(lx, 2),
+    dy_max::Int=div(ly, 2),
+)::Vector{JastrowProjectorTerm{Float64}}
+    jastrow_terms = JastrowProjectorTerm{Float64}[]
+    for (dx, dy) in build_twist_jastrow_displacement_labels(lx, ly; dx_max=dx_max, dy_max=dy_max)
+        push!(
+            jastrow_terms,
+            JastrowProjectorTerm(
+                param_name=build_twist_jastrow_param_name(dx, dy),
+                v=0.0,
+                site_to_neighbor_sites=build_twist_jastrow_neighbor_table_for_displacement(lx, ly, dx, dy),
+            ),
+        )
+    end
+    return jastrow_terms
+end
+
+"""
+用途: 构造 twist Hubbard 使用的有限距离 Jastrow projector。
+
+参数:
+- `lx, ly::Int`: 二维晶格尺寸。
+- `g::Float64`: Gutzwiller projector 参数。
+- `jastrow_dx_max, jastrow_dy_max::Int`: Jastrow 位移截断范围。
+
+返回:
+- `CompositeProjector`: 包含 Gutzwiller 与 PBC 有限距离 density Jastrow terms 的 projector。
+"""
+function build_twist_projector(
+    lx::Int,
+    ly::Int,
+    g::Float64;
+    jastrow_dx_max::Int=div(lx, 2),
+    jastrow_dy_max::Int=div(ly, 2),
+)::CompositeProjector
+    projector_terms = AbstractProjectorTerm[
         GutzwillerProjectorTerm(param_name=:g, g=g),
-    ])
+    ]
+    append!(
+        projector_terms,
+        build_twist_finite_distance_jastrow_terms(
+            lx,
+            ly;
+            dx_max=jastrow_dx_max,
+            dy_max=jastrow_dy_max,
+        ),
+    )
+    return CompositeProjector(projector_terms)
 end
 
 """
@@ -197,7 +375,7 @@ function build_twist_active_param_indices(
     if isempty(requested_active_param_names)
         return [
             index for (index, param_name) in enumerate(param_names)
-            if !haskey(fixed_param_values, param_name)
+                      if !haskey(fixed_param_values, param_name)
         ]
     end
 
@@ -376,7 +554,7 @@ function mfVMC.VMC.compute_grad_log_psi!(vwf::mfVMC.VMC.vwf_det{T}) where T
             projector_derivative_map[param_name] = Float64(derivative_value)
         end
         for (active_offset, param_name) in enumerate(active_projector_param_names)
-            o_vec[wf_param_count + active_offset] = T(projector_derivative_map[param_name])
+            o_vec[wf_param_count+active_offset] = T(projector_derivative_map[param_name])
         end
     end
     return o_vec
@@ -744,6 +922,14 @@ function parse_twist_commandline()
         help = "Gutzwiller projector parameter"
         arg_type = Float64
         default = 1.0
+        "--jastrow_dx_max"
+        help = "Maximum x displacement for finite-distance Jastrow projector"
+        arg_type = Int
+        default = 2
+        "--jastrow_dy_max"
+        help = "Maximum y displacement for finite-distance Jastrow projector"
+        arg_type = Int
+        default = 2
     end
 
     return parse_args(settings)
@@ -914,7 +1100,7 @@ function build_twist_hubbard_nonph_dh_dparam(
     params::TwistHubbardNonPHParams,
     param_name::Symbol,
 )::Matrix{Float64}
-    if !(param_name in (:Delta_AF, :Delta_c, :Delta_s))
+    if !(param_name in (:chi1y, :Delta_AF, :Delta_c, :Delta_s))
         error("Unknown twist Hubbard mean-field parameter: $(param_name).")
     end
 
@@ -924,7 +1110,7 @@ function build_twist_hubbard_nonph_dh_dparam(
         bcx=params.bcx,
         bcy=params.bcy,
         chi_x=0.0,
-        chi_y=0.0,
+        chi_y=param_name == :chi1y ? 1.0 : 0.0,
         delta_af=param_name == :Delta_AF ? 1.0 : 0.0,
         delta_c=param_name == :Delta_c ? 1.0 : 0.0,
         delta_s=param_name == :Delta_s ? 1.0 : 0.0,
@@ -998,7 +1184,7 @@ end
 - `params::Vector{Float64}`: 与 `param_names` 对齐的完整参数值。
 - `lx, ly::Int`: 晶格尺寸。
 - `bcx, bcy::Float64`: mean-field 边界条件因子。
-- `tx, ty::Float64`: mean-field 最近邻 x/y hopping, 第一版固定等于 physical `tx/ty`。
+- `tx, ty::Float64`: physical hopping, 保留用于接口兼容; mean-field gauge 固定为 `chi_x=1`, `chi_y=chi1y`。
 - `n_occupied_orbitals::Int`: nonPH determinant 占据轨道数, 等于真实电子数。
 - `nparams_proj::Int`: projector 参数数量。
 - `stripe_wavevector::Float64`: stripe 波矢 `Q`。
@@ -1045,8 +1231,8 @@ function update_twist_ansatz!(
         ly=ly,
         bcx=bcx,
         bcy=bcy,
-        chi_x=tx,
-        chi_y=ty,
+        chi_x=1.0,
+        chi_y=get(param_map, :chi1y, compute_twist_chi1y_initial_value(tx, ty)),
         delta_af=get(param_map, :Delta_AF, 0.0),
         delta_c=get(param_map, :Delta_c, 0.0),
         delta_s=get(param_map, :Delta_s, 0.0),
@@ -1078,6 +1264,22 @@ function update_twist_ansatz!(
 end
 
 """
+用途: 根据 physical hopping 生成 twist mean-field 中 `chi1y` 的初值。
+
+参数:
+- `tx, ty::Float64`: physical Hamiltonian 中 x/y 方向最近邻 hopping。
+
+返回:
+- `Float64`: `chi1y = ty / tx`。这里固定 gauge 为 `chi1x = 1`。
+"""
+function compute_twist_chi1y_initial_value(tx::Float64, ty::Float64)::Float64
+    if isapprox(tx, 0.0; atol=1.0e-12, rtol=0.0)
+        error("twist Hubbard fixes chi1x=1 as gauge, so --tx must be nonzero to initialize chi1y=ty/tx.")
+    end
+    return ty / tx
+end
+
+"""
 用途: 根据 `ansatz` 参数生成 twist Hubbard mean-field 参数名、初值和 stripe 几何。
 
 参数:
@@ -1088,10 +1290,11 @@ end
 """
 function build_twist_mean_field_parameter_setup(args)
     ansatz = args["ansatz"]
+    chi1y_initial_value = compute_twist_chi1y_initial_value(args["tx"], args["ty"])
     if ansatz == "AFM"
         return (
-            wf_param_names=[:Delta_AF],
-            wf_init_params=[args["Delta_AF"]],
+            wf_param_names=[:chi1y, :Delta_AF],
+            wf_init_params=[chi1y_initial_value, args["Delta_AF"]],
             stripe_wavevector=0.0,
             stripe_center_offset=0.0,
         )
@@ -1106,8 +1309,8 @@ function build_twist_mean_field_parameter_setup(args)
             error("Unknown stripe_center type: $(stripe_center)")
         end
         return (
-            wf_param_names=[:Delta_c, :Delta_s],
-            wf_init_params=[args["Delta_c"], args["Delta_s"]],
+            wf_param_names=[:chi1y, :Delta_c, :Delta_s],
+            wf_init_params=[chi1y_initial_value, args["Delta_c"], args["Delta_s"]],
             stripe_wavevector=2π / lambda,
             stripe_center_offset=stripe_center_offset,
         )
@@ -1158,6 +1361,8 @@ function main_twist()::Nothing
     fixed_params_string = args["fixed_params"]
     active_params_string = args["active_params"]
     n_sites = lx * ly
+    jastrow_dx_max = args["jastrow_dx_max"] < 0 ? div(lx, 2) : args["jastrow_dx_max"]
+    jastrow_dy_max = args["jastrow_dy_max"] < 0 ? div(ly, 2) : args["jastrow_dy_max"]
 
     mean_field_setup = build_twist_mean_field_parameter_setup(args)
     wf_param_names = mean_field_setup.wf_param_names
@@ -1173,7 +1378,13 @@ function main_twist()::Nothing
         seed=args["seed"] + rank,
     )
 
-    projector = build_twist_projector(args["g"])
+    projector = build_twist_projector(
+        lx,
+        ly,
+        args["g"];
+        jastrow_dx_max=jastrow_dx_max,
+        jastrow_dy_max=jastrow_dy_max,
+    )
     proj_param_names = projector_param_names(projector)
     proj_init_params = projector_param_values(projector)
     nparams_proj = length(proj_param_names)
