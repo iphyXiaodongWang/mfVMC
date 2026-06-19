@@ -621,6 +621,7 @@ end
 参数:
 - `lx, ly::Int`: 晶格尺寸。
 - `tx, ty::Float64`: x/y 方向最近邻 hopping。
+- `t2::Float64`: 平移不破缺的对角次近邻 hopping。
 - `onsite_u::Float64`: onsite Hubbard 相互作用强度。
 
 返回:
@@ -635,24 +636,31 @@ function build_twist_hamiltonian_terms(
     ly::Int,
     tx::Float64,
     ty::Float64,
+    t2::Float64,
     onsite_u::Float64,
 )
     n_sites = lx * ly
-    nearest_neighbor_bonds = build_twist_nearest_neighbor_bonds(lx, ly)
+    hopping_bonds = build_twist_nearest_neighbor_bonds(lx, ly)
     hopping_terms = OperatorTerm[]
     interaction_terms = OperatorTerm[]
 
-    for (site_i, site_j) in nearest_neighbor_bonds.x_bonds
+    for (site_i, site_j) in hopping_bonds.x_bonds
         push!(hopping_terms, OperatorTerm([:cdag_up, :c_up], [site_i, site_j], -tx))
         push!(hopping_terms, OperatorTerm([:cdag_up, :c_up], [site_j, site_i], -tx))
         push!(hopping_terms, OperatorTerm([:cdag_dn, :c_dn], [site_i, site_j], -tx))
         push!(hopping_terms, OperatorTerm([:cdag_dn, :c_dn], [site_j, site_i], -tx))
     end
-    for (site_i, site_j) in nearest_neighbor_bonds.y_bonds
+    for (site_i, site_j) in hopping_bonds.y_bonds
         push!(hopping_terms, OperatorTerm([:cdag_up, :c_up], [site_i, site_j], -ty))
         push!(hopping_terms, OperatorTerm([:cdag_up, :c_up], [site_j, site_i], -ty))
         push!(hopping_terms, OperatorTerm([:cdag_dn, :c_dn], [site_i, site_j], -ty))
         push!(hopping_terms, OperatorTerm([:cdag_dn, :c_dn], [site_j, site_i], -ty))
+    end
+    for (site_i, site_j) in hopping_bonds.diagonal_bonds
+        push!(hopping_terms, OperatorTerm([:cdag_up, :c_up], [site_i, site_j], -t2))
+        push!(hopping_terms, OperatorTerm([:cdag_up, :c_up], [site_j, site_i], -t2))
+        push!(hopping_terms, OperatorTerm([:cdag_dn, :c_dn], [site_i, site_j], -t2))
+        push!(hopping_terms, OperatorTerm([:cdag_dn, :c_dn], [site_j, site_i], -t2))
     end
     for site_i in 1:n_sites
         push!(interaction_terms, OperatorTerm([:n_up, :n_dn], [site_i, site_i], onsite_u))
@@ -798,9 +806,9 @@ end
 - `Dict{String, Any}`: `ArgParse.parse_args` 返回的参数字典。
 
 说明:
-- 第一版只包含最近邻 hopping, physical hopping 使用 `tx` 和 `ty`。
-- mean-field ansatz 也只使用最近邻 hopping, 并固定为同一组 `tx` 和 `ty`。
-- 不包含 `t2`, `chi2`, pairing 和 backflow 参数。
+- physical hopping 使用最近邻 `tx/ty` 和平移不破缺的对角次近邻 `t2`。
+- mean-field ansatz 固定 `chi1x = 1`, 并优化 `chi1y` 与 `chi2`。
+- 不包含 pairing 和 backflow 参数。
 """
 function parse_twist_commandline()
     settings = ArgParseSettings()
@@ -822,6 +830,10 @@ function parse_twist_commandline()
         help = "Nearest-neighbor hopping amplitude in Y direction"
         arg_type = Float64
         default = 1.0
+        "--t2"
+        help = "Translationally invariant next-nearest-neighbor diagonal hopping amplitude"
+        arg_type = Float64
+        default = 0.0
         "--U"
         help = "On-site interaction strength"
         arg_type = Float64
@@ -942,6 +954,7 @@ end
 - `lx, ly::Int`: 晶格尺寸。
 - `bcx, bcy::Float64`: mean-field 边界条件因子。
 - `chi_x, chi_y::Float64`: x/y 方向最近邻 hopping。
+- `chi2::Float64`: 平移不破缺的对角次近邻 hopping。
 - `delta_af::Float64`: AF staggered field 振幅。
 - `delta_c, delta_s::Float64`: charge/spin stripe field 振幅。
 - `stripe_wavevector::Float64`: stripe 波矢 `Q`。
@@ -954,6 +967,7 @@ struct TwistHubbardNonPHParams
     bcy::Float64
     chi_x::Float64
     chi_y::Float64
+    chi2::Float64
     delta_af::Float64
     delta_c::Float64
     delta_s::Float64
@@ -968,6 +982,7 @@ end
 - `lx, ly::Int`: 晶格尺寸。
 - `bcx, bcy::Float64`: mean-field 边界条件因子。
 - `chi_x, chi_y::Float64`: x/y 方向最近邻 hopping。
+- `chi2::Float64`: 对角次近邻 hopping。
 - `delta_af, delta_c, delta_s::Float64`: AF/charge stripe/spin stripe 场。
 - `stripe_wavevector::Float64`: stripe 波矢 `Q`。
 - `stripe_center_offset::Float64`: stripe 中心偏移 `x0`。
@@ -982,6 +997,7 @@ function TwistHubbardNonPHParams(;
     bcy::Float64=1.0,
     chi_x::Float64=1.0,
     chi_y::Float64=1.0,
+    chi2::Float64=0.0,
     delta_af::Float64=0.0,
     delta_c::Float64=0.0,
     delta_s::Float64=0.0,
@@ -995,6 +1011,7 @@ function TwistHubbardNonPHParams(;
         bcy,
         chi_x,
         chi_y,
+        chi2,
         delta_af,
         delta_c,
         delta_s,
@@ -1004,13 +1021,13 @@ function TwistHubbardNonPHParams(;
 end
 
 """
-用途: 构造 PBC 下 x/y 分开的最近邻 bond 列表。
+用途: 构造 PBC 下 x/y 最近邻和对角次近邻 bond 列表。
 
 参数:
 - `lx, ly::Int`: 晶格尺寸。
 
 返回:
-- `NamedTuple`: 包含 `x_bonds` 和 `y_bonds`, 每个元素为最近邻代表方向 `(site_i, site_j)`。
+- `NamedTuple`: 包含 `x_bonds`, `y_bonds`, `diagonal_bonds`, 每个元素为代表方向 `(site_i, site_j)`。
 """
 function build_twist_nearest_neighbor_bonds(lx::Int, ly::Int)
     if lx <= 0 || ly <= 0
@@ -1019,13 +1036,16 @@ function build_twist_nearest_neighbor_bonds(lx::Int, ly::Int)
 
     x_bonds = Tuple{Int,Int}[]
     y_bonds = Tuple{Int,Int}[]
+    diagonal_bonds = Tuple{Int,Int}[]
     local_idx(x, y) = mod(x - 1, lx) * ly + mod(y - 1, ly) + 1
     for y in 1:ly, x in 1:lx
         site_i = local_idx(x, y)
         push!(x_bonds, (site_i, local_idx(x + 1, y)))
         push!(y_bonds, (site_i, local_idx(x, y + 1)))
+        push!(diagonal_bonds, (site_i, local_idx(x + 1, y + 1)))
+        push!(diagonal_bonds, (site_i, local_idx(x + 1, y - 1)))
     end
-    return (; x_bonds=x_bonds, y_bonds=y_bonds)
+    return (; x_bonds=x_bonds, y_bonds=y_bonds, diagonal_bonds=diagonal_bonds)
 end
 
 """
@@ -1035,6 +1055,7 @@ end
 - 使用 spinful electron basis `row(i, up)=2i-1`, `row(i, down)=2i`。
 - 最近邻 hopping 为
   `H_{i,i+x} = -chi_x`, `H_{i,i+y} = -chi_y`, 同时作用在 up/down block。
+- 对角次近邻 hopping 为 `H_{i,i+x+y} = H_{i,i+x-y} = -chi2`。
 - 对角场为
   `H_{i up,i up} += (+1) * (-1)^(x+y) * m_i / 2 + rho_i / 2`,
   `H_{i down,i down} += (-1) * (-1)^(x+y) * m_i / 2 + rho_i / 2`。
@@ -1065,11 +1086,17 @@ function build_twist_hubbard_nonph_hamiltonian(
 
             site_x = twist_site_index(x == lx ? 1 : x + 1, y, ly)
             site_y = twist_site_index(x, y == ly ? 1 : y + 1, ly)
+            site_pp = twist_site_index(x == lx ? 1 : x + 1, y == ly ? 1 : y + 1, ly)
+            site_pm = twist_site_index(x == lx ? 1 : x + 1, y == 1 ? ly : y - 1, ly)
             bc_x = x == lx ? params.bcx : 1.0
             bc_y = y == ly ? params.bcy : 1.0
+            bc_pp = (x == lx ? params.bcx : 1.0) * (y == ly ? params.bcy : 1.0)
+            bc_pm = (x == lx ? params.bcx : 1.0) * (y == 1 ? params.bcy : 1.0)
 
             add_term_ij_nonPH(hamiltonian, site_i, site_x, -params.chi_x * bc_x)
             add_term_ij_nonPH(hamiltonian, site_i, site_y, -params.chi_y * bc_y)
+            add_term_ij_nonPH(hamiltonian, site_i, site_pp, -params.chi2 * bc_pp)
+            add_term_ij_nonPH(hamiltonian, site_i, site_pm, -params.chi2 * bc_pm)
 
             up_row = 2 * (site_i - 1) + 1
             down_row = up_row + 1
@@ -1085,13 +1112,13 @@ end
 用途: 构造 twist Hubbard nonPH Hamiltonian 对单个优化参数的导数矩阵。
 
 数学公式:
-- 当前第一版只优化 `Delta_AF`, `Delta_c`, `Delta_s`。
-- 这些场线性进入 Hamiltonian, 因此 `dH/dp` 可通过只把目标参数置为 `1.0`,
+- 当前优化 `chi1y`, `chi2`, `Delta_AF`, `Delta_c`, `Delta_s`。
+- 这些参数线性进入 Hamiltonian, 因此 `dH/dp` 可通过只把目标参数置为 `1.0`,
   其它优化场置为 `0.0`, 并保持 `Q, x0, bcx, bcy` 不变得到。
 
 参数:
 - `params::TwistHubbardNonPHParams`: 当前 ansatz 参数, 提供尺寸、边界和 stripe 几何。
-- `param_name::Symbol`: 目标参数名, 支持 `:Delta_AF`, `:Delta_c`, `:Delta_s`。
+- `param_name::Symbol`: 目标参数名, 支持 `:chi1y`, `:chi2`, `:Delta_AF`, `:Delta_c`, `:Delta_s`。
 
 返回:
 - `Matrix{Float64}`: 与 Hamiltonian 同维度的 `dH/dp` 矩阵。
@@ -1100,7 +1127,7 @@ function build_twist_hubbard_nonph_dh_dparam(
     params::TwistHubbardNonPHParams,
     param_name::Symbol,
 )::Matrix{Float64}
-    if !(param_name in (:chi1y, :Delta_AF, :Delta_c, :Delta_s))
+    if !(param_name in (:chi1y, :chi2, :Delta_AF, :Delta_c, :Delta_s))
         error("Unknown twist Hubbard mean-field parameter: $(param_name).")
     end
 
@@ -1111,6 +1138,7 @@ function build_twist_hubbard_nonph_dh_dparam(
         bcy=params.bcy,
         chi_x=0.0,
         chi_y=param_name == :chi1y ? 1.0 : 0.0,
+        chi2=param_name == :chi2 ? 1.0 : 0.0,
         delta_af=param_name == :Delta_AF ? 1.0 : 0.0,
         delta_c=param_name == :Delta_c ? 1.0 : 0.0,
         delta_s=param_name == :Delta_s ? 1.0 : 0.0,
@@ -1233,6 +1261,7 @@ function update_twist_ansatz!(
         bcy=bcy,
         chi_x=1.0,
         chi_y=get(param_map, :chi1y, compute_twist_chi1y_initial_value(tx, ty)),
+        chi2=get(param_map, :chi2, 0.0),
         delta_af=get(param_map, :Delta_AF, 0.0),
         delta_c=get(param_map, :Delta_c, 0.0),
         delta_s=get(param_map, :Delta_s, 0.0),
@@ -1280,6 +1309,22 @@ function compute_twist_chi1y_initial_value(tx::Float64, ty::Float64)::Float64
 end
 
 """
+用途: 根据 physical hopping 生成 twist mean-field 中 `chi2` 的初值。
+
+参数:
+- `tx, t2::Float64`: physical Hamiltonian 中 x 方向最近邻 hopping 与对角次近邻 hopping。
+
+返回:
+- `Float64`: `chi2 = t2 / tx`。这里固定 gauge 为 `chi1x = 1`。
+"""
+function compute_twist_chi2_initial_value(tx::Float64, t2::Float64)::Float64
+    if isapprox(tx, 0.0; atol=1.0e-12, rtol=0.0)
+        error("twist Hubbard fixes chi1x=1 as gauge, so --tx must be nonzero to initialize chi2=t2/tx.")
+    end
+    return t2 / tx
+end
+
+"""
 用途: 根据 `ansatz` 参数生成 twist Hubbard mean-field 参数名、初值和 stripe 几何。
 
 参数:
@@ -1291,10 +1336,11 @@ end
 function build_twist_mean_field_parameter_setup(args)
     ansatz = args["ansatz"]
     chi1y_initial_value = compute_twist_chi1y_initial_value(args["tx"], args["ty"])
+    chi2_initial_value = compute_twist_chi2_initial_value(args["tx"], args["t2"])
     if ansatz == "AFM"
         return (
-            wf_param_names=[:chi1y, :Delta_AF],
-            wf_init_params=[chi1y_initial_value, args["Delta_AF"]],
+            wf_param_names=[:chi1y, :chi2, :Delta_AF],
+            wf_init_params=[chi1y_initial_value, chi2_initial_value, args["Delta_AF"]],
             stripe_wavevector=0.0,
             stripe_center_offset=0.0,
         )
@@ -1309,8 +1355,8 @@ function build_twist_mean_field_parameter_setup(args)
             error("Unknown stripe_center type: $(stripe_center)")
         end
         return (
-            wf_param_names=[:chi1y, :Delta_c, :Delta_s],
-            wf_init_params=[chi1y_initial_value, args["Delta_c"], args["Delta_s"]],
+            wf_param_names=[:chi1y, :chi2, :Delta_c, :Delta_s],
+            wf_init_params=[chi1y_initial_value, chi2_initial_value, args["Delta_c"], args["Delta_s"]],
             stripe_wavevector=2π / lambda,
             stripe_center_offset=stripe_center_offset,
         )
@@ -1345,6 +1391,7 @@ function main_twist()::Nothing
     bcy = args["bcy"]
     tx = args["tx"]
     ty = args["ty"]
+    t2 = args["t2"]
     onsite_u = args["U"]
     target_sz = args["target_sz"]
     doping = args["doping"]
@@ -1421,7 +1468,7 @@ function main_twist()::Nothing
         active_projector_param_names=uses_param_subset ? active_projector_param_names : nothing,
     )
 
-    term_setup = build_twist_hamiltonian_terms(lx, ly, tx, ty, onsite_u)
+    term_setup = build_twist_hamiltonian_terms(lx, ly, tx, ty, t2, onsite_u)
     ham = GeneralModel(n_sites, term_setup.all_terms)
 
     electron_count_float = n_sites * (1 + doping)
