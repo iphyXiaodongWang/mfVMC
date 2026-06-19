@@ -56,7 +56,7 @@ struct SRParams
         lr=0.05,
         diag_shift=1e-3,
         max_step_size=0.1,
-        eigen_cutoff=2e-4,
+        eigen_cutoff=0.0,
         vmc_params::VMCParams=VMCParams()
     )
         new(n_steps, lr, diag_shift, max_step_size, eigen_cutoff, vmc_params)

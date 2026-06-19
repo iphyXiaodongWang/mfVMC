@@ -35,7 +35,6 @@ from plot_domain_sz_arrow import (
     load_sz_matrix,
 )
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PANEL_A_DATA_DIR = Path(
     r"D:\study\研究生\科研\VMC\spin_model\classical_MC\PTMC\results\large_size\J2_0.5_J3_1.25\doping0.090\data"
@@ -1147,6 +1146,7 @@ def draw_picture4(
         top_panel_series=top_panel_series,
         panel_b_sz_matrix=panel_b_sz_matrix,
     )
+    figure.savefig(OUTPUT_DIR / "picture4.svg", dpi=260, bbox_inches="tight")
     figure.savefig(OUTPUT_PNG_PATH, dpi=260, bbox_inches="tight")
     figure.savefig(OUTPUT_PDF_PATH, dpi=260, bbox_inches="tight")
     plt.close(figure)
