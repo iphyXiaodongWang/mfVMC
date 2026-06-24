@@ -15,3 +15,5 @@ picture2_bundle/
 compare/
 mj/
 fig3/
+*.png
+*.mjs
