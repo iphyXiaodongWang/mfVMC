@@ -17,7 +17,8 @@ include("twist_Hubbard.jl")
 
 说明:
 - 第一阶段只允许 PH determinant + projector, 不暴露 `--enable_backflow` 或 `bf_*` 参数。
-- mean-field 固定 `chi1x = 1`, 优化 `chi1y`, `chi2`, pairing `etax/etay`, 以及 AFM/Stripe order。
+- mean-field 固定 `chi1x = 1`, 优化 `chi1y`, `chi2`, pairing `etax/etay`, `mu`,
+  以及 AFM/Stripe order。
 """
 function parse_twist_ph_commandline()
     settings = ArgParseSettings()
@@ -75,6 +76,10 @@ function parse_twist_ph_commandline()
         help = "Spin stripe order parameter"
         arg_type = Float64
         default = 3.0
+        "--mu"
+        help = "Chemical potential in PH mean-field"
+        arg_type = Float64
+        default = -3.0
         "--target_sz"
         help = "Target total Sz"
         arg_type = Int
@@ -173,6 +178,7 @@ end
 - `chi_x, chi_y::Float64`: x/y 最近邻 hopping, 其中主程序固定 `chi_x = 1`。
 - `chi2::Float64`: 对角次近邻 hopping。
 - `etax, etay::Float64`: singlet pairing 裸参数。
+- `mu::Float64`: uniform chemical potential, 与 `Delta_c` 共同组成 charge field。
 - `delta_af::Float64`: AFM staggered field 振幅。
 - `delta_c, delta_s::Float64`: charge/spin stripe field 振幅。
 - `stripe_wavevector::Float64`: stripe 波矢 `Q`。
@@ -188,6 +194,7 @@ struct TwistHubbardPHParams
     chi2::Float64
     etax::Float64
     etay::Float64
+    mu::Float64
     delta_af::Float64
     delta_c::Float64
     delta_s::Float64
@@ -214,6 +221,7 @@ function TwistHubbardPHParams(;
     chi2::Float64=0.0,
     etax::Float64=0.0,
     etay::Float64=0.0,
+    mu::Float64=0.0,
     delta_af::Float64=0.0,
     delta_c::Float64=0.0,
     delta_s::Float64=0.0,
@@ -230,6 +238,7 @@ function TwistHubbardPHParams(;
         chi2,
         etax,
         etay,
+        mu,
         delta_af,
         delta_c,
         delta_s,
@@ -272,7 +281,7 @@ end
 - PH onsite field 参考 `RestrictedHubbardParams`:
   `H_{i↑,i↑} += s_i m_i/2 + rho_i/2`,
   `H_{i↓h,i↓h} += s_i m_i/2 - rho_i/2`,
-  其中 `s_i = (-1)^(x+y)`, `rho_i = Delta_c cos(Q(x-x0))`,
+  其中 `s_i = (-1)^(x+y)`, `rho_i = mu + Delta_c cos(Q(x-x0))`,
   `m_i = Delta_AF + Delta_s sin(Q/2(x-x0))`。
 
 参数:
@@ -290,7 +299,7 @@ function build_twist_hubbard_ph_hamiltonian(
     hamiltonian = zeros(Float64, 2 * n_sites, 2 * n_sites)
 
     for x in 1:lx
-        charge_field_x = params.delta_c * cos(params.stripe_wavevector * (x - params.stripe_center_offset))
+        charge_field_x = params.mu + params.delta_c * cos(params.stripe_wavevector * (x - params.stripe_center_offset))
         spin_field_x = params.delta_af + params.delta_s * sin(params.stripe_wavevector / 2 * (x - params.stripe_center_offset))
         pairing = compute_twist_ph_pairing_modulation(params, x)
 
@@ -331,7 +340,7 @@ end
 参数:
 - `params::TwistHubbardPHParams`: 当前 ansatz 参数, 提供尺寸、边界和 stripe 几何。
 - `param_name::Symbol`: 目标参数名, 支持 `:chi1y`, `:chi2`, `:etax`, `:etay`,
-  `:Delta_AF`, `:Delta_c`, `:Delta_s`。
+  `:Delta_AF`, `:Delta_c`, `:Delta_s`, `:mu`。
 
 返回:
 - `Matrix{Float64}`: 与 Hamiltonian 同维度的 `dH/dp` 矩阵。
@@ -340,7 +349,7 @@ function build_twist_hubbard_ph_dh_dparam(
     params::TwistHubbardPHParams,
     param_name::Symbol,
 )::Matrix{Float64}
-    allowed_param_names = (:chi1y, :chi2, :etax, :etay, :Delta_AF, :Delta_c, :Delta_s)
+    allowed_param_names = (:chi1y, :chi2, :etax, :etay, :Delta_AF, :Delta_c, :Delta_s, :mu)
     if !(param_name in allowed_param_names)
         error("Unknown twist Hubbard PH mean-field parameter: $(param_name).")
     end
@@ -355,6 +364,7 @@ function build_twist_hubbard_ph_dh_dparam(
         chi2=param_name == :chi2 ? 1.0 : 0.0,
         etax=param_name == :etax ? 1.0 : 0.0,
         etay=param_name == :etay ? 1.0 : 0.0,
+        mu=param_name == :mu ? 1.0 : 0.0,
         delta_af=param_name == :Delta_AF ? 1.0 : 0.0,
         delta_c=param_name == :Delta_c ? 1.0 : 0.0,
         delta_s=param_name == :Delta_s ? 1.0 : 0.0,
@@ -475,6 +485,7 @@ function update_twist_ph_ansatz!(
         chi2=get(param_map, :chi2, 0.0),
         etax=get(param_map, :etax, 0.0),
         etay=get(param_map, :etay, 0.0),
+        mu=get(param_map, :mu, 0.0),
         delta_af=get(param_map, :Delta_AF, 0.0),
         delta_c=get(param_map, :Delta_c, 0.0),
         delta_s=get(param_map, :Delta_s, 0.0),
@@ -520,13 +531,14 @@ function build_twist_ph_mean_field_parameter_setup(args)
     chi2_initial_value = compute_twist_chi2_initial_value(args["tx"], args["t2"])
     if ansatz == "AFM"
         return (
-            wf_param_names=[:chi1y, :chi2, :etax, :etay, :Delta_AF],
+            wf_param_names=[:chi1y, :chi2, :etax, :etay, :Delta_AF, :mu],
             wf_init_params=[
                 chi1y_initial_value,
                 chi2_initial_value,
                 args["etax"],
                 args["etay"],
                 args["Delta_AF"],
+                args["mu"],
             ],
             stripe_wavevector=0.0,
             stripe_center_offset=0.0,
@@ -542,7 +554,7 @@ function build_twist_ph_mean_field_parameter_setup(args)
             error("Unknown stripe_center type: $(stripe_center)")
         end
         return (
-            wf_param_names=[:chi1y, :chi2, :etax, :etay, :Delta_c, :Delta_s],
+            wf_param_names=[:chi1y, :chi2, :etax, :etay, :Delta_c, :Delta_s, :mu],
             wf_init_params=[
                 chi1y_initial_value,
                 chi2_initial_value,
@@ -550,6 +562,7 @@ function build_twist_ph_mean_field_parameter_setup(args)
                 args["etay"],
                 args["Delta_c"],
                 args["Delta_s"],
+                args["mu"],
             ],
             stripe_wavevector=2π / lambda,
             stripe_center_offset=stripe_center_offset,
