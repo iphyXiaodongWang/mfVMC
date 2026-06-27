@@ -9,6 +9,7 @@
 - 所有开发在 worktree `D:/study/研究生/科研/VMC/HKJ_s/mfVMC/.worktrees/twist-hubbard-ph` 中进行.
 - 第一阶段不修改 `src/Backflow.jl`, 也不提供 `--enable_backflow` 和 `bf_*` 参数.
 - 新 PH 文件参数接口贴近 `twist_Hubbard.jl`: 保留 `chi1y`, `chi2`, `Delta_AF`, `Delta_c`, `Delta_s`, 并新增 pairing 参数 `etax`, `etay`.
+- pairing 的物理定义参考 `Hubbard_restricted.jl` 中 `PartonSquare.RestrictedHubbardParams`: AFM 下可视为 uniform pairing, Stripe 下 `etax` 和 `etay` 必须随 stripe envelope 做 column modulation.
 - sampler 使用 `config_Hubbard(...; ifPH=true)`, determinant 列数使用 `N_sites + target_sz`.
 - PH determinant 的 row set 依赖现有 `ConfigurationPH`: occupied rows 为 up electron rows 加 down-hole rows.
 
@@ -18,7 +19,10 @@
 2. 新增 PH mean-field 参数类型, 例如 `TwistHubbardPHParams`, 字段包含 lattice, boundary, hopping, pairing 和 AFM/Stripe 参数.
 3. 新增 PH mean-field Hamiltonian 构造函数:
    - hopping 使用 `add_term_ij_PH(H, i, j, -chi, eta)`.
-   - x/y pairing 分别使用 `etax`, `etay`, Stripe 下按现有 envelope 生成列依赖初值.
+   - x/y pairing 参考 `Hubbard_restricted.jl` 的定义. AFM 下使用 uniform `etax`, `etay`; Stripe 下使用
+     `etax0 = etax * abs(cos(Q / 2 * (x + 0.5 - x0)))`,
+     `etay0 = -etay * abs(cos(Q / 2 * (x - x0)))`,
+     其中 `Q = 2π / lambda`, `x0` 来自 `stripe_center`.
    - onsite field 采用 PH 约定, lower block 是 down-hole sector.
 4. 新增 ansatz 生成与导数函数:
    - 对角化 PH Hamiltonian.
