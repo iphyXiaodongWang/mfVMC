@@ -365,16 +365,20 @@ end
   由 `epsilon_terms` 和 `source_groups` 的 eta term 自动生成。
 - `incoming_source_sites_by_target::Vector{Vector{Int}}`: composite 级别合并后的 incoming source graph,
   用于 proposal 局域更新时一次性收集 affected sites。
+- `particle_hole_lower_block::Bool`: 若为 `true`, lower row 表示 PH 表象中的 down hole;
+  若为 `false`, lower row 表示 nonPH 表象中的 down electron。
 """
 struct CompositeBackflowTerm <: AbstractBackflowTerm
     epsilon_terms::Vector{BackflowEpsilonTerm}
     source_groups::Vector{DirectedBackflowSourceGroup}
     terms::Vector{AbstractBackflowCorrectionTerm}
     incoming_source_sites_by_target::Vector{Vector{Int}}
+    particle_hole_lower_block::Bool
 
     function CompositeBackflowTerm(
         epsilon_terms::Vector{BackflowEpsilonTerm},
-        source_groups::Vector{DirectedBackflowSourceGroup},
+        source_groups::Vector{DirectedBackflowSourceGroup};
+        particle_hole_lower_block::Bool=false,
     )
         term_list = AbstractBackflowCorrectionTerm[]
         for epsilon_term in epsilon_terms
@@ -392,6 +396,7 @@ struct CompositeBackflowTerm <: AbstractBackflowTerm
             source_groups,
             term_list,
             build_composite_incoming_from_groups(source_groups),
+            particle_hole_lower_block,
         )
     end
 end
@@ -1416,6 +1421,49 @@ function backflow_h_sigma(state_code::Int8, spin::Int8)::Float64
 end
 
 """
+用途: 判断当前 row 是否是 PH 表象中的 lower block down-hole row。
+
+参数:
+- `backflow_term::CompositeBackflowTerm`: backflow 对象, 其中包含 PH lower-block flag。
+- `row_offset::Int`: site 内部行偏移, `1` 为 upper row, `2` 为 lower row。
+
+返回:
+- `Bool`: 当 backflow 使用 PH lower block 且 row_offset 为 `2` 时返回 `true`。
+"""
+function is_particle_hole_lower_row(
+    backflow_term::CompositeBackflowTerm,
+    row_offset::Int,
+)::Bool
+    return backflow_term.particle_hole_lower_block && row_offset == 2
+end
+
+"""
+用途: 计算 backflow output row 在当前物理电子构型中是否被占据。
+
+数学公式:
+- nonPH 或 upper row: `n_{i,sigma}`。
+- PH lower row: `h_{i,down} = 1 - n_{i,down}`。
+
+参数:
+- `state_code::Int8`: site 的原始电子构型编码。
+- `spin::Int8`: 当前 row 对应的自旋标签, lower row 仍传入 `DN`。
+- `is_ph_lower_row::Bool`: 是否按 PH down-hole 解释 lower row。
+
+返回:
+- `Float64`: 取值为 `0.0` 或 `1.0`。
+"""
+function backflow_row_occupation_factor(
+    state_code::Int8,
+    spin::Int8,
+    is_ph_lower_row::Bool,
+)::Float64
+    if is_ph_lower_row
+        return backflow_h_sigma(state_code, DN)
+    end
+    return backflow_n_sigma(state_code, spin)
+end
+
+"""
 用途: 计算 Eq.(5) 中 `eta2` 对给定 `(i, j, sigma)` 的局域 virtual hopping 因子。
 
 数学公式:
@@ -1540,6 +1588,59 @@ function compute_backflow_eta_contribution(
         eta2_factor=eta2_factor,
         eta3_factor=eta3_factor,
         eta4_factor=eta4_factor,
+    )
+end
+
+"""
+用途: 根据 PH/nonPH row 解释计算单条 source bond 的 eta contribution。
+
+数学公式:
+- nonPH 或 upper row 使用 `f(state_i, state_j, sigma)`。
+- PH lower row 使用 swapped-sites 规则 `f(state_j, state_i, DN)`, 例如 eta1 从
+  `D_i H_j` 变为 `H_i D_j`。
+
+参数:
+- `state_i, state_j::Int8`: source site 与 target site 的原始电子构型。
+- `spin::Int8`: 当前 row 的自旋标签。
+- `bond_amplitude::T`: source bond 振幅。
+- `eta1_value, eta2_value, eta3_value, eta4_value::T`: backflow 参数值。
+- `is_ph_lower_row::Bool`: 是否按 PH lower block 解释。
+
+返回:
+- `NamedTuple`: 与 `compute_backflow_eta_contribution` 相同。
+"""
+function compute_backflow_eta_contribution_for_row(
+    state_i::Int8,
+    state_j::Int8,
+    spin::Int8,
+    bond_amplitude::T,
+    eta1_value::T,
+    eta2_value::T,
+    eta3_value::T,
+    eta4_value::T,
+    is_ph_lower_row::Bool,
+) where {T}
+    if is_ph_lower_row
+        return compute_backflow_eta_contribution(
+            state_j,
+            state_i,
+            DN,
+            bond_amplitude,
+            eta1_value,
+            eta2_value,
+            eta3_value,
+            eta4_value,
+        )
+    end
+    return compute_backflow_eta_contribution(
+        state_i,
+        state_j,
+        spin,
+        bond_amplitude,
+        eta1_value,
+        eta2_value,
+        eta3_value,
+        eta4_value,
     )
 end
 
@@ -2019,6 +2120,7 @@ end
 - `source_count::Int`: 当前 source row 数量.
 - `state_i::Int8`: source site 的状态编码.
 - `get_state_j::Function`: `(site_index) -> Int8`, 用于读取 target site 状态.
+- `backflow_term::CompositeBackflowTerm`: 当前 backflow 对象, 提供 PH lower-block flag.
 - `source_group::DirectedBackflowSourceGroup`: directed source group.
 - `site_index::Int`: 当前 site 编号.
 - `row_offset::Int`: 当前 site 内部自旋行偏移.
@@ -2033,6 +2135,7 @@ function add_source_group_chain_rule_source_weights_and_track!(
     source_count::Int,
     state_i::Int8,
     get_state_j::Function,
+    backflow_term::CompositeBackflowTerm,
     source_group::DirectedBackflowSourceGroup,
     site_index::Int,
     row_offset::Int,
@@ -2044,6 +2147,7 @@ function add_source_group_chain_rule_source_weights_and_track!(
 
     has_eta = false
     spin = backflow_spin_from_row_offset(row_offset)
+    is_ph_lower_row = is_particle_hole_lower_row(backflow_term, row_offset)
     eta1_value = T(source_group.eta1_term.eta1_bf)
     eta2_value = T(source_group.eta2_term.eta2_bf)
     eta3_value = T(source_group.eta3_term.eta3_bf)
@@ -2054,7 +2158,7 @@ function add_source_group_chain_rule_source_weights_and_track!(
         state_j = get_state_j(target_site)
         target_row = 2 * (target_site - 1) + row_offset
         bond_amplitude = T(source_group.source_amplitudes[bond_index])
-        eta_contribution = compute_backflow_eta_contribution(
+        eta_contribution = compute_backflow_eta_contribution_for_row(
             state_i,
             state_j,
             spin,
@@ -2063,6 +2167,7 @@ function add_source_group_chain_rule_source_weights_and_track!(
             eta2_value,
             eta3_value,
             eta4_value,
+            is_ph_lower_row,
         )
         coefficient = eta_contribution.coefficient
         if coefficient == zero(T)
@@ -2159,8 +2264,9 @@ function fill_backflow_row_source_weights_from_state_getter!(
     )
     state_i = get_state(site_index)
     spin = backflow_spin_from_row_offset(row_offset)
+    is_ph_lower_row = is_particle_hole_lower_row(backflow_term, row_offset)
 
-    if backflow_n_sigma(state_i, spin) == 0.0
+    if backflow_row_occupation_factor(state_i, spin, is_ph_lower_row) == 0.0
         return source_count
     end
 
@@ -2172,6 +2278,7 @@ function fill_backflow_row_source_weights_from_state_getter!(
             source_count,
             state_i,
             get_state,
+            backflow_term,
             source_group,
             site_index,
             row_offset,
