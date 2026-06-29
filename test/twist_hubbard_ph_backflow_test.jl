@@ -60,3 +60,20 @@ end
     @test weights[lower_row_site1] ≈ 1.0
     @test weights[lower_row_site2] ≈ 0.7
 end
+
+@testset "PH backflow eta1 derivative uses down-hole direction" begin
+    state_vector = Int8[HOLE, DB]
+    ph_backflow = build_test_backflow(particle_hole_lower_block=true)
+    base_orbitals = reshape(collect(1.0:16.0), 4, 4)
+
+    derivative_pairs = mfVMC.Backflow.build_backflow_derivative_orbitals(
+        base_orbitals,
+        state_vector,
+        ph_backflow,
+    )
+    derivative_map = Dict(first(pair) => last(pair) for pair in derivative_pairs)
+
+    lower_row_site1 = 2
+    lower_row_site2 = 4
+    @test derivative_map[:bf_eta1][lower_row_site1, :] ≈ base_orbitals[lower_row_site2, :]
+end

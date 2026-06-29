@@ -2431,10 +2431,14 @@ function build_backflow_derivative_orbitals(
 
             for row_offset in 1:2
                 spin = backflow_spin_from_row_offset(row_offset)
+                is_ph_lower_row = is_particle_hole_lower_row(backflow_term, row_offset)
+                if backflow_row_occupation_factor(state_i, spin, is_ph_lower_row) == zero(T)
+                    continue
+                end
                 row_i = 2 * (site_i - 1) + row_offset
                 row_j = 2 * (site_j - 1) + row_offset
 
-                eta_contribution = compute_backflow_eta_contribution(
+                eta_contribution = compute_backflow_eta_contribution_for_row(
                     state_i,
                     state_j,
                     spin,
@@ -2443,6 +2447,7 @@ function build_backflow_derivative_orbitals(
                     eta2_value,
                     eta3_value,
                     eta4_value,
+                    is_ph_lower_row,
                 )
 
                 if eta_contribution.eta1_factor != zero(T)
