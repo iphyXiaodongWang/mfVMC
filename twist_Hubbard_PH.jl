@@ -16,7 +16,7 @@ include("twist_Hubbard.jl")
 - `Dict{String, Any}`: `ArgParse.parse_args` 返回的参数字典。
 
 说明:
-- 第一阶段只允许 PH determinant + projector, 不暴露 `--enable_backflow` 或 `bf_*` 参数。
+- PH determinant 默认允许通过 `--enable_backflow` 和 `bf_*` 参数启用 PH-aware backflow。
 - mean-field 固定 `chi1x = 1`, 优化 `chi1y`, `chi2`, pairing `etax/etay`, `mu`,
   以及 AFM/Stripe order。
 """
@@ -80,6 +80,30 @@ function parse_twist_ph_commandline()
         help = "Chemical potential in PH mean-field"
         arg_type = Float64
         default = -3.0
+        "--enable_backflow"
+        help = "Enable twist Hubbard PH backflow"
+        arg_type = String
+        default = "true"
+        "--bf_epsilon"
+        help = "Backflow epsilon initial value"
+        arg_type = Float64
+        default = 1.0
+        "--bf_eta1"
+        help = "Backflow eta1 initial value"
+        arg_type = Float64
+        default = 0.0
+        "--bf_eta2"
+        help = "Backflow eta2 initial value"
+        arg_type = Float64
+        default = 0.0
+        "--bf_eta3"
+        help = "Backflow eta3 initial value"
+        arg_type = Float64
+        default = 0.0
+        "--bf_eta4"
+        help = "Backflow eta4 initial value"
+        arg_type = Float64
+        default = 0.0
         "--target_sz"
         help = "Target total Sz"
         arg_type = Int
@@ -429,13 +453,14 @@ end
 
 参数:
 - `vwf`: determinant 波函数对象。
-- `param_names::Vector{Symbol}`: 完整参数名列表, 顺序为 mean-field, projector。
+- `param_names::Vector{Symbol}`: 完整参数名列表, 顺序为 mean-field, projector, backflow。
 - `params::Vector{Float64}`: 与 `param_names` 对齐的完整参数值。
 - `lx, ly::Int`: 晶格尺寸。
 - `bcx, bcy::Float64`: mean-field 边界条件因子。
 - `tx, ty::Float64`: physical hopping, 保留用于接口兼容; mean-field gauge 固定为 `chi_x=1`, `chi_y=chi1y`。
 - `target_sz::Int`: 目标 total Sz。
 - `nparams_proj::Int`: projector 参数数量。
+- `nparams_backflow::Int`: backflow 参数数量。
 - `stripe_wavevector::Float64`: stripe 波矢 `Q`。
 - `stripe_center_offset::Float64`: stripe 中心偏移 `x0`。
 - `active_wf_param_names::Union{Nothing, Vector{Symbol}}`: 参与求导和 SR 的 mean-field 参数名; `nothing` 表示全部。
@@ -455,16 +480,19 @@ function update_twist_ph_ansatz!(
     ty::Float64,
     target_sz::Int;
     nparams_proj::Int=0,
+    nparams_backflow::Int=0,
     stripe_wavevector::Float64=0.0,
     stripe_center_offset::Float64=0.0,
     active_wf_param_names::Union{Nothing,Vector{Symbol}}=nothing,
 )::Nothing
     total_param_count = length(param_names)
-    nparams_wf = total_param_count - nparams_proj
+    nparams_wf = total_param_count - nparams_proj - nparams_backflow
     wf_param_names = param_names[1:nparams_wf]
     wf_param_values = params[1:nparams_wf]
-    projector_param_names = nparams_proj > 0 ? param_names[(nparams_wf+1):total_param_count] : Symbol[]
-    projector_param_values = nparams_proj > 0 ? params[(nparams_wf+1):total_param_count] : Float64[]
+    projector_param_names = nparams_proj > 0 ? param_names[(nparams_wf+1):(nparams_wf+nparams_proj)] : Symbol[]
+    projector_param_values = nparams_proj > 0 ? params[(nparams_wf+1):(nparams_wf+nparams_proj)] : Float64[]
+    backflow_param_names = nparams_backflow > 0 ? param_names[(nparams_wf+nparams_proj+1):total_param_count] : Symbol[]
+    backflow_param_values = nparams_backflow > 0 ? params[(nparams_wf+nparams_proj+1):total_param_count] : Float64[]
 
     derivative_wf_param_names = active_wf_param_names === nothing ? wf_param_names : active_wf_param_names
     wf_param_name_set = Set(wf_param_names)
@@ -511,6 +539,9 @@ function update_twist_ph_ansatz!(
 
     if !isempty(projector_param_names)
         update_vwf_projector_params!(vwf, projector_param_names, projector_param_values)
+    end
+    if !isempty(backflow_param_names)
+        update_vwf_backflow_params!(vwf, backflow_param_names, backflow_param_values)
     end
     init_gswf!(vwf)
     return nothing
@@ -639,13 +670,28 @@ function main_twist_ph()::Nothing
         jastrow_dx_max=jastrow_dx_max,
         jastrow_dy_max=jastrow_dy_max,
     )
-    backflow = NoBackflowTerm()
+    hopping_bonds = build_twist_nearest_neighbor_bonds(lx, ly)
+    source_bonds, source_amplitudes = build_twist_backflow_source_data(hopping_bonds, tx, ty, t2)
+    backflow = build_twist_optional_backflow(
+        parse_twist_bool_flag(args["enable_backflow"], "--enable_backflow"),
+        source_bonds,
+        source_amplitudes,
+        args["bf_epsilon"],
+        args["bf_eta1"],
+        args["bf_eta2"],
+        args["bf_eta3"],
+        args["bf_eta4"];
+        particle_hole_lower_block=true,
+    )
     proj_param_names = projector_param_names(projector)
     proj_init_params = projector_param_values(projector)
     nparams_proj = length(proj_param_names)
+    backflow_param_name_list = backflow_param_names(backflow)
+    backflow_init_params = backflow_param_values(backflow)
+    nparams_backflow = length(backflow_param_name_list)
 
-    init_params = vcat(wf_init_params, proj_init_params)
-    param_names = vcat(wf_param_names, proj_param_names)
+    init_params = vcat(wf_init_params, proj_init_params, backflow_init_params)
+    param_names = vcat(wf_param_names, proj_param_names, backflow_param_name_list)
 
     if !isempty(init_params_json)
         init_params = build_twist_init_params_from_json_with_defaults(init_params_json, param_names, init_params)
@@ -669,13 +715,18 @@ function main_twist_ph()::Nothing
     sr_init_params = uses_param_subset ? init_params[active_param_indices] : init_params
     wf_param_name_set = Set(wf_param_names)
     projector_param_name_set = Set(proj_param_names)
+    backflow_param_name_set = Set(backflow_param_name_list)
     active_wf_param_names = [name for name in sr_param_names if name in wf_param_name_set]
     active_projector_param_names = [name for name in sr_param_names if name in projector_param_name_set]
+    active_backflow_param_names = [name for name in sr_param_names if name in backflow_param_name_set]
     set_active_twist_projector_derivative_param_names!(
         proj_param_names;
         active_projector_param_names=uses_param_subset ? active_projector_param_names : nothing,
     )
-    set_active_twist_backflow_derivative_param_names!(Symbol[])
+    set_active_twist_backflow_derivative_param_names!(
+        backflow_param_name_list;
+        active_backflow_param_names=uses_param_subset ? active_backflow_param_names : nothing,
+    )
 
     term_setup = build_twist_hamiltonian_terms(lx, ly, tx, ty, t2, onsite_u)
     ham = GeneralModel(n_sites, term_setup.all_terms)
@@ -707,7 +758,7 @@ function main_twist_ph()::Nothing
         println("Initial parameters: $(init_params)")
         println("twist Hubbard PH particle numbers: N_up=$(nup), N_down=$(ndn), N_e=$(nelec), N_occ_PH=$(n_occupied_orbitals)")
         println("Nearest-neighbor hopping: tx=$(tx), ty=$(ty)")
-        println("Backflow enabled: false")
+        println("Backflow enabled: $(mfVMC.Backflow.uses_backflow(backflow))")
         if !isempty(fixed_param_values)
             fixed_param_messages = [
                 "$(String(param_name))=$(fixed_param_values[param_name])"
@@ -733,6 +784,7 @@ function main_twist_ph()::Nothing
         ty,
         target_sz;
         nparams_proj=nparams_proj,
+        nparams_backflow=nparams_backflow,
         stripe_wavevector=stripe_wavevector,
         stripe_center_offset=stripe_center_offset,
     )
@@ -761,6 +813,7 @@ function main_twist_ph()::Nothing
                 ty,
                 target_sz;
                 nparams_proj=nparams_proj,
+                nparams_backflow=nparams_backflow,
                 stripe_wavevector=stripe_wavevector,
                 stripe_center_offset=stripe_center_offset,
                 active_wf_param_names=derivative_wf_param_names,

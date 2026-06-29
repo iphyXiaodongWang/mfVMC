@@ -77,3 +77,25 @@ end
     lower_row_site2 = 4
     @test derivative_map[:bf_eta1][lower_row_site1, :] ≈ base_orbitals[lower_row_site2, :]
 end
+
+include(joinpath(@__DIR__, "..", "twist_Hubbard_PH.jl"))
+
+@testset "twist Hubbard PH constructs PH-mode backflow" begin
+    hopping_bonds = build_twist_nearest_neighbor_bonds(2, 2)
+    source_bonds, source_amplitudes = build_twist_backflow_source_data(hopping_bonds, 1.0, 1.0, 0.0)
+    backflow = build_twist_optional_backflow(
+        true,
+        source_bonds,
+        source_amplitudes,
+        1.0,
+        0.2,
+        0.0,
+        0.0,
+        0.0;
+        particle_hole_lower_block=true,
+    )
+
+    @test mfVMC.Backflow.uses_backflow(backflow)
+    @test backflow.particle_hole_lower_block
+    @test mfVMC.Backflow.backflow_param_names(backflow) == [:bf_epsilon, :bf_eta1, :bf_eta2, :bf_eta3, :bf_eta4]
+end

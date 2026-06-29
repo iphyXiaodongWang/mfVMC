@@ -1252,6 +1252,7 @@ end
 - `source_bonds::Vector{Tuple{Int, Int}}`: 有向 source bond 列表。
 - `source_amplitudes::Vector{Float64}`: 与 source bond 对齐的物理 hopping 振幅。
 - `bf_epsilon, bf_eta1, bf_eta2, bf_eta3, bf_eta4::Float64`: backflow 参数初值。
+- `particle_hole_lower_block::Bool`: 是否将 lower block 解释为 PH down-hole row。
 
 返回:
 - `CompositeBackflowTerm`: 参数顺序为 `bf_epsilon`, `bf_eta1`, `bf_eta2`, `bf_eta3`, `bf_eta4`。
@@ -1264,6 +1265,8 @@ function build_twist_composite_backflow(
     bf_eta2::Float64,
     bf_eta3::Float64,
     bf_eta4::Float64,
+;
+    particle_hole_lower_block::Bool=false,
 )
     epsilon_terms = [
         BackflowEpsilonTerm(
@@ -1293,7 +1296,11 @@ function build_twist_composite_backflow(
             eta4_bf=bf_eta4,
         ),
     )
-    return CompositeBackflowTerm(epsilon_terms, [hubbard_group])
+    return CompositeBackflowTerm(
+        epsilon_terms,
+        [hubbard_group];
+        particle_hole_lower_block=particle_hole_lower_block,
+    )
 end
 
 """
@@ -1303,6 +1310,7 @@ end
 - `enable_backflow::Bool`: 是否启用 backflow。
 - `source_bonds, source_amplitudes`: backflow source 数据。
 - `bf_epsilon, bf_eta1, bf_eta2, bf_eta3, bf_eta4::Float64`: backflow 参数初值。
+- `particle_hole_lower_block::Bool`: 是否将 lower block 解释为 PH down-hole row。
 
 返回:
 - `AbstractBackflowTerm`: 开启时为 `CompositeBackflowTerm`, 关闭时为 `NoBackflowTerm()`。
@@ -1316,6 +1324,8 @@ function build_twist_optional_backflow(
     bf_eta2::Float64,
     bf_eta3::Float64,
     bf_eta4::Float64,
+;
+    particle_hole_lower_block::Bool=false,
 )
     if !enable_backflow
         return NoBackflowTerm()
@@ -1328,6 +1338,7 @@ function build_twist_optional_backflow(
         bf_eta2,
         bf_eta3,
         bf_eta4,
+        particle_hole_lower_block=particle_hole_lower_block,
     )
 end
 
