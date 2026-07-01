@@ -234,6 +234,126 @@ end
 # 3. SR Optimization Helpers
 # ==============================================================================
 
+const SR_STEP_TIMING_LABELS = [
+    "sr_phase_bcast_params",
+    "sr_phase_update_vwf",
+    "VMCRunner(auto_fix)",
+    "sr_phase_reset_buffers",
+    "sr_phase_warmup",
+    "driver_rebuild_inverse!",
+    "sr_phase_measurement_loop",
+    "backflow_rankk_ratio_only",
+    "backflow_rankk_ratio_blas",
+    "local_energy(call)",
+    "accumulate_sr_stats!",
+    "compute_grad_log_psi! (in SR)",
+    "twist_grad_meanfield",
+    "twist_grad_projector",
+    "twist_grad_backflow_build_derivative_orbitals",
+    "twist_grad_backflow_trace",
+    "sr_accumulate_E",
+    "sr_accumulate_O_avg",
+    "sr_accumulate_EO_avg",
+    "accumulate_sr_matrix!",
+    "sr_record_scalar!",
+    "sr_increment_counter!",
+    "collect_sr_data",
+    "mpi_reduce_all",
+    "mpi_gather_scalar",
+    "sr_phase_root_solve_update_log",
+    "solve_sr_update",
+]
+
+"""
+用途: 从全局 timing 统计中读取某个 label 在当前 SR step 的总耗时。
+
+参数:
+- `label::AbstractString`: 计时标签名称。
+
+返回:
+- `Float64`: 当前 rank 上该 label 累积的秒数; 若没有该 label, 返回 `0.0`。
+"""
+function sr_timing_total_for_label(label::AbstractString)::Float64
+    stats = Timing._global_timing
+    label_index = findfirst(==(String(label)), stats.labels)
+    if label_index === nothing
+        return 0.0
+    end
+    return stats.total_times[label_index]
+end
+
+"""
+用途: 记录当前 SR step 开始时各 timing label 的累计总耗时。
+
+参数:
+- 无。读取 `Timing._global_timing` 的当前累计值。
+
+返回:
+- `Dict{String, Float64}`: label 到累计秒数的映射。
+
+说明:
+- Emery 风格的 timing report 需要整段运行持续累计, 因此 SR step 计时不能每步
+  `timing_reset!()`. 本函数保存 step 起点快照, 后续写 TSV 时用差值表示本步耗时。
+"""
+function snapshot_sr_timing_totals()::Dict{String,Float64}
+    stats = Timing._global_timing
+    return Dict(
+        stats.labels[index] => stats.total_times[index]
+        for index in eachindex(stats.labels)
+    )
+end
+
+"""
+用途: 写入 SR step 分段计时 TSV 文件表头。
+
+参数:
+- `timing_log_file::AbstractString`: 输出文件路径。
+
+返回:
+- `nothing`。
+"""
+function write_sr_step_timing_header!(timing_log_file::AbstractString)::Nothing
+    open(timing_log_file, "w") do io
+        println(io, join(vcat(["Step", "Total_s"], SR_STEP_TIMING_LABELS), "\t"))
+    end
+    return nothing
+end
+
+"""
+用途: 追加单个 SR step 的分段计时到 TSV 文件。
+
+参数:
+- `timing_log_file::AbstractString`: 输出文件路径。
+- `step::Int`: 当前 SR step 编号。
+- `total_elapsed::Float64`: 当前 step 的总 wall-clock 秒数。
+- `step_start_timing_totals::Dict{String, Float64}`: step 开始时的累计 timing 快照。
+
+返回:
+- `nothing`。
+
+说明:
+- 这些计时来自当前 rank 的 `Timing._global_timing` 与 step 起点快照的差值;
+  在常规单进程或各 rank 工作量接近时可直接用于定位热点。MPI 多进程强不均衡时,
+  后续可再升级为 rank 间 max-reduction 计时。
+"""
+function append_sr_step_timing_row!(
+    timing_log_file::AbstractString,
+    step::Int,
+    total_elapsed::Float64,
+    step_start_timing_totals::Dict{String,Float64},
+)::Nothing
+    row_values = Any[step, total_elapsed]
+    for label in SR_STEP_TIMING_LABELS
+        elapsed_since_step_start =
+            sr_timing_total_for_label(label) - get(step_start_timing_totals, label, 0.0)
+        push!(row_values, elapsed_since_step_start)
+    end
+    open(timing_log_file, "a") do io
+        println(io, join(row_values, "\t"))
+    end
+    return nothing
+end
+
 """
     run_sr_optimization(model, vwf, kernel, initial_params, update_vwf_func!, 
                         sr_params; log_file="sr_history.txt")
@@ -248,7 +368,8 @@ function run_sr_optimization(model, vwf, kernel,
     sr_params::SRParams; # <--- 接口变简洁了
     log_file="sr_history.txt",
     param_names::Union{Nothing,Vector{Symbol}}=nothing,
-    lr_func::Function=(lr0, step) -> lr0)
+    lr_func::Function=(lr0, step) -> lr0,
+    timing_log_file::AbstractString="")
 
     session = init_mpi_session()
     rank = session.rank
@@ -297,26 +418,45 @@ function run_sr_optimization(model, vwf, kernel,
             # 使用 join 确保表头格式工整
             println(io, "# " * join(headers, "\t\t"))
         end
+
+        if !isempty(timing_log_file)
+            write_sr_step_timing_header!(timing_log_file)
+            println(" SR timing log: $(timing_log_file)")
+        end
     end
 
     # --- Optimization Loop ---
     for step in 1:sr_params.n_steps
+        step_start_timing_totals = snapshot_sr_timing_totals()
         step_start_time = time()
 
         # 1. Sync Parameters
+        phase_start_time = time()
         current_params = MPI.bcast(current_params, session.root, session.comm)
+        if !isempty(timing_log_file)
+            timing_accumulate!("sr_phase_bcast_params", time() - phase_start_time)
+        end
 
         # 2. Update VWF Matrix (User Callback)
+        phase_start_time = time()
         update_vwf_func!(vwf, current_params)
+        if !isempty(timing_log_file)
+            timing_accumulate!("sr_phase_update_vwf", time() - phase_start_time)
+        end
 
         # 3. [Safety] Re-create Runner
         # 确保 Runner 内部的 log_psi 缓存是基于新参数的
         runner = @timed "VMCRunner(auto_fix)" VMCRunner(model, vwf; kernel=kernel, auto_fix=true)
 
         # 4. Sampling Prep
+        phase_start_time = time()
         reset_buffers!(obs_buf)
+        if !isempty(timing_log_file)
+            timing_accumulate!("sr_phase_reset_buffers", time() - phase_start_time)
+        end
 
         # Warmup (Necessary after parameter change)
+        phase_start_time = time()
         steps_since_rebuild = 0
         nstep = 0
         naccept = 0
@@ -335,8 +475,12 @@ function run_sr_optimization(model, vwf, kernel,
             end
         end
         @timed "driver_rebuild_inverse!" rebuild_inverse!(vwf)
+        if !isempty(timing_log_file)
+            timing_accumulate!("sr_phase_warmup", time() - phase_start_time)
+        end
 
         # 5. Measurement Loop
+        phase_start_time = time()
         for _ in 1:n_local
             for _ in 1:vmc.decorr_steps
                 for _ in 1:Nlat
@@ -357,11 +501,15 @@ function run_sr_optimization(model, vwf, kernel,
             @timed "accumulate_sr_stats!" accumulate_sr_stats!(obs_buf, vwf, E_loc)
             @timed "sr_increment_counter!" increment_counter!(obs_buf)
         end
+        if !isempty(timing_log_file)
+            timing_accumulate!("sr_phase_measurement_loop", time() - phase_start_time)
+        end
 
         # 6. Collect & Solve
         means, E_history = @timed "collect_sr_data" collect_sr_data(obs_buf, session)
 
         if is_root
+            phase_start_time = time()
             @printf("Step %3d | Accept rate: %.2f %%\n", step, 100 * naccept / nstep)
             # [Fix] 使用泛型 Solver，自动处理类型
             delta, grad_vec, E_err = @timed "solve_sr_update" solve_sr_update(means, E_history;
@@ -400,11 +548,22 @@ function run_sr_optimization(model, vwf, kernel,
                 writedlm(io, permutedims(row))
             end
             flush(stdout)
+            if !isempty(timing_log_file)
+                timing_accumulate!("sr_phase_root_solve_update_log", time() - phase_start_time)
+            end
         end
 
         if is_root
             step_elapsed = time() - step_start_time
             @printf("Step %3d | SR loop time: %.2f s\n", step, step_elapsed)
+            if !isempty(timing_log_file)
+                append_sr_step_timing_row!(
+                    timing_log_file,
+                    step,
+                    step_elapsed,
+                    step_start_timing_totals,
+                )
+            end
         end
     end
 
