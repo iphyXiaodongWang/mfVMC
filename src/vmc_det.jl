@@ -964,6 +964,69 @@ function compute_rankk_update_factors!(
     return c_matrix, small_k_matrix
 end
 
+"""
+用途: 只计算 rank-k determinant ratio 所需的小矩阵 `K`, 不构造完整的 `C` 矩阵。
+
+数学公式:
+- `Delta = A_new^T - A_old^T`。
+- `K_ab = delta_ab + sum_l A^{-1}_{l, e_b} * Delta_{l, a}`。
+- 这里 `a` 是被替换的新列编号, `e_b` 是对应的旧 determinant 列编号。
+
+参数:
+- `small_k_matrix::AbstractMatrix{T}`: 输出 `K` 小矩阵, 形状必须为 `(k, k)`。
+- `delta_columns_buffer::AbstractMatrix{T}`: 临时 `Delta` buffer, 形状必须为 `(N, k)`。
+- `vwf::vwf_det{T}`: determinant 波函数对象。
+- `changed_electron_ids::AbstractVector{Int}`: 被替换的 determinant 列编号。
+- `new_columns::AbstractMatrix{T}`: proposal 后这些列的新列向量。
+
+返回:
+- `AbstractMatrix{T}`: 写入后的 `small_k_matrix`。
+
+说明:
+- 该函数用于 Metropolis ratio 或 Green 函数测量的只读路径。完整 inverse 更新还需要
+  `C = A^{-T} * Delta`, 因而在 accept 阶段由 `compute_rankk_update_factors!` 补算。
+"""
+function compute_rankk_ratio_matrix!(
+    small_k_matrix::AbstractMatrix{T},
+    delta_columns_buffer::AbstractMatrix{T},
+    vwf::vwf_det{T},
+    changed_electron_ids::AbstractVector{Int},
+    new_columns::AbstractMatrix{T},
+) where {T}
+    if size(new_columns, 2) != length(changed_electron_ids)
+        error("Rank-k ratio mismatch: got $(length(changed_electron_ids)) electron IDs, but $(size(new_columns, 2)) new columns.")
+    end
+
+    n_orb = size(vwf.awf_inv, 1)
+    k_count = length(changed_electron_ids)
+    if size(small_k_matrix, 1) != k_count || size(small_k_matrix, 2) != k_count
+        error("Small K matrix buffer shape mismatch: expected ($(k_count), $(k_count)), got $(size(small_k_matrix)).")
+    end
+    if size(delta_columns_buffer, 1) != n_orb || size(delta_columns_buffer, 2) != k_count
+        error("Delta buffer shape mismatch: expected ($(n_orb), $(k_count)), got $(size(delta_columns_buffer)).")
+    end
+
+    copyto!(delta_columns_buffer, new_columns)
+    @inbounds for column_index in 1:k_count
+        electron_id = changed_electron_ids[column_index]
+        @views delta_columns_buffer[:, column_index] .-= vwf.awf_mat_t[:, electron_id]
+    end
+
+    @inbounds for column_index in 1:k_count
+        for row_index in 1:k_count
+            electron_id = changed_electron_ids[row_index]
+            value = zero(T)
+            for orbital_index in 1:n_orb
+                value += vwf.awf_inv[orbital_index, electron_id] * delta_columns_buffer[orbital_index, column_index]
+            end
+            small_k_matrix[column_index, row_index] = value
+        end
+        small_k_matrix[column_index, column_index] += one(T)
+    end
+
+    return small_k_matrix
+end
+
 
 """
 用途: 计算 rank-k 局域更新所需的 `C` 与 `K` 小矩阵。
@@ -1142,11 +1205,9 @@ function cache_backflow_rankk_update!(vwf::vwf_det{T}, proposal::MoveProposal) w
 
     changed_electron_ids = @view ws.cached_changed_electron_ids[1:changed_count]
     cached_new_columns = @view ws.cached_new_columns[:, 1:changed_count]
-    cached_c_matrix = @view ws.cached_c_matrix[:, 1:changed_count]
     cached_small_k_matrix = @view ws.cached_small_k_matrix[1:changed_count, 1:changed_count]
     cached_delta_columns = @view ws.cached_small_k_inverse[:, 1:changed_count]
-    @timed "backflow_rankk_factor" compute_rankk_update_factors!(
-        cached_c_matrix,
+    @timed "backflow_rankk_ratio_only" compute_rankk_ratio_matrix!(
         cached_small_k_matrix,
         cached_delta_columns,
         vwf,
@@ -1251,6 +1312,16 @@ function update_rankk_from_cache!(vwf::vwf_det{T}, ratio::T) where {T}
         new_columns = @view ws.cached_new_columns[:, 1:changed_count]
         c_matrix = @view ws.cached_c_matrix[:, 1:changed_count]
         small_k_matrix = @view ws.cached_small_k_matrix[1:changed_count, 1:changed_count]
+        delta_columns_buffer = @view ws.cached_small_k_inverse[:, 1:changed_count]
+        @timed "backflow_rankk_factor" compute_rankk_update_factors!(
+            c_matrix,
+            small_k_matrix,
+            delta_columns_buffer,
+            vwf,
+            changed_electron_ids,
+            new_columns,
+        )
+
         small_k_inverse = @view ws.cached_small_k_inverse[1:changed_count, 1:changed_count]
         small_k_inverse .= inv(small_k_matrix)
 

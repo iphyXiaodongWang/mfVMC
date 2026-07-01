@@ -80,6 +80,90 @@ function collect_source_weight_map(state_vector, backflow_term, row_index)
     return Dict(source_rows[index] => source_weights[index] for index in 1:source_count)
 end
 
+"""
+用途: 读取当前全局 timing 统计中某个 label 的调用次数。
+
+参数:
+- `label::String`: timing label 名称。
+
+返回:
+- `Int`: label 的调用次数; 若 label 尚未出现, 返回 `0`。
+"""
+function timing_label_call_count(label::String)::Int
+    label_index = findfirst(==(label), mfVMC.Timing._global_timing.labels)
+    if label_index === nothing
+        return 0
+    end
+    return mfVMC.Timing._global_timing.call_counts[label_index]
+end
+
+"""
+用途: 构造一个最小 PH backflow determinant 波函数和一个有效的 up-spin hop proposal。
+
+参数:
+- 无。内部固定使用 `2x2` Hubbard PH 构型 `DB, HOLE, UP, DN`。
+
+返回:
+- `Tuple`: `(vwf, proposal)`, 其中 `vwf` 是已初始化 inverse 的 determinant 波函数,
+  `proposal` 是从 site 1 到 site 2 的 up-spin hop。
+"""
+function build_minimal_ph_backflow_vwf_and_hop_proposal()
+    lx = 2
+    ly = 2
+    n_sites = lx * ly
+    sampler = config_Hubbard(n_sites, 2, 2; ifPH=true)
+    sampler.state .= Int8[DB, HOLE, UP, DN]
+    initialize_lists!(sampler)
+    fill!(sampler.map_spin_to_id, 0)
+    fill!(sampler.electron_locs, 0)
+    electron_id_counter = 0
+    for site in 1:n_sites
+        if has_up(sampler.state[site])
+            electron_id_counter += 1
+            row_index = 2 * (site - 1) + UP
+            sampler.map_spin_to_id[row_index] = electron_id_counter
+            sampler.electron_locs[electron_id_counter] = row_index
+        end
+    end
+    for site in 1:n_sites
+        if !has_dn(sampler.state[site])
+            electron_id_counter += 1
+            row_index = 2 * (site - 1) + DN
+            sampler.map_spin_to_id[row_index] = electron_id_counter
+            sampler.electron_locs[electron_id_counter] = row_index
+        end
+    end
+
+    hopping_bonds = build_twist_nearest_neighbor_bonds(lx, ly)
+    source_bonds, source_amplitudes = build_twist_backflow_source_data(hopping_bonds, 1.0, 1.0, 0.0)
+    backflow = build_twist_optional_backflow(
+        true,
+        source_bonds,
+        source_amplitudes,
+        1.0,
+        0.2,
+        0.0,
+        0.0,
+        0.0;
+        particle_hole_lower_block=true,
+    )
+
+    base_orbitals = [
+        1.0 1.0 1.0 1.0
+        1.0 2.0 4.0 8.0
+        1.0 3.0 9.0 27.0
+        1.0 4.0 16.0 64.0
+        1.0 5.0 25.0 125.0
+        1.0 6.0 36.0 216.0
+        1.0 7.0 49.0 343.0
+        1.0 8.0 64.0 512.0
+    ]
+    vwf = mfVMC.VMC.vwf_det(base_orbitals, sampler; backflow=backflow)
+    mfVMC.VMC.init_gswf!(vwf)
+    proposal = build_single_hop(sampler, 1, 2, UP)
+    return vwf, proposal
+end
+
 @testset "PH backflow eta1 uses down-hole lower block" begin
     state_vector = Int8[HOLE, DB]
     ph_backflow = build_test_backflow(particle_hole_lower_block=true)
@@ -272,62 +356,31 @@ end
     end
 end
 
-@testset "PH backflow local ratio matches rebuild" begin
-    lx = 2
-    ly = 2
-    n_sites = lx * ly
-    sampler = config_Hubbard(n_sites, 2, 2; ifPH=true)
-    sampler.state .= Int8[DB, HOLE, UP, DN]
-    initialize_lists!(sampler)
-    fill!(sampler.map_spin_to_id, 0)
-    fill!(sampler.electron_locs, 0)
-    electron_id_counter = 0
-    for site in 1:n_sites
-        if has_up(sampler.state[site])
-            electron_id_counter += 1
-            row_index = 2 * (site - 1) + UP
-            sampler.map_spin_to_id[row_index] = electron_id_counter
-            sampler.electron_locs[electron_id_counter] = row_index
-        end
-    end
-    for site in 1:n_sites
-        if !has_dn(sampler.state[site])
-            electron_id_counter += 1
-            row_index = 2 * (site - 1) + DN
-            sampler.map_spin_to_id[row_index] = electron_id_counter
-            sampler.electron_locs[electron_id_counter] = row_index
-        end
-    end
-
-    hopping_bonds = build_twist_nearest_neighbor_bonds(lx, ly)
-    source_bonds, source_amplitudes = build_twist_backflow_source_data(hopping_bonds, 1.0, 1.0, 0.0)
-    backflow = build_twist_optional_backflow(
-        true,
-        source_bonds,
-        source_amplitudes,
-        1.0,
-        0.2,
-        0.0,
-        0.0,
-        0.0;
-        particle_hole_lower_block=true,
-    )
-
-    base_orbitals = [
-        1.0 1.0 1.0 1.0
-        1.0 2.0 4.0 8.0
-        1.0 3.0 9.0 27.0
-        1.0 4.0 16.0 64.0
-        1.0 5.0 25.0 125.0
-        1.0 6.0 36.0 216.0
-        1.0 7.0 49.0 343.0
-        1.0 8.0 64.0 512.0
-    ]
-    vwf = mfVMC.VMC.vwf_det(base_orbitals, sampler; backflow=backflow)
+@testset "PH backflow ratio path uses ratio-only rank-k before accept" begin
+    vwf, proposal = build_minimal_ph_backflow_vwf_and_hop_proposal()
     vwf.backflow_debug_verify = true
-    mfVMC.VMC.init_gswf!(vwf)
+    previous_timing_flag = mfVMC.Timing.ENABLE_TIMING[]
+    mfVMC.Timing.timing_reset!()
+    mfVMC.Timing.ENABLE_TIMING[] = true
+    try
+        ratio = mfVMC.VMC.calc_backflow_ratio_local_update(vwf, proposal)
 
-    proposal = build_single_hop(sampler, 1, 2, UP)
+        @test timing_label_call_count("backflow_rankk_ratio_only") == 1
+        @test timing_label_call_count("backflow_rankk_factor") == 0
+
+        mfVMC.VMC.accept_backflow_local_update!(vwf, proposal, ratio)
+
+        @test timing_label_call_count("backflow_rankk_factor") == 1
+    finally
+        mfVMC.Timing.ENABLE_TIMING[] = previous_timing_flag
+        mfVMC.Timing.timing_reset!()
+    end
+end
+
+@testset "PH backflow local ratio matches rebuild" begin
+    vwf, proposal = build_minimal_ph_backflow_vwf_and_hop_proposal()
+    vwf.backflow_debug_verify = true
+
     fast_ratio = mfVMC.VMC.calc_backflow_ratio_local_update(vwf, proposal)
     rebuild_ratio = mfVMC.VMC.calc_ratio_rebuild(vwf, proposal)
 
