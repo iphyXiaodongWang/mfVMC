@@ -875,6 +875,147 @@ function measure_twist_interaction_charge_spin_energy(
 end
 
 """
+用途: 判断当前 Hubbard 构型是否属于无双占据子空间。
+
+参数:
+- `vwf`: determinant 波函数对象, 需要提供 `vwf.sampler.state`。
+
+返回:
+- `Float64`: 无双占据时返回 `1.0`, 否则返回 `0.0`。
+
+数学公式:
+- `I_no_doublon(C) = prod_i (1 - n_{i,up} n_{i,dn})`。
+- 后续强耦合 numerator 使用 `I_no_doublon(C) * E_eff(C)`。
+"""
+function measure_twist_no_doublon_indicator(vwf)::Float64
+    for site_state in vwf.sampler.state
+        if site_state == DB
+            return 0.0
+        end
+    end
+    return 1.0
+end
+
+"""
+用途: 判断单站点状态是否为 singly occupied。
+
+参数:
+- `site_state::Int8`: Hubbard site 状态, 可为 `HOLE`, `UP`, `DN`, `DB`。
+
+返回:
+- `Bool`: 状态为 `UP` 或 `DN` 时返回 `true`。
+"""
+function is_twist_singly_occupied_state(site_state::Int8)::Bool
+    return site_state == UP || site_state == DN
+end
+
+"""
+用途: 计算单向 Gutzwiller 投影 hopping 项的局域能量贡献。
+
+参数:
+- `site_to::Int`: `c^dag_{site_to,sigma}` 的目标站点。
+- `site_from::Int`: `c_{site_from,sigma}` 的源站点。
+- `spin::Int8`: 自旋, `UP` 或 `DN`。
+- `hopping::Float64`: 该 bond 的物理 hopping 振幅 `t_ij`。
+- `vwf`: determinant 波函数对象。
+
+返回:
+- `Float64`: `-t_ij <P_G c^dag_{to,sigma} c_{from,sigma} P_G>` 的局域估计。
+
+数学公式:
+- 在无双占据子空间内, `P_G c^dag_i c_j P_G` 只允许电子从 singly occupied
+  站点跳到 hole 站点, 因此要求 `state_i = HOLE` 且 `state_j` 含有 `spin`。
+"""
+function measure_twist_projected_hopping_direction_energy(
+    site_to::Int,
+    site_from::Int,
+    spin::Int8,
+    hopping::Float64,
+    vwf,
+)::Float64
+    state_to = vwf.sampler.state[site_to]
+    state_from = vwf.sampler.state[site_from]
+    if state_to != HOLE || (state_from & spin) == 0
+        return 0.0
+    end
+    return -hopping * real(measure_green(vwf, site_to, site_from, spin))
+end
+
+"""
+用途: 计算一组 bond 的一阶强耦合投影 hopping numerator。
+
+参数:
+- `bonds::Vector{Tuple{Int, Int}}`: 无向代表 bond 列表, 每个 bond 会自动加入两个方向。
+- `hopping::Float64`: 该 bond 类别的物理 hopping 振幅。
+- `vwf`: determinant 波函数对象。
+
+返回:
+- `Float64`: `I_no_doublon(C) * E_t^P(C)` 的当前构型 numerator。
+
+数学公式:
+- `E_t^P(C) = -sum_<ij>,sigma t_ij <P_G(c^dag_i c_j + c^dag_j c_i)P_G>`。
+- 若当前构型存在 doublon, numerator 按约定返回 `0`。
+"""
+function measure_twist_projected_hopping_energy_sum(
+    bonds::Vector{Tuple{Int,Int}},
+    hopping::Float64,
+    vwf,
+)::Float64
+    if measure_twist_no_doublon_indicator(vwf) == 0.0
+        return 0.0
+    end
+
+    energy = 0.0
+    for (site_i, site_j) in bonds
+        for spin in (UP, DN)
+            energy += measure_twist_projected_hopping_direction_energy(site_i, site_j, spin, hopping, vwf)
+            energy += measure_twist_projected_hopping_direction_energy(site_j, site_i, spin, hopping, vwf)
+        end
+    end
+    return energy
+end
+
+"""
+用途: 计算一组 bond 的二阶强耦合 superexchange numerator。
+
+参数:
+- `bonds::Vector{Tuple{Int, Int}}`: 无向代表 bond 列表。
+- `hopping::Float64`: 该 bond 类别的物理 hopping 振幅。
+- `onsite_u::Float64`: Hubbard onsite 相互作用 `U`。
+- `vwf`: determinant 波函数对象。
+
+返回:
+- `Float64`: `I_no_doublon(C) * E_J(C)` 的当前构型 numerator。
+
+数学公式:
+- `J_ij = 4 * t_ij^2 / U`。
+- `E_J(C) = sum_<ij> J_ij * <S_i dot S_j - 1/4 n_i n_j>`。
+- 只在两个端点都 singly occupied 时贡献; 若当前构型存在 doublon, numerator 返回 `0`。
+- 当 `U = 0` 时强耦合展开不适用, 这里返回 `0` 以保持 observable 有限。
+"""
+function measure_twist_projected_exchange_energy_sum(
+    bonds::Vector{Tuple{Int,Int}},
+    hopping::Float64,
+    onsite_u::Float64,
+    vwf,
+)::Float64
+    if measure_twist_no_doublon_indicator(vwf) == 0.0 || hopping == 0.0 || onsite_u == 0.0
+        return 0.0
+    end
+
+    exchange_j = 4.0 * hopping^2 / onsite_u
+    energy = 0.0
+    for (site_i, site_j) in bonds
+        state_i = vwf.sampler.state[site_i]
+        state_j = vwf.sampler.state[site_j]
+        if is_twist_singly_occupied_state(state_i) && is_twist_singly_occupied_state(state_j)
+            energy += exchange_j * (measure_SiSj(vwf, site_i, site_j) - 0.25)
+        end
+    end
+    return energy
+end
+
+"""
 用途: 构造 twist Hubbard measure 使用的 observables。
 
 参数:
@@ -885,6 +1026,8 @@ end
 - `t2_hopping_terms::Vector{OperatorTerm}`: 对角次近邻 hopping 项, 非空时加入 `:E_hop_t2`。
 - `interaction_terms::Vector{OperatorTerm}`: interaction Hamiltonian 项, 非空时加入 `:E_int`。
 - `onsite_u::Float64`: Hubbard onsite 相互作用强度, 用于加入 `:E_int_charge` 和 `:E_int_spin`。
+- `strong_coupling_bonds`: `build_twist_nearest_neighbor_bonds` 返回的 bond 分组。
+- `tx, ty, t2::Float64`: 强耦合投影 hopping 和 `J=4t^2/U` 使用的物理 hopping。
 
 返回:
 - `Dict{Symbol, Function}`: 包含总能量, 可选分项能量, 每个 site 的 `Sz` 和密度 `n`。
@@ -898,6 +1041,10 @@ function definition_twist_observables(
     t2_hopping_terms::Vector{OperatorTerm}=OperatorTerm[],
     interaction_terms::Vector{OperatorTerm}=OperatorTerm[],
     onsite_u::Float64=0.0,
+    strong_coupling_bonds=nothing,
+    tx::Float64=0.0,
+    ty::Float64=0.0,
+    t2::Float64=0.0,
 )::Dict{Symbol,Function}
     observables = Dict{Symbol,Function}()
     observables[:E] = local_energy
@@ -948,6 +1095,53 @@ function definition_twist_observables(
             onsite_u,
             vwf,
         ).spin
+    end
+    if strong_coupling_bonds !== nothing
+        x_bonds_local = copy(strong_coupling_bonds.x_bonds)
+        y_bonds_local = copy(strong_coupling_bonds.y_bonds)
+        t2_bonds_local = copy(strong_coupling_bonds.diagonal_bonds)
+        observables[:P_no_doublon] = (model, vwf) -> measure_twist_no_doublon_indicator(vwf)
+        observables[:E_pert_t_proj_x_num] = (model, vwf) -> measure_twist_projected_hopping_energy_sum(
+            x_bonds_local,
+            tx,
+            vwf,
+        )
+        observables[:E_pert_t_proj_y_num] = (model, vwf) -> measure_twist_projected_hopping_energy_sum(
+            y_bonds_local,
+            ty,
+            vwf,
+        )
+        observables[:E_pert_t_proj_t2_num] = (model, vwf) -> measure_twist_projected_hopping_energy_sum(
+            t2_bonds_local,
+            t2,
+            vwf,
+        )
+        observables[:E_pert_t_proj_num] = (model, vwf) ->
+            observables[:E_pert_t_proj_x_num](model, vwf) +
+            observables[:E_pert_t_proj_y_num](model, vwf) +
+            observables[:E_pert_t_proj_t2_num](model, vwf)
+        observables[:E_pert_J_proj_x_num] = (model, vwf) -> measure_twist_projected_exchange_energy_sum(
+            x_bonds_local,
+            tx,
+            onsite_u,
+            vwf,
+        )
+        observables[:E_pert_J_proj_y_num] = (model, vwf) -> measure_twist_projected_exchange_energy_sum(
+            y_bonds_local,
+            ty,
+            onsite_u,
+            vwf,
+        )
+        observables[:E_pert_J_proj_t2_num] = (model, vwf) -> measure_twist_projected_exchange_energy_sum(
+            t2_bonds_local,
+            t2,
+            onsite_u,
+            vwf,
+        )
+        observables[:E_pert_J_proj_num] = (model, vwf) ->
+            observables[:E_pert_J_proj_x_num](model, vwf) +
+            observables[:E_pert_J_proj_y_num](model, vwf) +
+            observables[:E_pert_J_proj_t2_num](model, vwf)
     end
     for x in 1:lx, y in 1:ly
         site = twist_site_index(x, y, ly)
@@ -1990,6 +2184,10 @@ function main_twist()::Nothing
                 t2_hopping_terms=term_setup.t2_hopping_terms,
                 interaction_terms=term_setup.interaction_terms,
                 onsite_u=onsite_u,
+                strong_coupling_bonds=hopping_bonds,
+                tx=tx,
+                ty=ty,
+                t2=t2,
             ),
             meas_params;
             history_observables=[
@@ -2001,6 +2199,15 @@ function main_twist()::Nothing
                 :E_int,
                 :E_int_charge,
                 :E_int_spin,
+                :P_no_doublon,
+                :E_pert_t_proj_num,
+                :E_pert_t_proj_x_num,
+                :E_pert_t_proj_y_num,
+                :E_pert_t_proj_t2_num,
+                :E_pert_J_proj_num,
+                :E_pert_J_proj_x_num,
+                :E_pert_J_proj_y_num,
+                :E_pert_J_proj_t2_num,
             ],
         )
         if is_root && results !== nothing

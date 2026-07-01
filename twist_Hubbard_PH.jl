@@ -1064,6 +1064,10 @@ function main_twist_ph()::Nothing
                 t2_hopping_terms=term_setup.t2_hopping_terms,
                 interaction_terms=term_setup.interaction_terms,
                 onsite_u=onsite_u,
+                strong_coupling_bonds=hopping_bonds,
+                tx=tx,
+                ty=ty,
+                t2=t2,
             ),
             meas_params;
             history_observables=[
@@ -1075,6 +1079,15 @@ function main_twist_ph()::Nothing
                 :E_int,
                 :E_int_charge,
                 :E_int_spin,
+                :P_no_doublon,
+                :E_pert_t_proj_num,
+                :E_pert_t_proj_x_num,
+                :E_pert_t_proj_y_num,
+                :E_pert_t_proj_t2_num,
+                :E_pert_J_proj_num,
+                :E_pert_J_proj_x_num,
+                :E_pert_J_proj_y_num,
+                :E_pert_J_proj_t2_num,
             ],
         )
         if is_root && results !== nothing
