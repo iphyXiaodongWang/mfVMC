@@ -731,7 +731,8 @@ end
 - `onsite_u::Float64`: onsite Hubbard 相互作用强度。
 
 返回:
-- `NamedTuple`: 包含 `hopping_terms`, `interaction_terms`, `all_terms`。
+- `NamedTuple`: 包含 `hopping_terms`, `tx_hopping_terms`, `ty_hopping_terms`,
+  `t2_hopping_terms`, `interaction_terms`, `all_terms`。
 
 数学公式:
 - `H_hop = -sum_<ij>,sigma t_ij (c^dag_{i,sigma} c_{j,sigma} + h.c.)`。
@@ -747,34 +748,40 @@ function build_twist_hamiltonian_terms(
 )
     n_sites = lx * ly
     hopping_bonds = build_twist_nearest_neighbor_bonds(lx, ly)
-    hopping_terms = OperatorTerm[]
+    tx_hopping_terms = OperatorTerm[]
+    ty_hopping_terms = OperatorTerm[]
+    t2_hopping_terms = OperatorTerm[]
     interaction_terms = OperatorTerm[]
 
     for (site_i, site_j) in hopping_bonds.x_bonds
-        push!(hopping_terms, OperatorTerm([:cdag_up, :c_up], [site_i, site_j], -tx))
-        push!(hopping_terms, OperatorTerm([:cdag_up, :c_up], [site_j, site_i], -tx))
-        push!(hopping_terms, OperatorTerm([:cdag_dn, :c_dn], [site_i, site_j], -tx))
-        push!(hopping_terms, OperatorTerm([:cdag_dn, :c_dn], [site_j, site_i], -tx))
+        push!(tx_hopping_terms, OperatorTerm([:cdag_up, :c_up], [site_i, site_j], -tx))
+        push!(tx_hopping_terms, OperatorTerm([:cdag_up, :c_up], [site_j, site_i], -tx))
+        push!(tx_hopping_terms, OperatorTerm([:cdag_dn, :c_dn], [site_i, site_j], -tx))
+        push!(tx_hopping_terms, OperatorTerm([:cdag_dn, :c_dn], [site_j, site_i], -tx))
     end
     for (site_i, site_j) in hopping_bonds.y_bonds
-        push!(hopping_terms, OperatorTerm([:cdag_up, :c_up], [site_i, site_j], -ty))
-        push!(hopping_terms, OperatorTerm([:cdag_up, :c_up], [site_j, site_i], -ty))
-        push!(hopping_terms, OperatorTerm([:cdag_dn, :c_dn], [site_i, site_j], -ty))
-        push!(hopping_terms, OperatorTerm([:cdag_dn, :c_dn], [site_j, site_i], -ty))
+        push!(ty_hopping_terms, OperatorTerm([:cdag_up, :c_up], [site_i, site_j], -ty))
+        push!(ty_hopping_terms, OperatorTerm([:cdag_up, :c_up], [site_j, site_i], -ty))
+        push!(ty_hopping_terms, OperatorTerm([:cdag_dn, :c_dn], [site_i, site_j], -ty))
+        push!(ty_hopping_terms, OperatorTerm([:cdag_dn, :c_dn], [site_j, site_i], -ty))
     end
     for (site_i, site_j) in hopping_bonds.diagonal_bonds
-        push!(hopping_terms, OperatorTerm([:cdag_up, :c_up], [site_i, site_j], -t2))
-        push!(hopping_terms, OperatorTerm([:cdag_up, :c_up], [site_j, site_i], -t2))
-        push!(hopping_terms, OperatorTerm([:cdag_dn, :c_dn], [site_i, site_j], -t2))
-        push!(hopping_terms, OperatorTerm([:cdag_dn, :c_dn], [site_j, site_i], -t2))
+        push!(t2_hopping_terms, OperatorTerm([:cdag_up, :c_up], [site_i, site_j], -t2))
+        push!(t2_hopping_terms, OperatorTerm([:cdag_up, :c_up], [site_j, site_i], -t2))
+        push!(t2_hopping_terms, OperatorTerm([:cdag_dn, :c_dn], [site_i, site_j], -t2))
+        push!(t2_hopping_terms, OperatorTerm([:cdag_dn, :c_dn], [site_j, site_i], -t2))
     end
     for site_i in 1:n_sites
         push!(interaction_terms, OperatorTerm([:n_up, :n_dn], [site_i, site_i], onsite_u))
     end
 
+    hopping_terms = vcat(tx_hopping_terms, ty_hopping_terms, t2_hopping_terms)
     all_terms = vcat(hopping_terms, interaction_terms)
     return (;
         hopping_terms=hopping_terms,
+        tx_hopping_terms=tx_hopping_terms,
+        ty_hopping_terms=ty_hopping_terms,
+        t2_hopping_terms=t2_hopping_terms,
         interaction_terms=interaction_terms,
         all_terms=all_terms,
     )
@@ -848,6 +855,9 @@ end
 参数:
 - `lx, ly::Int`: 晶格尺寸。
 - `hopping_terms::Vector{OperatorTerm}`: hopping Hamiltonian 项, 非空时加入 `:E_hop`。
+- `tx_hopping_terms::Vector{OperatorTerm}`: x 方向最近邻 hopping 项, 非空时加入 `:E_hop_tx`。
+- `ty_hopping_terms::Vector{OperatorTerm}`: y 方向最近邻 hopping 项, 非空时加入 `:E_hop_ty`。
+- `t2_hopping_terms::Vector{OperatorTerm}`: 对角次近邻 hopping 项, 非空时加入 `:E_hop_t2`。
 - `interaction_terms::Vector{OperatorTerm}`: interaction Hamiltonian 项, 非空时加入 `:E_int`。
 - `onsite_u::Float64`: Hubbard onsite 相互作用强度, 用于加入 `:E_int_charge` 和 `:E_int_spin`。
 
@@ -858,6 +868,9 @@ function definition_twist_observables(
     lx::Int,
     ly::Int;
     hopping_terms::Vector{OperatorTerm}=OperatorTerm[],
+    tx_hopping_terms::Vector{OperatorTerm}=OperatorTerm[],
+    ty_hopping_terms::Vector{OperatorTerm}=OperatorTerm[],
+    t2_hopping_terms::Vector{OperatorTerm}=OperatorTerm[],
     interaction_terms::Vector{OperatorTerm}=OperatorTerm[],
     onsite_u::Float64=0.0,
 )::Dict{Symbol,Function}
@@ -867,6 +880,30 @@ function definition_twist_observables(
         hopping_terms_local = copy(hopping_terms)
         observables[:E_hop] = (model, vwf) -> measure_twist_term_energy_sum(
             hopping_terms_local,
+            model,
+            vwf,
+        )
+    end
+    if !isempty(tx_hopping_terms)
+        tx_hopping_terms_local = copy(tx_hopping_terms)
+        observables[:E_hop_tx] = (model, vwf) -> measure_twist_term_energy_sum(
+            tx_hopping_terms_local,
+            model,
+            vwf,
+        )
+    end
+    if !isempty(ty_hopping_terms)
+        ty_hopping_terms_local = copy(ty_hopping_terms)
+        observables[:E_hop_ty] = (model, vwf) -> measure_twist_term_energy_sum(
+            ty_hopping_terms_local,
+            model,
+            vwf,
+        )
+    end
+    if !isempty(t2_hopping_terms)
+        t2_hopping_terms_local = copy(t2_hopping_terms)
+        observables[:E_hop_t2] = (model, vwf) -> measure_twist_term_energy_sum(
+            t2_hopping_terms_local,
             model,
             vwf,
         )
@@ -1896,11 +1933,23 @@ function main_twist()::Nothing
                 lx,
                 ly;
                 hopping_terms=term_setup.hopping_terms,
+                tx_hopping_terms=term_setup.tx_hopping_terms,
+                ty_hopping_terms=term_setup.ty_hopping_terms,
+                t2_hopping_terms=term_setup.t2_hopping_terms,
                 interaction_terms=term_setup.interaction_terms,
                 onsite_u=onsite_u,
             ),
             meas_params;
-            history_observables=[:E, :E_hop, :E_int, :E_int_charge, :E_int_spin],
+            history_observables=[
+                :E,
+                :E_hop,
+                :E_hop_tx,
+                :E_hop_ty,
+                :E_hop_t2,
+                :E_int,
+                :E_int_charge,
+                :E_int_spin,
+            ],
         )
         if is_root && results !== nothing
             means = results[:means]
