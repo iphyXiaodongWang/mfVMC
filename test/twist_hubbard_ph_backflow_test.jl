@@ -366,6 +366,7 @@ end
         ratio = mfVMC.VMC.calc_backflow_ratio_local_update(vwf, proposal)
 
         @test timing_label_call_count("backflow_rankk_ratio_only") == 1
+        @test timing_label_call_count("backflow_rankk_ratio_blas") == 1
         @test timing_label_call_count("backflow_rankk_factor") == 0
 
         mfVMC.VMC.accept_backflow_local_update!(vwf, proposal, ratio)

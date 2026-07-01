@@ -243,6 +243,7 @@ const SR_STEP_TIMING_LABELS = [
     "driver_rebuild_inverse!",
     "sr_phase_measurement_loop",
     "backflow_rankk_ratio_only",
+    "backflow_rankk_ratio_blas",
     "local_energy(call)",
     "accumulate_sr_stats!",
     "compute_grad_log_psi! (in SR)",

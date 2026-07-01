@@ -969,12 +969,15 @@ end
 
 数学公式:
 - `Delta = A_new^T - A_old^T`。
-- `K_ab = delta_ab + sum_l A^{-1}_{l, e_b} * Delta_{l, a}`。
+- `K = I_k + Delta^T * A^{-1}[:, changed_electron_ids]`。
+- 即 `K_ab = delta_ab + sum_l A^{-1}_{l, e_b} * Delta_{l, a}`。
 - 这里 `a` 是被替换的新列编号, `e_b` 是对应的旧 determinant 列编号。
 
 参数:
 - `small_k_matrix::AbstractMatrix{T}`: 输出 `K` 小矩阵, 形状必须为 `(k, k)`。
 - `delta_columns_buffer::AbstractMatrix{T}`: 临时 `Delta` buffer, 形状必须为 `(N, k)`。
+- `selected_inverse_columns_buffer::AbstractMatrix{T}`: 临时 `A^{-1}[:, changed_electron_ids]`
+  buffer, 形状必须为 `(N, k)`。
 - `vwf::vwf_det{T}`: determinant 波函数对象。
 - `changed_electron_ids::AbstractVector{Int}`: 被替换的 determinant 列编号。
 - `new_columns::AbstractMatrix{T}`: proposal 后这些列的新列向量。
@@ -983,12 +986,14 @@ end
 - `AbstractMatrix{T}`: 写入后的 `small_k_matrix`。
 
 说明:
-- 该函数用于 Metropolis ratio 或 Green 函数测量的只读路径。完整 inverse 更新还需要
+- 该函数用于 Metropolis ratio 或 Green 函数测量的只读路径。它先 gather 非连续的
+  inverse 列, 再使用 BLAS `mul!` 计算小矩阵。完整 inverse 更新还需要
   `C = A^{-T} * Delta`, 因而在 accept 阶段由 `compute_rankk_update_factors!` 补算。
 """
 function compute_rankk_ratio_matrix!(
     small_k_matrix::AbstractMatrix{T},
     delta_columns_buffer::AbstractMatrix{T},
+    selected_inverse_columns_buffer::AbstractMatrix{T},
     vwf::vwf_det{T},
     changed_electron_ids::AbstractVector{Int},
     new_columns::AbstractMatrix{T},
@@ -1005,22 +1010,26 @@ function compute_rankk_ratio_matrix!(
     if size(delta_columns_buffer, 1) != n_orb || size(delta_columns_buffer, 2) != k_count
         error("Delta buffer shape mismatch: expected ($(n_orb), $(k_count)), got $(size(delta_columns_buffer)).")
     end
+    if size(selected_inverse_columns_buffer, 1) != n_orb || size(selected_inverse_columns_buffer, 2) != k_count
+        error("Selected inverse column buffer shape mismatch: expected ($(n_orb), $(k_count)), got $(size(selected_inverse_columns_buffer)).")
+    end
 
     copyto!(delta_columns_buffer, new_columns)
     @inbounds for column_index in 1:k_count
         electron_id = changed_electron_ids[column_index]
         @views delta_columns_buffer[:, column_index] .-= vwf.awf_mat_t[:, electron_id]
+        copyto!(
+            @view(selected_inverse_columns_buffer[:, column_index]),
+            @view(vwf.awf_inv[:, electron_id]),
+        )
     end
 
+    @timed "backflow_rankk_ratio_blas" mul!(
+        small_k_matrix,
+        transpose(delta_columns_buffer),
+        selected_inverse_columns_buffer,
+    )
     @inbounds for column_index in 1:k_count
-        for row_index in 1:k_count
-            electron_id = changed_electron_ids[row_index]
-            value = zero(T)
-            for orbital_index in 1:n_orb
-                value += vwf.awf_inv[orbital_index, electron_id] * delta_columns_buffer[orbital_index, column_index]
-            end
-            small_k_matrix[column_index, row_index] = value
-        end
         small_k_matrix[column_index, column_index] += one(T)
     end
 
@@ -1207,9 +1216,11 @@ function cache_backflow_rankk_update!(vwf::vwf_det{T}, proposal::MoveProposal) w
     cached_new_columns = @view ws.cached_new_columns[:, 1:changed_count]
     cached_small_k_matrix = @view ws.cached_small_k_matrix[1:changed_count, 1:changed_count]
     cached_delta_columns = @view ws.cached_small_k_inverse[:, 1:changed_count]
+    cached_selected_inverse_columns = @view ws.cached_c_matrix[:, 1:changed_count]
     @timed "backflow_rankk_ratio_only" compute_rankk_ratio_matrix!(
         cached_small_k_matrix,
         cached_delta_columns,
+        cached_selected_inverse_columns,
         vwf,
         changed_electron_ids,
         cached_new_columns,
