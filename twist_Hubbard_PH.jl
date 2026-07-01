@@ -84,26 +84,70 @@ function parse_twist_ph_commandline()
         help = "Enable twist Hubbard PH backflow"
         arg_type = String
         default = "true"
+        "--enable_timing"
+        help = "Enable SR step timing log"
+        arg_type = String
+        default = "false"
         "--bf_epsilon"
-        help = "Backflow epsilon initial value"
+        help = "Shared fallback backflow epsilon initial value"
         arg_type = Float64
         default = 1.0
         "--bf_eta1"
-        help = "Backflow eta1 initial value"
+        help = "Shared fallback backflow eta1 initial value"
         arg_type = Float64
         default = 0.0
         "--bf_eta2"
-        help = "Backflow eta2 initial value"
+        help = "Shared fallback backflow eta2 initial value"
         arg_type = Float64
         default = 0.0
         "--bf_eta3"
-        help = "Backflow eta3 initial value"
+        help = "Shared fallback backflow eta3 initial value"
         arg_type = Float64
         default = 0.0
         "--bf_eta4"
-        help = "Backflow eta4 initial value"
+        help = "Shared fallback backflow eta4 initial value"
         arg_type = Float64
         default = 0.0
+        "--bf_epsilon_up"
+        help = "PH upper block backflow epsilon initial value. NaN uses --bf_epsilon"
+        arg_type = Float64
+        default = NaN
+        "--bf_eta1_up"
+        help = "PH upper block backflow eta1 initial value. NaN uses --bf_eta1"
+        arg_type = Float64
+        default = NaN
+        "--bf_eta2_up"
+        help = "PH upper block backflow eta2 initial value. NaN uses --bf_eta2"
+        arg_type = Float64
+        default = NaN
+        "--bf_eta3_up"
+        help = "PH upper block backflow eta3 initial value. NaN uses --bf_eta3"
+        arg_type = Float64
+        default = NaN
+        "--bf_eta4_up"
+        help = "PH upper block backflow eta4 initial value. NaN uses --bf_eta4"
+        arg_type = Float64
+        default = NaN
+        "--bf_epsilon_dn_hole"
+        help = "PH lower down-hole block backflow epsilon initial value. NaN uses --bf_epsilon"
+        arg_type = Float64
+        default = NaN
+        "--bf_eta1_dn_hole"
+        help = "PH lower down-hole block backflow eta1 initial value. NaN uses --bf_eta1"
+        arg_type = Float64
+        default = NaN
+        "--bf_eta2_dn_hole"
+        help = "PH lower down-hole block backflow eta2 initial value. NaN uses --bf_eta2"
+        arg_type = Float64
+        default = NaN
+        "--bf_eta3_dn_hole"
+        help = "PH lower down-hole block backflow eta3 initial value. NaN uses --bf_eta3"
+        arg_type = Float64
+        default = NaN
+        "--bf_eta4_dn_hole"
+        help = "PH lower down-hole block backflow eta4 initial value. NaN uses --bf_eta4"
+        arg_type = Float64
+        default = NaN
         "--target_sz"
         help = "Target total Sz"
         arg_type = Int
@@ -603,6 +647,164 @@ function build_twist_ph_mean_field_parameter_setup(args)
 end
 
 """
+用途: 解析 PH split backflow 的单个初值。
+
+参数:
+- `args::Dict{String, Any}`: 命令行参数字典。
+- `block_param_key::String`: split 参数名, 例如 `"bf_eta2_dn_hole"`。
+- `fallback_param_key::String`: 旧共享参数名, 例如 `"bf_eta2"`。
+
+返回:
+- `Float64`: 若 split 参数不是 `NaN` 则使用 split 参数, 否则使用 fallback 参数。
+"""
+function resolve_twist_ph_split_backflow_initial_value(
+    args,
+    block_param_key::String,
+    fallback_param_key::String,
+)::Float64
+    block_value = args[block_param_key]
+    return isnan(block_value) ? args[fallback_param_key] : block_value
+end
+
+"""
+用途: 从命令行参数中生成 PH upper/down-hole 两套 backflow 初值。
+
+参数:
+- `args::Dict{String, Any}`: 命令行参数字典。
+
+返回:
+- `NamedTuple`: 包含 `bf_epsilon_up`, `bf_eta1_up`, ..., `bf_eta4_dn_hole`。
+
+说明:
+- 旧参数 `bf_epsilon`, `bf_eta1` 到 `bf_eta4` 只作为 fallback 初值,
+  真正进入 PH SR 的参数名始终是 split 后的 10 个参数。
+"""
+function build_twist_ph_split_backflow_initial_values(args)
+    return (
+        bf_epsilon_up=resolve_twist_ph_split_backflow_initial_value(args, "bf_epsilon_up", "bf_epsilon"),
+        bf_eta1_up=resolve_twist_ph_split_backflow_initial_value(args, "bf_eta1_up", "bf_eta1"),
+        bf_eta2_up=resolve_twist_ph_split_backflow_initial_value(args, "bf_eta2_up", "bf_eta2"),
+        bf_eta3_up=resolve_twist_ph_split_backflow_initial_value(args, "bf_eta3_up", "bf_eta3"),
+        bf_eta4_up=resolve_twist_ph_split_backflow_initial_value(args, "bf_eta4_up", "bf_eta4"),
+        bf_epsilon_dn_hole=resolve_twist_ph_split_backflow_initial_value(args, "bf_epsilon_dn_hole", "bf_epsilon"),
+        bf_eta1_dn_hole=resolve_twist_ph_split_backflow_initial_value(args, "bf_eta1_dn_hole", "bf_eta1"),
+        bf_eta2_dn_hole=resolve_twist_ph_split_backflow_initial_value(args, "bf_eta2_dn_hole", "bf_eta2"),
+        bf_eta3_dn_hole=resolve_twist_ph_split_backflow_initial_value(args, "bf_eta3_dn_hole", "bf_eta3"),
+        bf_eta4_dn_hole=resolve_twist_ph_split_backflow_initial_value(args, "bf_eta4_dn_hole", "bf_eta4"),
+    )
+end
+
+"""
+用途: 构造 twist Hubbard PH 专用的 10 参数 split backflow。
+
+数学公式:
+- upper row `(i, up)` 使用参数 `bf_eta*_up`:
+  `eta1_up D_i H_j + eta2_up n_i↑ h_i↓ n_j↓ h_j↑
+   + eta3_up D_i n_j↓ h_j↑ + eta4_up n_i↑ h_i↓ H_j`。
+- lower row `(i, down-hole)` 使用参数 `bf_eta*_dn_hole` 和 swapped-sites 规则:
+  `eta1_dn_hole H_i D_j + eta2_dn_hole n_j↓ h_j↑ n_i↑ h_i↓
+   + eta3_dn_hole D_j n_i↑ h_i↓ + eta4_dn_hole n_j↓ h_j↑ H_i`。
+
+参数:
+- `source_bonds::Vector{Tuple{Int, Int}}`: 有向 source bond 列表。
+- `source_amplitudes::Vector{Float64}`: 与 source bond 对齐的物理 hopping 振幅。
+- 后续 10 个 `bf_*::Float64`: upper 和 down-hole 两套 backflow 初值。
+
+返回:
+- `CompositeBackflowTerm`: 参数顺序为 upper 5 个后接 down-hole 5 个。
+"""
+function build_twist_ph_split_backflow(
+    source_bonds::Vector{Tuple{Int,Int}},
+    source_amplitudes::Vector{Float64},
+    bf_epsilon_up::Float64,
+    bf_eta1_up::Float64,
+    bf_eta2_up::Float64,
+    bf_eta3_up::Float64,
+    bf_eta4_up::Float64,
+    bf_epsilon_dn_hole::Float64,
+    bf_eta1_dn_hole::Float64,
+    bf_eta2_dn_hole::Float64,
+    bf_eta3_dn_hole::Float64,
+    bf_eta4_dn_hole::Float64,
+)::CompositeBackflowTerm
+    upper_epsilon_terms = [
+        BackflowEpsilonTerm(
+            param_name=:bf_epsilon_up,
+            epsilon_bf=bf_epsilon_up,
+            group_names=Symbol[:hubbard],
+        ),
+    ]
+    lower_epsilon_terms = [
+        BackflowEpsilonTerm(
+            param_name=:bf_epsilon_dn_hole,
+            epsilon_bf=bf_epsilon_dn_hole,
+            group_names=Symbol[:hubbard],
+        ),
+    ]
+    upper_group = mfVMC.Backflow.build_directed_backflow_source_group(
+        :hubbard,
+        source_bonds,
+        source_amplitudes,
+        BackflowEta1DoublonHoleTerm(param_name=:bf_eta1_up, eta1_bf=bf_eta1_up),
+        BackflowEta2SpinExchangeTerm(param_name=:bf_eta2_up, eta2_bf=bf_eta2_up),
+        BackflowEta3DoublonSingleTerm(param_name=:bf_eta3_up, eta3_bf=bf_eta3_up),
+        BackflowEta4SingleHoleTerm(param_name=:bf_eta4_up, eta4_bf=bf_eta4_up),
+    )
+    lower_group = mfVMC.Backflow.build_directed_backflow_source_group(
+        :hubbard,
+        source_bonds,
+        source_amplitudes,
+        BackflowEta1DoublonHoleTerm(param_name=:bf_eta1_dn_hole, eta1_bf=bf_eta1_dn_hole),
+        BackflowEta2SpinExchangeTerm(param_name=:bf_eta2_dn_hole, eta2_bf=bf_eta2_dn_hole),
+        BackflowEta3DoublonSingleTerm(param_name=:bf_eta3_dn_hole, eta3_bf=bf_eta3_dn_hole),
+        BackflowEta4SingleHoleTerm(param_name=:bf_eta4_dn_hole, eta4_bf=bf_eta4_dn_hole),
+    )
+    return CompositeBackflowTerm(
+        upper_epsilon_terms,
+        [upper_group];
+        particle_hole_lower_block=true,
+        lower_epsilon_terms=lower_epsilon_terms,
+        lower_source_groups=[lower_group],
+    )
+end
+
+"""
+用途: 根据开关构造 twist Hubbard PH split backflow。
+
+参数:
+- `enable_backflow::Bool`: 是否启用 backflow。
+- `source_bonds, source_amplitudes`: backflow source 数据。
+- `backflow_values::NamedTuple`: `build_twist_ph_split_backflow_initial_values` 的返回值。
+
+返回:
+- `AbstractBackflowTerm`: 开启时为 10 参数 `CompositeBackflowTerm`, 关闭时为 `NoBackflowTerm()`。
+"""
+function build_twist_optional_ph_split_backflow(
+    enable_backflow::Bool,
+    source_bonds::Vector{Tuple{Int,Int}},
+    source_amplitudes::Vector{Float64},
+    backflow_values,
+)::AbstractBackflowTerm
+    if !enable_backflow
+        return NoBackflowTerm()
+    end
+    return build_twist_ph_split_backflow(
+        source_bonds,
+        source_amplitudes,
+        backflow_values.bf_epsilon_up,
+        backflow_values.bf_eta1_up,
+        backflow_values.bf_eta2_up,
+        backflow_values.bf_eta3_up,
+        backflow_values.bf_eta4_up,
+        backflow_values.bf_epsilon_dn_hole,
+        backflow_values.bf_eta1_dn_hole,
+        backflow_values.bf_eta2_dn_hole,
+        backflow_values.bf_eta3_dn_hole,
+        backflow_values.bf_eta4_dn_hole,
+    )
+end
+
+"""
 用途: 运行 twist Hubbard PH/no-backflow VMC/SR 主流程。
 
 参数:
@@ -645,9 +847,12 @@ function main_twist_ph()::Nothing
     init_params_json = args["init_params_json"]
     fixed_params_string = args["fixed_params"]
     active_params_string = args["active_params"]
+    enable_timing = parse_twist_bool_flag(args["enable_timing"], "--enable_timing")
     n_sites = lx * ly
     jastrow_dx_max = args["jastrow_dx_max"] < 0 ? div(lx, 2) : args["jastrow_dx_max"]
     jastrow_dy_max = args["jastrow_dy_max"] < 0 ? div(ly, 2) : args["jastrow_dy_max"]
+    ENABLE_TIMING[] = enable_timing
+    enable_timing && timing_reset!()
 
     mean_field_setup = build_twist_ph_mean_field_parameter_setup(args)
     wf_param_names = mean_field_setup.wf_param_names
@@ -672,16 +877,12 @@ function main_twist_ph()::Nothing
     )
     hopping_bonds = build_twist_nearest_neighbor_bonds(lx, ly)
     source_bonds, source_amplitudes = build_twist_backflow_source_data(hopping_bonds, tx, ty, t2)
-    backflow = build_twist_optional_backflow(
+    backflow_values = build_twist_ph_split_backflow_initial_values(args)
+    backflow = build_twist_optional_ph_split_backflow(
         parse_twist_bool_flag(args["enable_backflow"], "--enable_backflow"),
         source_bonds,
         source_amplitudes,
-        args["bf_epsilon"],
-        args["bf_eta1"],
-        args["bf_eta2"],
-        args["bf_eta3"],
-        args["bf_eta4"];
-        particle_hole_lower_block=true,
+        backflow_values,
     )
     proj_param_names = projector_param_names(projector)
     proj_init_params = projector_param_values(projector)
@@ -830,6 +1031,7 @@ function main_twist_ph()::Nothing
             log_file=joinpath(folder, "sr_history.txt"),
             param_names=sr_param_names,
             lr_func=exp_lr_func,
+            timing_log_file=enable_timing ? joinpath(folder, "sr_step_timing.tsv") : "",
         )
         if is_root
             extract_min_energy(joinpath(folder, "sr_history.txt"))
@@ -839,6 +1041,14 @@ function main_twist_ph()::Nothing
                 init_params,
                 active_param_indices,
             )
+            if enable_timing
+                println("[Timing] SR optimization complete. Printing timing report...")
+                timing_report()
+                open(joinpath(folder, "timing_report.txt"), "w") do io
+                    timing_report(io)
+                end
+                println("[Timing] Timing report saved to $(joinpath(folder, "timing_report.txt")).")
+            end
         end
     elseif job == "measure"
         results = run_simulation(
@@ -896,6 +1106,14 @@ function main_twist_ph()::Nothing
             end
             open(joinpath(folder, "block_binning_mean.json"), "w") do io
                 JSON.print(io, mean_dict_str)
+            end
+            if enable_timing
+                println("[Timing] Measurement complete. Printing timing report...")
+                timing_report()
+                open(joinpath(folder, "timing_report.txt"), "w") do io
+                    timing_report(io)
+                end
+                println("[Timing] Timing report saved to $(joinpath(folder, "timing_report.txt")).")
             end
         end
     else

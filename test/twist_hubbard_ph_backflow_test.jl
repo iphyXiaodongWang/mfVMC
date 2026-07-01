@@ -24,6 +24,49 @@ function build_test_backflow(; particle_hole_lower_block::Bool)
     )
 end
 
+function build_split_ph_test_backflow(;
+    up_eta2::Float64=0.0,
+    up_eta3::Float64=0.0,
+    up_eta4::Float64=0.0,
+    dn_hole_eta2::Float64=0.0,
+    dn_hole_eta3::Float64=0.0,
+    dn_hole_eta4::Float64=0.0,
+)
+    source_bonds = [(1, 2), (2, 1)]
+    source_amplitudes = [1.0, 1.0]
+    upper_group = mfVMC.Backflow.build_directed_backflow_source_group(
+        :hubbard,
+        source_bonds,
+        source_amplitudes,
+        BackflowEta1DoublonHoleTerm(param_name=:bf_eta1_up, eta1_bf=0.0),
+        BackflowEta2SpinExchangeTerm(param_name=:bf_eta2_up, eta2_bf=up_eta2),
+        BackflowEta3DoublonSingleTerm(param_name=:bf_eta3_up, eta3_bf=up_eta3),
+        BackflowEta4SingleHoleTerm(param_name=:bf_eta4_up, eta4_bf=up_eta4),
+    )
+    lower_group = mfVMC.Backflow.build_directed_backflow_source_group(
+        :hubbard,
+        source_bonds,
+        source_amplitudes,
+        BackflowEta1DoublonHoleTerm(param_name=:bf_eta1_dn_hole, eta1_bf=0.0),
+        BackflowEta2SpinExchangeTerm(param_name=:bf_eta2_dn_hole, eta2_bf=dn_hole_eta2),
+        BackflowEta3DoublonSingleTerm(param_name=:bf_eta3_dn_hole, eta3_bf=dn_hole_eta3),
+        BackflowEta4SingleHoleTerm(param_name=:bf_eta4_dn_hole, eta4_bf=dn_hole_eta4),
+    )
+    return CompositeBackflowTerm(
+        [BackflowEpsilonTerm(param_name=:bf_epsilon_up, epsilon_bf=1.0, group_names=Symbol[:hubbard])],
+        [upper_group];
+        particle_hole_lower_block=true,
+        lower_epsilon_terms=[
+            BackflowEpsilonTerm(
+                param_name=:bf_epsilon_dn_hole,
+                epsilon_bf=1.0,
+                group_names=Symbol[:hubbard],
+            ),
+        ],
+        lower_source_groups=[lower_group],
+    )
+end
+
 function collect_source_weight_map(state_vector, backflow_term, row_index)
     source_rows = Vector{Int}(undef, 2 * length(state_vector))
     source_weights = Vector{Float64}(undef, 2 * length(state_vector))
@@ -78,6 +121,79 @@ end
     @test derivative_map[:bf_eta1][lower_row_site1, :] ≈ base_orbitals[lower_row_site2, :]
 end
 
+@testset "split PH backflow lower eta2 uses dn-hole parameter" begin
+    state_vector = Int8[UP, DN]
+    ph_backflow = build_split_ph_test_backflow(up_eta2=0.0, dn_hole_eta2=0.23)
+
+    upper_row_site1 = 1
+    lower_row_site1 = 2
+    lower_row_site2 = 4
+    upper_weights = collect_source_weight_map(state_vector, ph_backflow, upper_row_site1)
+    lower_weights = collect_source_weight_map(state_vector, ph_backflow, lower_row_site1)
+
+    @test length(upper_weights) == 1
+    @test upper_weights[upper_row_site1] ≈ 1.0
+    @test lower_weights[lower_row_site1] ≈ 1.0
+    @test lower_weights[lower_row_site2] ≈ 0.23
+
+    base_orbitals = reshape(collect(1.0:16.0), 4, 4)
+    derivative_pairs = mfVMC.Backflow.build_backflow_derivative_orbitals(
+        base_orbitals,
+        state_vector,
+        ph_backflow,
+    )
+    derivative_map = Dict(first(pair) => last(pair) for pair in derivative_pairs)
+
+    @test derivative_map[:bf_eta2_up][lower_row_site1, :] ≈ zeros(4)
+    @test derivative_map[:bf_eta2_dn_hole][lower_row_site1, :] ≈ base_orbitals[lower_row_site2, :]
+end
+
+@testset "split PH backflow lower eta3 uses dn-hole swapped-sites factor" begin
+    state_vector = Int8[UP, DB]
+    ph_backflow = build_split_ph_test_backflow(up_eta3=0.0, dn_hole_eta3=0.31)
+
+    lower_row_site1 = 2
+    lower_row_site2 = 4
+    lower_weights = collect_source_weight_map(state_vector, ph_backflow, lower_row_site1)
+
+    @test lower_weights[lower_row_site1] ≈ 1.0
+    @test lower_weights[lower_row_site2] ≈ 0.31
+
+    base_orbitals = reshape(collect(1.0:16.0), 4, 4)
+    derivative_pairs = mfVMC.Backflow.build_backflow_derivative_orbitals(
+        base_orbitals,
+        state_vector,
+        ph_backflow,
+    )
+    derivative_map = Dict(first(pair) => last(pair) for pair in derivative_pairs)
+
+    @test derivative_map[:bf_eta3_up][lower_row_site1, :] ≈ zeros(4)
+    @test derivative_map[:bf_eta3_dn_hole][lower_row_site1, :] ≈ base_orbitals[lower_row_site2, :]
+end
+
+@testset "split PH backflow lower eta4 uses dn-hole swapped-sites factor" begin
+    state_vector = Int8[HOLE, DN]
+    ph_backflow = build_split_ph_test_backflow(up_eta4=0.0, dn_hole_eta4=0.41)
+
+    lower_row_site1 = 2
+    lower_row_site2 = 4
+    lower_weights = collect_source_weight_map(state_vector, ph_backflow, lower_row_site1)
+
+    @test lower_weights[lower_row_site1] ≈ 1.0
+    @test lower_weights[lower_row_site2] ≈ 0.41
+
+    base_orbitals = reshape(collect(1.0:16.0), 4, 4)
+    derivative_pairs = mfVMC.Backflow.build_backflow_derivative_orbitals(
+        base_orbitals,
+        state_vector,
+        ph_backflow,
+    )
+    derivative_map = Dict(first(pair) => last(pair) for pair in derivative_pairs)
+
+    @test derivative_map[:bf_eta4_up][lower_row_site1, :] ≈ zeros(4)
+    @test derivative_map[:bf_eta4_dn_hole][lower_row_site1, :] ≈ base_orbitals[lower_row_site2, :]
+end
+
 include(joinpath(@__DIR__, "..", "twist_Hubbard_PH.jl"))
 
 @testset "twist Hubbard PH constructs PH-mode backflow" begin
@@ -98,6 +214,39 @@ include(joinpath(@__DIR__, "..", "twist_Hubbard_PH.jl"))
     @test mfVMC.Backflow.uses_backflow(backflow)
     @test backflow.particle_hole_lower_block
     @test mfVMC.Backflow.backflow_param_names(backflow) == [:bf_epsilon, :bf_eta1, :bf_eta2, :bf_eta3, :bf_eta4]
+end
+
+@testset "twist Hubbard PH constructs split up and dn-hole backflow parameters" begin
+    hopping_bonds = build_twist_nearest_neighbor_bonds(2, 2)
+    source_bonds, source_amplitudes = build_twist_backflow_source_data(hopping_bonds, 1.0, 1.0, 0.0)
+    backflow = build_twist_ph_split_backflow(
+        source_bonds,
+        source_amplitudes,
+        1.0,
+        0.2,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.3,
+        0.4,
+        0.5,
+        0.6,
+    )
+
+    @test mfVMC.Backflow.backflow_param_names(backflow) == [
+        :bf_epsilon_up,
+        :bf_eta1_up,
+        :bf_eta2_up,
+        :bf_eta3_up,
+        :bf_eta4_up,
+        :bf_epsilon_dn_hole,
+        :bf_eta1_dn_hole,
+        :bf_eta2_dn_hole,
+        :bf_eta3_dn_hole,
+        :bf_eta4_dn_hole,
+    ]
+    @test mfVMC.Backflow.backflow_param_values(backflow) ≈ [1.0, 0.2, 0.0, 0.0, 0.0, 1.0, 0.3, 0.4, 0.5, 0.6]
 end
 
 @testset "PH backflow zero parameters degenerates to identity rows" begin

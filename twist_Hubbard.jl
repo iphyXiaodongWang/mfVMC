@@ -7,6 +7,9 @@ using JSON
 push!(LOAD_PATH, joinpath(@__DIR__, "src"))
 
 using mfVMC
+import mfVMC.Timing: ENABLE_TIMING, timing_reset!, timing_report
+
+ENABLE_TIMING[] = false
 
 const ACTIVE_TWIST_PROJECTOR_DERIVATIVE_PARAM_NAMES = Ref{Union{Nothing,Vector{Symbol}}}(nothing)
 const ACTIVE_TWIST_BACKFLOW_DERIVATIVE_PARAM_NAMES = Ref{Union{Nothing,Vector{Symbol}}}(nothing)
@@ -615,6 +618,8 @@ function mfVMC.VMC.compute_grad_log_psi!(vwf::mfVMC.VMC.vwf_det{T}) where T
     fill!(o_vec, zero(T))
 
     mean_field_view = @view o_vec[1:wf_param_count]
+    twist_timing_enabled = mfVMC.Timing.ENABLE_TIMING[]
+    twist_timing_start = twist_timing_enabled ? time() : 0.0
     if mfVMC.Backflow.uses_backflow(vwf.backflow)
         mfVMC.VMC._compute_backflow_meanfield_gradient_from_selected_rows!(
             mean_field_view,
@@ -629,8 +634,12 @@ function mfVMC.VMC.compute_grad_log_psi!(vwf::mfVMC.VMC.vwf_det{T}) where T
     else
         mfVMC.VMC._compute_dense_tensor_gradient!(mean_field_view, vwf)
     end
+    if twist_timing_enabled
+        mfVMC.Timing.timing_accumulate!("twist_grad_meanfield", time() - twist_timing_start)
+    end
 
     if !isempty(active_projector_param_names)
+        twist_timing_start = twist_timing_enabled ? time() : 0.0
         full_projector_derivatives = mfVMC.Projector.projector_log_derivative(vwf.projector, sampler)
         projector_derivative_map = Dict{Symbol,Float64}()
         for (param_name, derivative_value) in zip(projector_param_names_all, full_projector_derivatives)
@@ -639,13 +648,25 @@ function mfVMC.VMC.compute_grad_log_psi!(vwf::mfVMC.VMC.vwf_det{T}) where T
         for (active_offset, param_name) in enumerate(active_projector_param_names)
             o_vec[wf_param_count+active_offset] = T(projector_derivative_map[param_name])
         end
+        if twist_timing_enabled
+            mfVMC.Timing.timing_accumulate!("twist_grad_projector", time() - twist_timing_start)
+        end
     end
     if !isempty(active_backflow_param_names)
+        twist_timing_start = twist_timing_enabled ? time() : 0.0
         backflow_pairs = mfVMC.Backflow.build_backflow_derivative_orbitals(
             vwf.base_gs_U,
             sampler.state,
             vwf.backflow,
         )
+        if twist_timing_enabled
+            mfVMC.Timing.timing_accumulate!(
+                "twist_grad_backflow_build_derivative_orbitals",
+                time() - twist_timing_start,
+            )
+        end
+
+        twist_timing_start = twist_timing_enabled ? time() : 0.0
         backflow_derivative_map = Dict{Symbol,T}()
         for (param_name, derivative_orbitals) in backflow_pairs
             backflow_derivative_map[param_name] =
@@ -656,6 +677,10 @@ function mfVMC.VMC.compute_grad_log_psi!(vwf::mfVMC.VMC.vwf_det{T}) where T
                     derivative_orbitals,
                 )
         end
+        if twist_timing_enabled
+            mfVMC.Timing.timing_accumulate!("twist_grad_backflow_trace", time() - twist_timing_start)
+        end
+
         backflow_offset = wf_param_count + length(active_projector_param_names)
         for (active_offset, param_name) in enumerate(active_backflow_param_names)
             haskey(backflow_derivative_map, param_name) ||
@@ -1044,6 +1069,10 @@ function parse_twist_commandline()
         help = "Enable twist Hubbard nonPH backflow"
         arg_type = String
         default = "true"
+        "--enable_timing"
+        help = "Enable SR step timing log"
+        arg_type = String
+        default = "false"
         "--bf_epsilon"
         help = "Backflow epsilon initial value"
         arg_type = Float64
@@ -1708,9 +1737,12 @@ function main_twist()::Nothing
     init_params_json = args["init_params_json"]
     fixed_params_string = args["fixed_params"]
     active_params_string = args["active_params"]
+    enable_timing = parse_twist_bool_flag(args["enable_timing"], "--enable_timing")
     n_sites = lx * ly
     jastrow_dx_max = args["jastrow_dx_max"] < 0 ? div(lx, 2) : args["jastrow_dx_max"]
     jastrow_dy_max = args["jastrow_dy_max"] < 0 ? div(ly, 2) : args["jastrow_dy_max"]
+    ENABLE_TIMING[] = enable_timing
+    enable_timing && timing_reset!()
 
     mean_field_setup = build_twist_mean_field_parameter_setup(args)
     wf_param_names = mean_field_setup.wf_param_names
@@ -1888,6 +1920,7 @@ function main_twist()::Nothing
             log_file=joinpath(folder, "sr_history.txt"),
             param_names=sr_param_names,
             lr_func=exp_lr_func,
+            timing_log_file=enable_timing ? joinpath(folder, "sr_step_timing.tsv") : "",
         )
         if is_root
             extract_min_energy(joinpath(folder, "sr_history.txt"))
@@ -1897,6 +1930,14 @@ function main_twist()::Nothing
                 init_params,
                 active_param_indices,
             )
+            if enable_timing
+                println("[Timing] SR optimization complete. Printing timing report...")
+                timing_report()
+                open(joinpath(folder, "timing_report.txt"), "w") do io
+                    timing_report(io)
+                end
+                println("[Timing] Timing report saved to $(joinpath(folder, "timing_report.txt")).")
+            end
         end
     elseif job == "measure"
         results = run_simulation(
@@ -1954,6 +1995,14 @@ function main_twist()::Nothing
             end
             open(joinpath(folder, "block_binning_mean.json"), "w") do io
                 JSON.print(io, mean_dict_str)
+            end
+            if enable_timing
+                println("[Timing] Measurement complete. Printing timing report...")
+                timing_report()
+                open(joinpath(folder, "timing_report.txt"), "w") do io
+                    timing_report(io)
+                end
+                println("[Timing] Timing report saved to $(joinpath(folder, "timing_report.txt")).")
             end
         end
     else

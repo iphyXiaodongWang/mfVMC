@@ -361,16 +361,24 @@ end
   允许不同 source 子图使用不同 epsilon 参数。
 - `source_groups::Vector{DirectedBackflowSourceGroup}`: directed split backflow source groups,
   每个 group 持有共享的 source 数据和四个 eta term。
+- `lower_epsilon_terms::Vector{BackflowEpsilonTerm}`: PH lower row 专用 epsilon terms。
+- `lower_source_groups::Vector{DirectedBackflowSourceGroup}`: PH lower row 专用 source groups。
 - `terms::Vector{AbstractBackflowCorrectionTerm}`: 按参数顺序展开的 term 列表,
-  由 `epsilon_terms` 和 `source_groups` 的 eta term 自动生成。
+  由 upper terms 后接 lower terms 自动生成。
 - `incoming_source_sites_by_target::Vector{Vector{Int}}`: composite 级别合并后的 incoming source graph,
   用于 proposal 局域更新时一次性收集 affected sites。
 - `particle_hole_lower_block::Bool`: 若为 `true`, lower row 表示 PH 表象中的 down hole;
   若为 `false`, lower row 表示 nonPH 表象中的 down electron。
+说明:
+- 未提供 lower terms 时, lower row 继续复用 upper terms, 兼容旧的 5 参数 backflow。
+- 提供 lower terms 时, `row_offset == 1` 只使用 upper terms,
+  PH lower row `row_offset == 2` 只使用 lower terms, 避免普通 row 构造路径双倍扫描。
 """
 struct CompositeBackflowTerm <: AbstractBackflowTerm
     epsilon_terms::Vector{BackflowEpsilonTerm}
     source_groups::Vector{DirectedBackflowSourceGroup}
+    lower_epsilon_terms::Vector{BackflowEpsilonTerm}
+    lower_source_groups::Vector{DirectedBackflowSourceGroup}
     terms::Vector{AbstractBackflowCorrectionTerm}
     incoming_source_sites_by_target::Vector{Vector{Int}}
     particle_hole_lower_block::Bool
@@ -379,6 +387,8 @@ struct CompositeBackflowTerm <: AbstractBackflowTerm
         epsilon_terms::Vector{BackflowEpsilonTerm},
         source_groups::Vector{DirectedBackflowSourceGroup};
         particle_hole_lower_block::Bool=false,
+        lower_epsilon_terms::Vector{BackflowEpsilonTerm}=BackflowEpsilonTerm[],
+        lower_source_groups::Vector{DirectedBackflowSourceGroup}=DirectedBackflowSourceGroup[],
     )
         term_list = AbstractBackflowCorrectionTerm[]
         for epsilon_term in epsilon_terms
@@ -390,12 +400,23 @@ struct CompositeBackflowTerm <: AbstractBackflowTerm
             push!(term_list, source_group.eta3_term)
             push!(term_list, source_group.eta4_term)
         end
+        for epsilon_term in lower_epsilon_terms
+            push!(term_list, epsilon_term)
+        end
+        for source_group in lower_source_groups
+            push!(term_list, source_group.eta1_term)
+            push!(term_list, source_group.eta2_term)
+            push!(term_list, source_group.eta3_term)
+            push!(term_list, source_group.eta4_term)
+        end
 
         return new(
             epsilon_terms,
             source_groups,
+            lower_epsilon_terms,
+            lower_source_groups,
             term_list,
-            build_composite_incoming_from_groups(source_groups),
+            build_composite_incoming_from_groups(vcat(source_groups, lower_source_groups)),
             particle_hole_lower_block,
         )
     end
@@ -1438,6 +1459,46 @@ function is_particle_hole_lower_row(
 end
 
 """
+用途: 返回当前 row 应使用的 epsilon terms。
+
+参数:
+- `backflow_term::CompositeBackflowTerm`: backflow 对象。
+- `row_offset::Int`: site 内部行偏移。
+
+返回:
+- `Vector{BackflowEpsilonTerm}`: 当前 row 的 epsilon terms。
+"""
+function backflow_epsilon_terms_for_row(
+    backflow_term::CompositeBackflowTerm,
+    row_offset::Int,
+)::Vector{BackflowEpsilonTerm}
+    if is_particle_hole_lower_row(backflow_term, row_offset) && !isempty(backflow_term.lower_epsilon_terms)
+        return backflow_term.lower_epsilon_terms
+    end
+    return backflow_term.epsilon_terms
+end
+
+"""
+用途: 返回当前 row 应遍历的 directed source groups。
+
+参数:
+- `backflow_term::CompositeBackflowTerm`: backflow 对象。
+- `row_offset::Int`: site 内部行偏移。
+
+返回:
+- `Vector{DirectedBackflowSourceGroup}`: 当前 row 的 source groups。
+"""
+function backflow_source_groups_for_row(
+    backflow_term::CompositeBackflowTerm,
+    row_offset::Int,
+)::Vector{DirectedBackflowSourceGroup}
+    if is_particle_hole_lower_row(backflow_term, row_offset) && !isempty(backflow_term.lower_source_groups)
+        return backflow_term.lower_source_groups
+    end
+    return backflow_term.source_groups
+end
+
+"""
 用途: 计算 backflow output row 在当前物理电子构型中是否被占据。
 
 数学公式:
@@ -2271,7 +2332,7 @@ function fill_backflow_row_source_weights_from_state_getter!(
     end
 
     active_group_names = Set{Symbol}()
-    for source_group in backflow_term.source_groups
+    for source_group in backflow_source_groups_for_row(backflow_term, row_offset)
         source_count = add_source_group_chain_rule_source_weights_and_track!(
             source_row_indices,
             source_row_weights,
@@ -2286,7 +2347,7 @@ function fill_backflow_row_source_weights_from_state_getter!(
         )
     end
 
-    for epsilon_term in backflow_term.epsilon_terms
+    for epsilon_term in backflow_epsilon_terms_for_row(backflow_term, row_offset)
         epsilon_shift = T(epsilon_term.epsilon_bf - 1.0)
         if epsilon_shift == zero(T)
             continue
@@ -2381,55 +2442,31 @@ function build_backflow_derivative_orbitals(
     backflow_term::CompositeBackflowTerm,
 ) where {T}
     validate_orbital_dimensions(base_orbitals, length(state_vector))
-    n_sites = length(state_vector)
+    n_rows = size(base_orbitals, 1)
 
-    # Build a mapping from group_name -> set of epsilon term indices for efficient lookup.
-    group_to_epsilon_indices = Dict{Symbol,Vector{Int}}()
-    for (epsilon_index, epsilon_term) in enumerate(backflow_term.epsilon_terms)
-        for group_name in epsilon_term.group_names
-            if !haskey(group_to_epsilon_indices, group_name)
-                group_to_epsilon_indices[group_name] = Int[]
-            end
-            push!(group_to_epsilon_indices[group_name], epsilon_index)
+    derivative_by_param_name = Dict{Symbol,Matrix{T}}()
+    epsilon_active_rows_by_param_name = Dict{Symbol,BitVector}()
+    for correction_term in backflow_term.terms
+        param_name = correction_term.param_name
+        derivative_by_param_name[param_name] = zeros(T, size(base_orbitals))
+        if correction_term isa BackflowEpsilonTerm
+            epsilon_active_rows_by_param_name[param_name] = falses(n_rows)
         end
     end
 
-    # Pre-allocate eta derivative matrices and epsilon derivative matrix tracker.
-    # We iterate site-by-site, row-by-row to find which rows have nonzero eta.
-    # For epsilon derivatives, we first compute the full eta scan, then fill.
-    epsilon_derivative = zeros(T, size(base_orbitals))
+    for row_offset in 1:2
+        row_epsilon_terms = backflow_epsilon_terms_for_row(backflow_term, row_offset)
+        row_source_groups = backflow_source_groups_for_row(backflow_term, row_offset)
+        for source_group in row_source_groups
+            eta1_value = T(source_group.eta1_term.eta1_bf)
+            eta2_value = T(source_group.eta2_term.eta2_bf)
+            eta3_value = T(source_group.eta3_term.eta3_bf)
+            eta4_value = T(source_group.eta4_term.eta4_bf)
 
-    # Track which epsilon rows are active (binary per epsilon term per row).
-    # Use a bitset approach: per-epsilon-term boolean row mask.
-    n_epsilon = length(backflow_term.epsilon_terms)
-    n_rows = size(base_orbitals, 1)
-    epsilon_active_rows = [falses(n_rows) for _ in 1:n_epsilon]
-
-    eta1_deriv_array = Matrix{T}[]
-    eta2_deriv_array = Matrix{T}[]
-    eta3_deriv_array = Matrix{T}[]
-    eta4_deriv_array = Matrix{T}[]
-    eta1_param_names = Symbol[]
-    eta2_param_names = Symbol[]
-    eta3_param_names = Symbol[]
-    eta4_param_names = Symbol[]
-
-    for source_group in backflow_term.source_groups
-        eta1_deriv = zeros(T, size(base_orbitals))
-        eta2_deriv = zeros(T, size(base_orbitals))
-        eta3_deriv = zeros(T, size(base_orbitals))
-        eta4_deriv = zeros(T, size(base_orbitals))
-        eta1_value = T(source_group.eta1_term.eta1_bf)
-        eta2_value = T(source_group.eta2_term.eta2_bf)
-        eta3_value = T(source_group.eta3_term.eta3_bf)
-        eta4_value = T(source_group.eta4_term.eta4_bf)
-
-        for (bond_index, (site_i, site_j)) in enumerate(source_group.source_bonds)
-            state_i = state_vector[site_i]
-            state_j = state_vector[site_j]
-            bond_amplitude = T(source_group.source_amplitudes[bond_index])
-
-            for row_offset in 1:2
+            for (bond_index, (site_i, site_j)) in enumerate(source_group.source_bonds)
+                state_i = state_vector[site_i]
+                state_j = state_vector[site_j]
+                bond_amplitude = T(source_group.source_amplitudes[bond_index])
                 spin = backflow_spin_from_row_offset(row_offset)
                 is_ph_lower_row = is_particle_hole_lower_row(backflow_term, row_offset)
                 if backflow_row_occupation_factor(state_i, spin, is_ph_lower_row) == zero(T)
@@ -2451,60 +2488,49 @@ function build_backflow_derivative_orbitals(
                 )
 
                 if eta_contribution.eta1_factor != zero(T)
+                    eta1_deriv = derivative_by_param_name[source_group.eta1_term.param_name]
                     @views eta1_deriv[row_i, :] .+= bond_amplitude .* base_orbitals[row_j, :]
                 end
 
                 if eta_contribution.eta2_factor != zero(T)
+                    eta2_deriv = derivative_by_param_name[source_group.eta2_term.param_name]
                     @views eta2_deriv[row_i, :] .+= bond_amplitude * eta_contribution.eta2_factor .* base_orbitals[row_j, :]
                 end
 
                 if eta_contribution.eta3_factor != zero(T)
+                    eta3_deriv = derivative_by_param_name[source_group.eta3_term.param_name]
                     @views eta3_deriv[row_i, :] .+= bond_amplitude * eta_contribution.eta3_factor .* base_orbitals[row_j, :]
                 end
 
                 if eta_contribution.eta4_factor != zero(T)
+                    eta4_deriv = derivative_by_param_name[source_group.eta4_term.param_name]
                     @views eta4_deriv[row_i, :] .+= bond_amplitude * eta_contribution.eta4_factor .* base_orbitals[row_j, :]
                 end
 
-                # Mark epsilon terms owned by this group as active for this row.
-                if eta_contribution.coefficient != zero(T) && haskey(group_to_epsilon_indices, source_group.group_name)
-                    for epsilon_index in group_to_epsilon_indices[source_group.group_name]
-                        epsilon_active_rows[epsilon_index][row_i] = true
+                if eta_contribution.coefficient != zero(T)
+                    for epsilon_term in row_epsilon_terms
+                        if source_group.group_name in epsilon_term.group_names
+                            epsilon_active_rows_by_param_name[epsilon_term.param_name][row_i] = true
+                        end
                     end
                 end
             end
         end
-
-        push!(eta1_deriv_array, eta1_deriv)
-        push!(eta2_deriv_array, eta2_deriv)
-        push!(eta3_deriv_array, eta3_deriv)
-        push!(eta4_deriv_array, eta4_deriv)
-        push!(eta1_param_names, source_group.eta1_term.param_name)
-        push!(eta2_param_names, source_group.eta2_term.param_name)
-        push!(eta3_param_names, source_group.eta3_term.param_name)
-        push!(eta4_param_names, source_group.eta4_term.param_name)
     end
 
-    # Build the full derivative pairs list in term order:
-    # epsilon terms first, then eta1/eta2/eta3/eta4 for each group.
-    derivative_pairs = Pair{Symbol,Matrix{T}}[]
-
-    for (epsilon_index, epsilon_term) in enumerate(backflow_term.epsilon_terms)
-        epsilon_deriv = zeros(T, size(base_orbitals))
-        active_mask = epsilon_active_rows[epsilon_index]
-        for row_i in eachindex(active_mask)
+    for epsilon_term in Iterators.filter(term -> term isa BackflowEpsilonTerm, backflow_term.terms)
+        epsilon_deriv = derivative_by_param_name[epsilon_term.param_name]
+        active_mask = epsilon_active_rows_by_param_name[epsilon_term.param_name]
+        for row_i in 1:n_rows
             if active_mask[row_i]
                 copyto!(@view(epsilon_deriv[row_i, :]), @view(base_orbitals[row_i, :]))
             end
         end
-        push!(derivative_pairs, epsilon_term.param_name => epsilon_deriv)
     end
 
-    for sg_idx in eachindex(backflow_term.source_groups)
-        push!(derivative_pairs, eta1_param_names[sg_idx] => eta1_deriv_array[sg_idx])
-        push!(derivative_pairs, eta2_param_names[sg_idx] => eta2_deriv_array[sg_idx])
-        push!(derivative_pairs, eta3_param_names[sg_idx] => eta3_deriv_array[sg_idx])
-        push!(derivative_pairs, eta4_param_names[sg_idx] => eta4_deriv_array[sg_idx])
+    derivative_pairs = Pair{Symbol,Matrix{T}}[]
+    for correction_term in backflow_term.terms
+        push!(derivative_pairs, correction_term.param_name => derivative_by_param_name[correction_term.param_name])
     end
 
     return derivative_pairs

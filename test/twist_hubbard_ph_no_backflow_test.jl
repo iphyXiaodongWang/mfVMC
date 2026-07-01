@@ -3,6 +3,30 @@ using LinearAlgebra
 
 include(joinpath(@__DIR__, "..", "twist_Hubbard_PH.jl"))
 
+function parse_with_temporary_args(parse_func, temporary_args::Vector{String})
+    saved_args = copy(ARGS)
+    empty!(ARGS)
+    append!(ARGS, temporary_args)
+    try
+        return parse_func()
+    finally
+        empty!(ARGS)
+        append!(ARGS, saved_args)
+    end
+end
+
+@testset "twist Hubbard timing flag defaults off and can be enabled" begin
+    nonph_default_args = parse_with_temporary_args(parse_twist_commandline, String[])
+    ph_default_args = parse_with_temporary_args(parse_twist_ph_commandline, String[])
+    nonph_enabled_args = parse_with_temporary_args(parse_twist_commandline, ["--enable_timing", "true"])
+    ph_enabled_args = parse_with_temporary_args(parse_twist_ph_commandline, ["--enable_timing", "true"])
+
+    @test nonph_default_args["enable_timing"] == "false"
+    @test ph_default_args["enable_timing"] == "false"
+    @test parse_twist_bool_flag(nonph_enabled_args["enable_timing"], "--enable_timing")
+    @test parse_twist_bool_flag(ph_enabled_args["enable_timing"], "--enable_timing")
+end
+
 @testset "twist Hubbard PH no-backflow setup" begin
     afm_setup = build_twist_ph_mean_field_parameter_setup(Dict(
         "ansatz" => "AFM",
