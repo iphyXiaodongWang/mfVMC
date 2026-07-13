@@ -17,3 +17,4 @@ mj/
 fig3/
 *.png
 *.mjs
+.codex_tmp/
