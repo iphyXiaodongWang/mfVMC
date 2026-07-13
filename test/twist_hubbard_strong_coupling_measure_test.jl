@@ -10,7 +10,7 @@ struct StrongCouplingTestWaveFunction
     sampler::StrongCouplingTestSampler
 end
 
-@testset "twist Hubbard strong-coupling observables expose numerator and denominator" begin
+@testset "twist Hubbard strong-coupling observables expose local estimators" begin
     observables = definition_twist_observables(
         2,
         2;
@@ -22,26 +22,27 @@ end
     )
 
     expected_keys = [
-        :P_no_doublon,
-        :E_pert_t_proj_num,
-        :E_pert_t_proj_x_num,
-        :E_pert_t_proj_y_num,
-        :E_pert_t_proj_t2_num,
-        :E_pert_J_proj_num,
-        :E_pert_J_proj_x_num,
-        :E_pert_J_proj_y_num,
-        :E_pert_J_proj_t2_num,
+        :E_pert_t_local_proj,
+        :E_pert_t_local_proj_x,
+        :E_pert_t_local_proj_y,
+        :E_pert_t_local_proj_t2,
+        :E_pert_J_local_proj,
+        :E_pert_J_local_proj_x,
+        :E_pert_J_local_proj_y,
+        :E_pert_J_local_proj_t2,
     ]
 
     @test all(key -> haskey(observables, key), expected_keys)
+    @test !haskey(observables, :P_no_doublon)
+    @test !haskey(observables, :E_pert_t_proj_num)
+    @test !haskey(observables, :E_pert_J_proj_num)
 end
 
-@testset "twist Hubbard strong-coupling numerator is zero outside no-doublon sector" begin
+@testset "twist Hubbard local projector only checks requested bond endpoints" begin
     wavefunction = StrongCouplingTestWaveFunction(
-        StrongCouplingTestSampler(Int8[DB, HOLE]),
+        StrongCouplingTestSampler(Int8[DB, HOLE, UP]),
     )
 
-    @test measure_twist_no_doublon_indicator(wavefunction) == 0.0
-    @test measure_twist_projected_hopping_energy_sum([(1, 2)], 1.0, wavefunction) == 0.0
-    @test measure_twist_projected_exchange_energy_sum([(1, 2)], 1.0, 8.0, wavefunction) == 0.0
+    @test measure_twist_local_no_doublon_indicator(wavefunction, 2, 3) == 1.0
+    @test measure_twist_local_no_doublon_indicator(wavefunction, 1, 2) == 0.0
 end

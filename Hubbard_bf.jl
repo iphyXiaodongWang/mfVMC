@@ -216,7 +216,8 @@ end
 
 参数:
 - `ansatz::AbstractString`: `AFM` 或 `Stripe`。
-- `lx, lambda::Int`: x 方向长度和 stripe 周期。
+- `lx::Int`: x 方向长度。
+- `lambda::Real`: stripe 周期, 支持非整数周期。
 - `stripe_center::AbstractString`: `site` 或 `bond`。
 - `mu_uniform, stripe_mu_amp, mz_amp, chi2::Float64`: 初态参数。
 - `stripe_spin_peak_x::Float64`: spin envelope 峰值位置, `NaN` 时使用 `stripe_center`。
@@ -227,7 +228,7 @@ end
 function build_column_nonph_mean_field_parameter_setup(
     ansatz::AbstractString,
     lx::Int,
-    lambda::Int,
+    lambda::Real,
     stripe_center::AbstractString,
     mu_uniform::Float64,
     stripe_mu_amp::Float64,
@@ -842,8 +843,8 @@ function parse_column_bf_commandline()
         arg_type = String
         default = "Stripe"
         "--lambda"
-        arg_type = Int
-        default = 4
+        arg_type = Float64
+        default = 4.0
         "--stripe_center"
         arg_type = String
         default = "site"

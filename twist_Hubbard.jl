@@ -875,25 +875,24 @@ function measure_twist_interaction_charge_spin_energy(
 end
 
 """
-用途: 判断当前 Hubbard 构型是否属于无双占据子空间。
+用途: 判断指定 bond 两端是否属于局域无双占据子空间。
 
 参数:
 - `vwf`: determinant 波函数对象, 需要提供 `vwf.sampler.state`。
+- `site_i, site_j::Int`: 待检查的两个 bond 端点。
 
 返回:
-- `Float64`: 无双占据时返回 `1.0`, 否则返回 `0.0`。
+- `Float64`: 两个端点都不是 `DB` 时返回 `1.0`, 否则返回 `0.0`。
 
 数学公式:
-- `I_no_doublon(C) = prod_i (1 - n_{i,up} n_{i,dn})`。
-- 后续强耦合 numerator 使用 `I_no_doublon(C) * E_eff(C)`。
+- 局域近似只使用 `I_no_doublon_ij(C) = (1 - D_i) * (1 - D_j)`。
+- 这个量不同于严格全局投影 `P0 = prod_l (1 - D_l)`, 适合大尺寸下避免
+  `P0` 稀有事件, 但不等价于完整 `P0 Psi` 条件平均。
 """
-function measure_twist_no_doublon_indicator(vwf)::Float64
-    for site_state in vwf.sampler.state
-        if site_state == DB
-            return 0.0
-        end
-    end
-    return 1.0
+function measure_twist_local_no_doublon_indicator(vwf, site_i::Int, site_j::Int)::Float64
+    state_i = vwf.sampler.state[site_i]
+    state_j = vwf.sampler.state[site_j]
+    return state_i == DB || state_j == DB ? 0.0 : 1.0
 end
 
 """
@@ -935,14 +934,14 @@ function measure_twist_projected_hopping_direction_energy(
 )::Float64
     state_to = vwf.sampler.state[site_to]
     state_from = vwf.sampler.state[site_from]
-    if state_to != HOLE || (state_from & spin) == 0
+    if state_to != HOLE || !is_twist_singly_occupied_state(state_from) || (state_from & spin) == 0
         return 0.0
     end
     return -hopping * real(measure_green(vwf, site_to, site_from, spin))
 end
 
 """
-用途: 计算一组 bond 的一阶强耦合投影 hopping numerator。
+用途: 计算一组 bond 的一阶强耦合局域投影 hopping 近似。
 
 参数:
 - `bonds::Vector{Tuple{Int, Int}}`: 无向代表 bond 列表, 每个 bond 会自动加入两个方向。
@@ -950,23 +949,25 @@ end
 - `vwf`: determinant 波函数对象。
 
 返回:
-- `Float64`: `I_no_doublon(C) * E_t^P(C)` 的当前构型 numerator。
+- `Float64`: `sum_<ij> I_no_doublon_ij(C) * E_t,ij^P(C)` 的当前构型局域估计。
 
 数学公式:
-- `E_t^P(C) = -sum_<ij>,sigma t_ij <P_G(c^dag_i c_j + c^dag_j c_i)P_G>`。
-- 若当前构型存在 doublon, numerator 按约定返回 `0`。
+- 严格 estimator 使用 `P0(C) = prod_l (1 - D_l)`。
+- 局域近似将其替换为 bond-local projector
+  `P0_ij(C) = (1 - D_i) * (1 - D_j)`。
+- hopping 仍要求电子从 singly occupied 站点跳到 hole 站点:
+  `P_G c^dag_i c_j P_G` 只在 `state_i = HOLE`, `state_j = UP/DN` 时非零。
 """
-function measure_twist_projected_hopping_energy_sum(
+function measure_twist_local_projected_hopping_energy_sum(
     bonds::Vector{Tuple{Int,Int}},
     hopping::Float64,
     vwf,
 )::Float64
-    if measure_twist_no_doublon_indicator(vwf) == 0.0
-        return 0.0
-    end
-
     energy = 0.0
     for (site_i, site_j) in bonds
+        if measure_twist_local_no_doublon_indicator(vwf, site_i, site_j) == 0.0
+            continue
+        end
         for spin in (UP, DN)
             energy += measure_twist_projected_hopping_direction_energy(site_i, site_j, spin, hopping, vwf)
             energy += measure_twist_projected_hopping_direction_energy(site_j, site_i, spin, hopping, vwf)
@@ -976,7 +977,7 @@ function measure_twist_projected_hopping_energy_sum(
 end
 
 """
-用途: 计算一组 bond 的二阶强耦合 superexchange numerator。
+用途: 计算一组 bond 的二阶强耦合局域投影 superexchange 近似。
 
 参数:
 - `bonds::Vector{Tuple{Int, Int}}`: 无向代表 bond 列表。
@@ -985,27 +986,29 @@ end
 - `vwf`: determinant 波函数对象。
 
 返回:
-- `Float64`: `I_no_doublon(C) * E_J(C)` 的当前构型 numerator。
+- `Float64`: `sum_<ij> I_no_doublon_ij(C) * E_J,ij(C)` 的当前构型局域估计。
 
 数学公式:
 - `J_ij = 4 * t_ij^2 / U`。
-- `E_J(C) = sum_<ij> J_ij * <S_i dot S_j - 1/4 n_i n_j>`。
-- 只在两个端点都 singly occupied 时贡献; 若当前构型存在 doublon, numerator 返回 `0`。
-- 当 `U = 0` 时强耦合展开不适用, 这里返回 `0` 以保持 observable 有限。
+- `E_J,ij(C) = J_ij * <S_i dot S_j - 1/4 n_i n_j>`。
+- 局域近似只要求 bond 两端不是 doublon; 实际贡献仍要求两端都是 singly occupied。
 """
-function measure_twist_projected_exchange_energy_sum(
+function measure_twist_local_projected_exchange_energy_sum(
     bonds::Vector{Tuple{Int,Int}},
     hopping::Float64,
     onsite_u::Float64,
     vwf,
 )::Float64
-    if measure_twist_no_doublon_indicator(vwf) == 0.0 || hopping == 0.0 || onsite_u == 0.0
+    if hopping == 0.0 || onsite_u == 0.0
         return 0.0
     end
 
     exchange_j = 4.0 * hopping^2 / onsite_u
     energy = 0.0
     for (site_i, site_j) in bonds
+        if measure_twist_local_no_doublon_indicator(vwf, site_i, site_j) == 0.0
+            continue
+        end
         state_i = vwf.sampler.state[site_i]
         state_j = vwf.sampler.state[site_j]
         if is_twist_singly_occupied_state(state_i) && is_twist_singly_occupied_state(state_j)
@@ -1100,48 +1103,47 @@ function definition_twist_observables(
         x_bonds_local = copy(strong_coupling_bonds.x_bonds)
         y_bonds_local = copy(strong_coupling_bonds.y_bonds)
         t2_bonds_local = copy(strong_coupling_bonds.diagonal_bonds)
-        observables[:P_no_doublon] = (model, vwf) -> measure_twist_no_doublon_indicator(vwf)
-        observables[:E_pert_t_proj_x_num] = (model, vwf) -> measure_twist_projected_hopping_energy_sum(
+        observables[:E_pert_t_local_proj_x] = (model, vwf) -> measure_twist_local_projected_hopping_energy_sum(
             x_bonds_local,
             tx,
             vwf,
         )
-        observables[:E_pert_t_proj_y_num] = (model, vwf) -> measure_twist_projected_hopping_energy_sum(
+        observables[:E_pert_t_local_proj_y] = (model, vwf) -> measure_twist_local_projected_hopping_energy_sum(
             y_bonds_local,
             ty,
             vwf,
         )
-        observables[:E_pert_t_proj_t2_num] = (model, vwf) -> measure_twist_projected_hopping_energy_sum(
+        observables[:E_pert_t_local_proj_t2] = (model, vwf) -> measure_twist_local_projected_hopping_energy_sum(
             t2_bonds_local,
             t2,
             vwf,
         )
-        observables[:E_pert_t_proj_num] = (model, vwf) ->
-            observables[:E_pert_t_proj_x_num](model, vwf) +
-            observables[:E_pert_t_proj_y_num](model, vwf) +
-            observables[:E_pert_t_proj_t2_num](model, vwf)
-        observables[:E_pert_J_proj_x_num] = (model, vwf) -> measure_twist_projected_exchange_energy_sum(
+        observables[:E_pert_t_local_proj] = (model, vwf) ->
+            observables[:E_pert_t_local_proj_x](model, vwf) +
+            observables[:E_pert_t_local_proj_y](model, vwf) +
+            observables[:E_pert_t_local_proj_t2](model, vwf)
+        observables[:E_pert_J_local_proj_x] = (model, vwf) -> measure_twist_local_projected_exchange_energy_sum(
             x_bonds_local,
             tx,
             onsite_u,
             vwf,
         )
-        observables[:E_pert_J_proj_y_num] = (model, vwf) -> measure_twist_projected_exchange_energy_sum(
+        observables[:E_pert_J_local_proj_y] = (model, vwf) -> measure_twist_local_projected_exchange_energy_sum(
             y_bonds_local,
             ty,
             onsite_u,
             vwf,
         )
-        observables[:E_pert_J_proj_t2_num] = (model, vwf) -> measure_twist_projected_exchange_energy_sum(
+        observables[:E_pert_J_local_proj_t2] = (model, vwf) -> measure_twist_local_projected_exchange_energy_sum(
             t2_bonds_local,
             t2,
             onsite_u,
             vwf,
         )
-        observables[:E_pert_J_proj_num] = (model, vwf) ->
-            observables[:E_pert_J_proj_x_num](model, vwf) +
-            observables[:E_pert_J_proj_y_num](model, vwf) +
-            observables[:E_pert_J_proj_t2_num](model, vwf)
+        observables[:E_pert_J_local_proj] = (model, vwf) ->
+            observables[:E_pert_J_local_proj_x](model, vwf) +
+            observables[:E_pert_J_local_proj_y](model, vwf) +
+            observables[:E_pert_J_local_proj_t2](model, vwf)
     end
     for x in 1:lx, y in 1:ly
         site = twist_site_index(x, y, ly)
@@ -1286,8 +1288,8 @@ function parse_twist_commandline()
         default = "Stripe"
         "--lambda"
         help = "Assumed stripe length"
-        arg_type = Int
-        default = 4
+        arg_type = Float64
+        default = 4.0
         "--stripe_center"
         help = "Stripe center type, can be 'site' or 'bond'"
         arg_type = String
@@ -2199,15 +2201,14 @@ function main_twist()::Nothing
                 :E_int,
                 :E_int_charge,
                 :E_int_spin,
-                :P_no_doublon,
-                :E_pert_t_proj_num,
-                :E_pert_t_proj_x_num,
-                :E_pert_t_proj_y_num,
-                :E_pert_t_proj_t2_num,
-                :E_pert_J_proj_num,
-                :E_pert_J_proj_x_num,
-                :E_pert_J_proj_y_num,
-                :E_pert_J_proj_t2_num,
+                :E_pert_t_local_proj,
+                :E_pert_t_local_proj_x,
+                :E_pert_t_local_proj_y,
+                :E_pert_t_local_proj_t2,
+                :E_pert_J_local_proj,
+                :E_pert_J_local_proj_x,
+                :E_pert_J_local_proj_y,
+                :E_pert_J_local_proj_t2,
             ],
         )
         if is_root && results !== nothing

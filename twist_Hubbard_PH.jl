@@ -83,7 +83,7 @@ function parse_twist_ph_commandline()
         "--enable_backflow"
         help = "Enable twist Hubbard PH backflow"
         arg_type = String
-        default = "true"
+        default = "false"
         "--enable_timing"
         help = "Enable SR step timing log"
         arg_type = String
@@ -187,7 +187,7 @@ function parse_twist_ph_commandline()
         "--eigen_cutoff"
         help = "SR eigenvalue cutoff"
         arg_type = Float64
-        default = 1.0e-4
+        default = 0.0
         "--init_params_json"
         help = "Path to json file that provides initial parameters"
         arg_type = String
@@ -214,8 +214,8 @@ function parse_twist_ph_commandline()
         default = "Stripe"
         "--lambda"
         help = "Stripe wavelength"
-        arg_type = Int
-        default = 4
+        arg_type = Float64
+        default = 4.0
         "--stripe_center"
         help = "Stripe center type, can be 'site' or 'bond'"
         arg_type = String
@@ -227,11 +227,11 @@ function parse_twist_ph_commandline()
         "--jastrow_dx_max"
         help = "Maximum x displacement for finite-distance Jastrow. Negative means Lx/2."
         arg_type = Int
-        default = -1
+        default = 2
         "--jastrow_dy_max"
         help = "Maximum y displacement for finite-distance Jastrow. Negative means Ly/2."
         arg_type = Int
-        default = -1
+        default = 2
     end
 
     return parse_args(settings)
@@ -1079,15 +1079,14 @@ function main_twist_ph()::Nothing
                 :E_int,
                 :E_int_charge,
                 :E_int_spin,
-                :P_no_doublon,
-                :E_pert_t_proj_num,
-                :E_pert_t_proj_x_num,
-                :E_pert_t_proj_y_num,
-                :E_pert_t_proj_t2_num,
-                :E_pert_J_proj_num,
-                :E_pert_J_proj_x_num,
-                :E_pert_J_proj_y_num,
-                :E_pert_J_proj_t2_num,
+                :E_pert_t_local_proj,
+                :E_pert_t_local_proj_x,
+                :E_pert_t_local_proj_y,
+                :E_pert_t_local_proj_t2,
+                :E_pert_J_local_proj,
+                :E_pert_J_local_proj_x,
+                :E_pert_J_local_proj_y,
+                :E_pert_J_local_proj_t2,
             ],
         )
         if is_root && results !== nothing

@@ -132,8 +132,8 @@ function parse_commandline()
         default = "Stripe"
         "--lambda"
         help = "assuming length of stripe"
-        arg_type = Int
-        default = 4
+        arg_type = Float64
+        default = 4.0
         "--stripe_center"
         help = "Stripe center type, can be 'site' or 'bond'"
         arg_type = String
@@ -211,7 +211,7 @@ end
 
 参数:
 - `lx::Int`: 晶格在 `x` 方向的列数。
-- `lambda::Int`: stripe 电荷调制周期 `λ`。
+- `lambda::Real`: stripe 电荷调制周期 `λ`, 支持非整数周期。
 - `stripe_center::AbstractString`: stripe 中心类型, 支持 `site` 或 `bond`。
 - `mu_uniform::Float64`: 平均 chemical potential `μ`。
 - `stripe_mu_amp::Float64`: 电荷调制振幅 `Δc`。
@@ -235,7 +235,7 @@ end
 """
 function build_stripe_initial_column_params(
     lx::Int,
-    lambda::Int,
+    lambda::Real,
     stripe_center::AbstractString,
     mu_uniform::Float64,
     stripe_mu_amp::Float64,
@@ -244,16 +244,17 @@ function build_stripe_initial_column_params(
     etay_uniform::Float64,
     stripe_spin_peak_x::Float64=NaN,
 )
-    if lambda <= 0
+    lambda_value = Float64(lambda)
+    if lambda_value <= 0
         error("lambda must be positive.")
     end
 
     stripe_center_offset = if isnan(stripe_spin_peak_x)
         get_stripe_center_offset(stripe_center)
     else
-        stripe_spin_peak_x - lambda / 2.0
+        stripe_spin_peak_x - lambda_value / 2.0
     end
-    stripe_wave_vector = 2.0 * pi / lambda
+    stripe_wave_vector = 2.0 * pi / lambda_value
     x_bond_pairing_uniform = etax_uniform
     y_bond_pairing_uniform = etay_uniform
 
