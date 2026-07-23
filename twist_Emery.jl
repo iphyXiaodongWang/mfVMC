@@ -69,6 +69,92 @@ function twist_emery_orbital_coordinate(
 end
 
 """
+用途: 保存 PBC Emery 无 pairing mean-field Hamiltonian 的有限组参数.
+
+字段:
+- `lx, ly::Int`: Cu unit cell 尺寸.
+- `bcx, bcy::Float64`: 跨 x/y 边界 hopping 的实数因子.
+- `chi1_dd, chi1_dp_x, chi1_dp_y, chi1_pp::Float64`: 四类 hopping 振幅.
+- `mu_px, mu_py::Float64`: `p_x/p_y` orbital 的均匀 onsite energy, `mu_d=0` 为固定 gauge.
+- `delta_af_d::Float64`: 仅作用在 Cu d orbital 上的 AFM 振幅.
+- `delta_c_d, delta_c_px, delta_c_py::Float64`: orbital-resolved charge-stripe 振幅.
+- `delta_s_d::Float64`: 仅作用在 Cu d orbital 上的 spin-stripe 振幅.
+- `stripe_wavevector::Float64`: charge stripe wavevector `Q=2π/lambda`.
+- `stripe_center_offset::Float64`: stripe center 的 x 方向 offset.
+"""
+struct TwistEmeryNonPHParams
+    lx::Int
+    ly::Int
+    bcx::Float64
+    bcy::Float64
+    chi1_dd::Float64
+    chi1_dp_x::Float64
+    chi1_dp_y::Float64
+    chi1_pp::Float64
+    mu_px::Float64
+    mu_py::Float64
+    delta_af_d::Float64
+    delta_c_d::Float64
+    delta_c_px::Float64
+    delta_c_py::Float64
+    delta_s_d::Float64
+    stripe_wavevector::Float64
+    stripe_center_offset::Float64
+end
+
+"""
+用途: 构造并验证 PBC Emery 无 pairing mean-field 参数.
+
+参数:
+- 所有 keyword 参数与 `TwistEmeryNonPHParams` 字段同名.
+- `lx, ly::Int`: 必须为正整数.
+- 其余参数均为实数, 默认给出无序态且固定 `chi1_dp_x=1`.
+
+返回:
+- `TwistEmeryNonPHParams`: 转换为 `Float64` 后的不可变参数对象.
+"""
+function TwistEmeryNonPHParams(;
+    lx::Int,
+    ly::Int,
+    bcx::Real=1.0,
+    bcy::Real=1.0,
+    chi1_dd::Real=0.0,
+    chi1_dp_x::Real=1.0,
+    chi1_dp_y::Real=1.0,
+    chi1_pp::Real=0.0,
+    mu_px::Real=0.0,
+    mu_py::Real=0.0,
+    delta_af_d::Real=0.0,
+    delta_c_d::Real=0.0,
+    delta_c_px::Real=0.0,
+    delta_c_py::Real=0.0,
+    delta_s_d::Real=0.0,
+    stripe_wavevector::Real=0.0,
+    stripe_center_offset::Real=0.0,
+)::TwistEmeryNonPHParams
+    twist_emery_n_sites(lx, ly)
+    return TwistEmeryNonPHParams(
+        lx,
+        ly,
+        Float64(bcx),
+        Float64(bcy),
+        Float64(chi1_dd),
+        Float64(chi1_dp_x),
+        Float64(chi1_dp_y),
+        Float64(chi1_pp),
+        Float64(mu_px),
+        Float64(mu_py),
+        Float64(delta_af_d),
+        Float64(delta_c_d),
+        Float64(delta_c_px),
+        Float64(delta_c_py),
+        Float64(delta_s_d),
+        Float64(stripe_wavevector),
+        Float64(stripe_center_offset),
+    )
+end
+
+"""
 用途: 构造方向分辨的 PBC Emery Cu-O hopping 代表 bonds.
 
 参数:
@@ -219,6 +305,269 @@ function build_twist_emery_dd_bond_groups(
         push!(y_bonds, EmeryBond(d_site, upper_d_site, hopping * y_factor))
     end
     return (; x_bonds=x_bonds, y_bonds=y_bonds)
+end
+
+"""
+用途: 构造 PBC Emery AFM 或 Stripe 态的无 pairing spinful mean-field Hamiltonian.
+
+数学公式:
+- charge field:
+  `mu_d(x)=-Delta_c_d*cos(Q*(x-x0))`,
+  `mu_px(x)=mu_px-Delta_c_px*cos(Q*(x+1/2-x0))`,
+  `mu_py(x)=mu_py-Delta_c_py*cos(Q*(x-x0))`.
+- Cu spin field:
+  `m_d(x)=Delta_AF_d+Delta_s_d*sin((Q/2)*(x-x0))`.
+- onsite spin splitting:
+  `H_up=mu+(-1)^(x+y)*m`, `H_dn=mu-(-1)^(x+y)*m`.
+
+参数:
+- `params::TwistEmeryNonPHParams`: lattice、boundary、hopping 与有序场参数.
+
+返回:
+- `Hermitian{Float64, Matrix{Float64}}`: 维度为 `2N_sites x 2N_sites` 的
+  实对称 Hamiltonian, spin index 使用现有交错排列 `(site_up, site_down)`.
+"""
+function build_twist_emery_nonph_hamiltonian(
+    params::TwistEmeryNonPHParams,
+)
+    lx = params.lx
+    ly = params.ly
+    n_sites = twist_emery_n_sites(lx, ly)
+    hamiltonian = zeros(Float64, 2 * n_sites, 2 * n_sites)
+
+    dd_groups = build_twist_emery_dd_bond_groups(
+        lx,
+        ly;
+        amplitude=params.chi1_dd,
+        bcx=params.bcx,
+        bcy=params.bcy,
+    )
+    pd_groups = build_twist_emery_pd_bond_groups(
+        lx,
+        ly;
+        amplitude_x=params.chi1_dp_x,
+        amplitude_y=params.chi1_dp_y,
+        bcx=params.bcx,
+        bcy=params.bcy,
+    )
+    pp_bonds = build_twist_emery_pp_bonds(
+        lx,
+        ly;
+        amplitude=params.chi1_pp,
+        bcx=params.bcx,
+        bcy=params.bcy,
+    )
+    all_bonds = vcat(
+        dd_groups.x_bonds,
+        dd_groups.y_bonds,
+        pd_groups.x_bonds,
+        pd_groups.y_bonds,
+        pp_bonds,
+    )
+    for bond in all_bonds
+        add_emery_spinful_hopping!(hamiltonian, bond.i, bond.j, bond.coef)
+    end
+
+    wavevector = params.stripe_wavevector
+    center_offset = params.stripe_center_offset
+    for x in 1:lx, y in 1:ly
+        staggered_sign = Float64((-1)^(x + y))
+        d_site = twist_emery_xyo_to_site_index(x, y, EMERY_ORB_D, lx, ly)
+        px_site = twist_emery_xyo_to_site_index(x, y, EMERY_ORB_PX, lx, ly)
+        py_site = twist_emery_xyo_to_site_index(x, y, EMERY_ORB_PY, lx, ly)
+
+        d_coordinate_x = twist_emery_orbital_coordinate(x, y, EMERY_ORB_D)[1]
+        px_coordinate_x = twist_emery_orbital_coordinate(x, y, EMERY_ORB_PX)[1]
+        py_coordinate_x = twist_emery_orbital_coordinate(x, y, EMERY_ORB_PY)[1]
+        d_charge = -params.delta_c_d * cos(wavevector * (d_coordinate_x - center_offset))
+        px_charge = params.mu_px -
+                    params.delta_c_px * cos(wavevector * (px_coordinate_x - center_offset))
+        py_charge = params.mu_py -
+                    params.delta_c_py * cos(wavevector * (py_coordinate_x - center_offset))
+        d_spin = params.delta_af_d +
+                 params.delta_s_d * sin(0.5 * wavevector * (d_coordinate_x - center_offset))
+
+        add_emery_onsite!(hamiltonian, d_site, d_charge, d_spin, staggered_sign)
+        add_emery_onsite!(hamiltonian, px_site, px_charge, 0.0, staggered_sign)
+        add_emery_onsite!(hamiltonian, py_site, py_charge, 0.0, staggered_sign)
+    end
+    return Hermitian(hamiltonian)
+end
+
+"""
+用途: 构造 PBC Emery mean-field Hamiltonian 对指定优化参数的解析导数.
+
+数学公式:
+- Hamiltonian 对每个有限振幅参数均为线性, 因而
+  `dH/dp = H(p=1, 其余可优化振幅=0, chi1_dp_x=0)`.
+- lattice、boundary、`Q` 与 stripe center 保持不变.
+
+参数:
+- `params::TwistEmeryNonPHParams`: 当前 mean-field 参数和几何信息.
+- `param_name::Symbol`: 支持 `chi1_dp_y`, `chi1_pp`, `chi1_dd`, `mu_px`,
+  `mu_py`, `Delta_AF_d`, `Delta_c_d`, `Delta_c_px`, `Delta_c_py`, `Delta_s_d`.
+
+返回:
+- `Hermitian{Float64, Matrix{Float64}}`: `dH/dp` 解析导数矩阵.
+"""
+function build_twist_emery_nonph_dh_dparam(
+    params::TwistEmeryNonPHParams,
+    param_name::Symbol,
+)
+    supported_names = (
+        :chi1_dp_y,
+        :chi1_pp,
+        :chi1_dd,
+        :mu_px,
+        :mu_py,
+        :Delta_AF_d,
+        :Delta_c_d,
+        :Delta_c_px,
+        :Delta_c_py,
+        :Delta_s_d,
+    )
+    param_name in supported_names ||
+        error("Unsupported twist Emery mean-field parameter $(param_name).")
+
+    return build_twist_emery_nonph_hamiltonian(
+        TwistEmeryNonPHParams(
+            lx=params.lx,
+            ly=params.ly,
+            bcx=params.bcx,
+            bcy=params.bcy,
+            chi1_dd=param_name == :chi1_dd ? 1.0 : 0.0,
+            chi1_dp_x=0.0,
+            chi1_dp_y=param_name == :chi1_dp_y ? 1.0 : 0.0,
+            chi1_pp=param_name == :chi1_pp ? 1.0 : 0.0,
+            mu_px=param_name == :mu_px ? 1.0 : 0.0,
+            mu_py=param_name == :mu_py ? 1.0 : 0.0,
+            delta_af_d=param_name == :Delta_AF_d ? 1.0 : 0.0,
+            delta_c_d=param_name == :Delta_c_d ? 1.0 : 0.0,
+            delta_c_px=param_name == :Delta_c_px ? 1.0 : 0.0,
+            delta_c_py=param_name == :Delta_c_py ? 1.0 : 0.0,
+            delta_s_d=param_name == :Delta_s_d ? 1.0 : 0.0,
+            stripe_wavevector=params.stripe_wavevector,
+            stripe_center_offset=params.stripe_center_offset,
+        ),
+    )
+end
+
+"""
+用途: 从 ArgParse 风格字典中读取参数, 同时兼容 String 和 Symbol key.
+
+参数:
+- `args::AbstractDict`: 参数字典.
+- `name::String`: 参数名.
+
+返回:
+- `Any`: 对应参数值; 参数不存在时抛出错误.
+"""
+function get_twist_emery_argument(args::AbstractDict, name::String)
+    haskey(args, name) && return args[name]
+    symbol_name = Symbol(name)
+    haskey(args, symbol_name) && return args[symbol_name]
+    error("Missing twist Emery argument $(name).")
+end
+
+"""
+用途: 当显式 mean-field 初值为 `NaN` 时使用物理 one-body 比值作为默认值.
+
+参数:
+- `value::Real`: CLI 给定值.
+- `default_value::Real`: 由物理参数计算的默认值.
+
+返回:
+- `Float64`: 若 `value` 为 `NaN` 则返回 `default_value`, 否则返回 `value`.
+"""
+function twist_emery_value_or_default(value::Real, default_value::Real)::Float64
+    numeric_value = Float64(value)
+    return isnan(numeric_value) ? Float64(default_value) : numeric_value
+end
+
+"""
+用途: 按 AFM 或 Stripe ansatz 生成有限 mean-field 参数名、初值和 stripe 几何.
+
+数学公式:
+- 固定 gauge 为 `chi1_dp_x=1`, 未显式指定时
+  `chi1_dp_y=tpd_y/tpd_x`, `chi1_pp=tpp/tpd_x`,
+  `mu_px=ep_x/tpd_x`, `mu_py=ep_y/tpd_x`.
+- Stripe 使用 `Q=2π/lambda`; `site` center 对应 `x0=0`,
+  `bond` center 对应 `x0=1/2`.
+
+参数:
+- `args::AbstractDict`: 至少包含 lattice、physical one-body、mean-field 初值、
+  `ansatz`, `lambda` 和 `stripe_center`.
+
+返回:
+- `NamedTuple`: `param_names`, `param_values`, `stripe_wavevector`,
+  `stripe_center_offset`.
+"""
+function build_twist_emery_mean_field_parameter_setup(args::AbstractDict)
+    tpd_x = Float64(get_twist_emery_argument(args, "tpd_x"))
+    iszero(tpd_x) && error("tpd_x must be nonzero because chi1_dp_x=1 fixes the mean-field gauge.")
+
+    common_names = [:chi1_dp_y, :chi1_pp, :chi1_dd, :mu_px, :mu_py]
+    common_values = [
+        twist_emery_value_or_default(
+            get_twist_emery_argument(args, "chi1_dp_y"),
+            Float64(get_twist_emery_argument(args, "tpd_y")) / tpd_x,
+        ),
+        twist_emery_value_or_default(
+            get_twist_emery_argument(args, "chi1_pp"),
+            Float64(get_twist_emery_argument(args, "tpp")) / tpd_x,
+        ),
+        Float64(get_twist_emery_argument(args, "chi1_dd")),
+        twist_emery_value_or_default(
+            get_twist_emery_argument(args, "mu_px"),
+            Float64(get_twist_emery_argument(args, "ep_x")) / tpd_x,
+        ),
+        twist_emery_value_or_default(
+            get_twist_emery_argument(args, "mu_py"),
+            Float64(get_twist_emery_argument(args, "ep_y")) / tpd_x,
+        ),
+    ]
+
+    ansatz = lowercase(String(get_twist_emery_argument(args, "ansatz")))
+    if ansatz == "afm"
+        return (
+            param_names=vcat(common_names, [:Delta_AF_d]),
+            param_values=vcat(
+                common_values,
+                [Float64(get_twist_emery_argument(args, "Delta_AF_d"))],
+            ),
+            stripe_wavevector=0.0,
+            stripe_center_offset=0.0,
+        )
+    elseif ansatz == "stripe"
+        stripe_period = Int(get_twist_emery_argument(args, "lambda"))
+        stripe_period > 0 || error("lambda must be positive, got $(stripe_period).")
+        stripe_center = lowercase(String(get_twist_emery_argument(args, "stripe_center")))
+        center_offset = if stripe_center == "site"
+            0.0
+        elseif stripe_center == "bond"
+            0.5
+        else
+            error("stripe_center must be site or bond, got $(stripe_center).")
+        end
+        return (
+            param_names=vcat(
+                common_names,
+                [:Delta_c_d, :Delta_c_px, :Delta_c_py, :Delta_s_d],
+            ),
+            param_values=vcat(
+                common_values,
+                [
+                    Float64(get_twist_emery_argument(args, "Delta_c_d")),
+                    Float64(get_twist_emery_argument(args, "Delta_c_px")),
+                    Float64(get_twist_emery_argument(args, "Delta_c_py")),
+                    Float64(get_twist_emery_argument(args, "Delta_s_d")),
+                ],
+            ),
+            stripe_wavevector=2 * pi / stripe_period,
+            stripe_center_offset=center_offset,
+        )
+    end
+    error("ansatz must be AFM or Stripe, got $(get_twist_emery_argument(args, "ansatz")).")
 end
 
 """
