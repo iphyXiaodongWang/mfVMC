@@ -754,14 +754,17 @@ end
 - `tx, ty::Float64`: x/y 方向最近邻 hopping。
 - `t2::Float64`: 平移不破缺的对角次近邻 hopping。
 - `onsite_u::Float64`: onsite Hubbard 相互作用强度。
+- `nearest_neighbor_v::Float64`: 最近邻 density-density 相互作用强度 `V`; 为零时不创建对应 terms。
 
 返回:
 - `NamedTuple`: 包含 `hopping_terms`, `tx_hopping_terms`, `ty_hopping_terms`,
-  `t2_hopping_terms`, `interaction_terms`, `all_terms`。
+  `t2_hopping_terms`, `onsite_interaction_terms`,
+  `nearest_neighbor_interaction_terms`, `interaction_terms`, `all_terms`。
 
 数学公式:
 - `H_hop = -sum_<ij>,sigma t_ij (c^dag_{i,sigma} c_{j,sigma} + h.c.)`。
-- `H_int = U * sum_i n_{i,up} n_{i,dn}`。
+- `H_int = U * sum_i n_{i,up} n_{i,dn} + V * sum_<ij> n_i n_j`。
+- `n_i = n_{i,up} + n_{i,dn}`。
 """
 function build_twist_hamiltonian_terms(
     lx::Int,
@@ -770,13 +773,16 @@ function build_twist_hamiltonian_terms(
     ty::Float64,
     t2::Float64,
     onsite_u::Float64,
+    ;
+    nearest_neighbor_v::Float64=0.0,
 )
     n_sites = lx * ly
     hopping_bonds = build_twist_nearest_neighbor_bonds(lx, ly)
     tx_hopping_terms = OperatorTerm[]
     ty_hopping_terms = OperatorTerm[]
     t2_hopping_terms = OperatorTerm[]
-    interaction_terms = OperatorTerm[]
+    onsite_interaction_terms = OperatorTerm[]
+    nearest_neighbor_interaction_terms = OperatorTerm[]
 
     for (site_i, site_j) in hopping_bonds.x_bonds
         push!(tx_hopping_terms, OperatorTerm([:cdag_up, :c_up], [site_i, site_j], -tx))
@@ -797,16 +803,27 @@ function build_twist_hamiltonian_terms(
         push!(t2_hopping_terms, OperatorTerm([:cdag_dn, :c_dn], [site_j, site_i], -t2))
     end
     for site_i in 1:n_sites
-        push!(interaction_terms, OperatorTerm([:n_up, :n_dn], [site_i, site_i], onsite_u))
+        push!(onsite_interaction_terms, OperatorTerm([:n_up, :n_dn], [site_i, site_i], onsite_u))
+    end
+    if !iszero(nearest_neighbor_v)
+        for (site_i, site_j) in vcat(hopping_bonds.x_bonds, hopping_bonds.y_bonds)
+            push!(
+                nearest_neighbor_interaction_terms,
+                OperatorTerm([:n, :n], [site_i, site_j], nearest_neighbor_v),
+            )
+        end
     end
 
     hopping_terms = vcat(tx_hopping_terms, ty_hopping_terms, t2_hopping_terms)
+    interaction_terms = vcat(onsite_interaction_terms, nearest_neighbor_interaction_terms)
     all_terms = vcat(hopping_terms, interaction_terms)
     return (;
         hopping_terms=hopping_terms,
         tx_hopping_terms=tx_hopping_terms,
         ty_hopping_terms=ty_hopping_terms,
         t2_hopping_terms=t2_hopping_terms,
+        onsite_interaction_terms=onsite_interaction_terms,
+        nearest_neighbor_interaction_terms=nearest_neighbor_interaction_terms,
         interaction_terms=interaction_terms,
         all_terms=all_terms,
     )
@@ -1028,12 +1045,21 @@ end
 - `ty_hopping_terms::Vector{OperatorTerm}`: y 方向最近邻 hopping 项, 非空时加入 `:E_hop_ty`。
 - `t2_hopping_terms::Vector{OperatorTerm}`: 对角次近邻 hopping 项, 非空时加入 `:E_hop_t2`。
 - `interaction_terms::Vector{OperatorTerm}`: interaction Hamiltonian 项, 非空时加入 `:E_int`。
+- `onsite_interaction_terms::Vector{OperatorTerm}`: onsite `U` 项; 当最近邻 `V` 启用时用于加入 `:E_int_U`。
+- `nearest_neighbor_interaction_terms::Vector{OperatorTerm}`: 最近邻 `V` 项; 非空时加入
+  `:E_int_U` 和 `:E_int_V`。
 - `onsite_u::Float64`: Hubbard onsite 相互作用强度, 用于加入 `:E_int_charge` 和 `:E_int_spin`。
 - `strong_coupling_bonds`: `build_twist_nearest_neighbor_bonds` 返回的 bond 分组。
 - `tx, ty, t2::Float64`: 强耦合投影 hopping 和 `J=4t^2/U` 使用的物理 hopping。
 
 返回:
 - `Dict{Symbol, Function}`: 包含总能量, 可选分项能量, 每个 site 的 `Sz` 和密度 `n`。
+
+说明:
+- `E_int_charge` 与 `E_int_spin` 保持 onsite `U` 的原有分解。
+- 最近邻 `V` 启用时满足 `E_int_U = E_int_charge + E_int_spin` 和
+  `E_int = E_int_U + E_int_V`。
+- `E_pert_J_local_proj_*` 继续使用 `J=4t^2/U`, 不包含 extended Hubbard 的 `V` 修正。
 """
 function definition_twist_observables(
     lx::Int,
@@ -1043,6 +1069,8 @@ function definition_twist_observables(
     ty_hopping_terms::Vector{OperatorTerm}=OperatorTerm[],
     t2_hopping_terms::Vector{OperatorTerm}=OperatorTerm[],
     interaction_terms::Vector{OperatorTerm}=OperatorTerm[],
+    onsite_interaction_terms::Vector{OperatorTerm}=OperatorTerm[],
+    nearest_neighbor_interaction_terms::Vector{OperatorTerm}=OperatorTerm[],
     onsite_u::Float64=0.0,
     strong_coupling_bonds=nothing,
     tx::Float64=0.0,
@@ -1098,6 +1126,20 @@ function definition_twist_observables(
             onsite_u,
             vwf,
         ).spin
+    end
+    if !isempty(nearest_neighbor_interaction_terms)
+        onsite_interaction_terms_local = copy(onsite_interaction_terms)
+        nearest_neighbor_interaction_terms_local = copy(nearest_neighbor_interaction_terms)
+        observables[:E_int_U] = (model, vwf) -> measure_twist_term_energy_sum(
+            onsite_interaction_terms_local,
+            model,
+            vwf,
+        )
+        observables[:E_int_V] = (model, vwf) -> measure_twist_term_energy_sum(
+            nearest_neighbor_interaction_terms_local,
+            model,
+            vwf,
+        )
     end
     if strong_coupling_bonds !== nothing
         x_bonds_local = copy(strong_coupling_bonds.x_bonds)
@@ -1161,6 +1203,40 @@ function definition_twist_observables(
 end
 
 """
+用途: 根据最近邻相互作用 `V` 构造 twist Hubbard measure 的 blocking-binning 字段列表。
+
+参数:
+- `nearest_neighbor_v::Float64`: 最近邻 density-density 相互作用强度。
+
+返回:
+- `Vector{Symbol}`: `run_simulation` 使用的 history observable 名称。`V=0` 时保持
+  原字段集合; `V!=0` 时额外包含 `:E_int_U` 和 `:E_int_V`。
+"""
+function build_twist_measure_history_observables(
+    nearest_neighbor_v::Float64,
+)::Vector{Symbol}
+    interaction_observables = if iszero(nearest_neighbor_v)
+        [:E_int, :E_int_charge, :E_int_spin]
+    else
+        [:E_int, :E_int_U, :E_int_V, :E_int_charge, :E_int_spin]
+    end
+    return vcat(
+        [:E, :E_hop, :E_hop_tx, :E_hop_ty, :E_hop_t2],
+        interaction_observables,
+        [
+            :E_pert_t_local_proj,
+            :E_pert_t_local_proj_x,
+            :E_pert_t_local_proj_y,
+            :E_pert_t_local_proj_t2,
+            :E_pert_J_local_proj,
+            :E_pert_J_local_proj_x,
+            :E_pert_J_local_proj_y,
+            :E_pert_J_local_proj_t2,
+        ],
+    )
+end
+
+"""
 用途: 解析 twist Hubbard 主程序的命令行参数。
 
 参数:
@@ -1202,6 +1278,10 @@ function parse_twist_commandline()
         help = "On-site interaction strength"
         arg_type = Float64
         default = 8.0
+        "--V"
+        help = "Nearest-neighbor density-density interaction strength"
+        arg_type = Float64
+        default = 0.0
         "--bcx"
         help = "Mean-field boundary condition phase in X direction"
         arg_type = Float64
@@ -1939,7 +2019,7 @@ end
 说明:
 - sampler 使用 `config_Hubbard(...; ifPH=false)`, 因此 determinant row 直接对应真实电子轨道。
 - determinant 列数取真实电子数 `N_e = N_sites * (1 + doping)`。
-- 第一版没有 backflow, physical Hamiltonian 也没有次近邻 hopping。
+- physical Hamiltonian 支持 `tx`, `ty`, `t2`, onsite `U` 和可选最近邻 density interaction `V`。
 """
 function main_twist()::Nothing
     args = parse_twist_commandline()
@@ -1956,6 +2036,7 @@ function main_twist()::Nothing
     ty = args["ty"]
     t2 = args["t2"]
     onsite_u = args["U"]
+    nearest_neighbor_v = args["V"]
     target_sz = args["target_sz"]
     doping = args["doping"]
     nmc = args["nMC"]
@@ -2055,7 +2136,15 @@ function main_twist()::Nothing
         active_backflow_param_names=uses_param_subset ? active_backflow_param_names : nothing,
     )
 
-    term_setup = build_twist_hamiltonian_terms(lx, ly, tx, ty, t2, onsite_u)
+    term_setup = build_twist_hamiltonian_terms(
+        lx,
+        ly,
+        tx,
+        ty,
+        t2,
+        onsite_u;
+        nearest_neighbor_v=nearest_neighbor_v,
+    )
     ham = GeneralModel(n_sites, term_setup.all_terms)
 
     electron_count_float = n_sites * (1 + doping)
@@ -2081,6 +2170,7 @@ function main_twist()::Nothing
         println("Initial parameters: $(init_params)")
         println("twist Hubbard nonPH particle numbers: N_up=$(nup), N_down=$(ndn), N_e=$(nelec)")
         println("Nearest-neighbor hopping: tx=$(tx), ty=$(ty)")
+        println("Nearest-neighbor density interaction: V=$(nearest_neighbor_v)")
         println("Backflow enabled: $(mfVMC.Backflow.uses_backflow(backflow))")
         if !isempty(fixed_param_values)
             fixed_param_messages = [
@@ -2185,6 +2275,8 @@ function main_twist()::Nothing
                 ty_hopping_terms=term_setup.ty_hopping_terms,
                 t2_hopping_terms=term_setup.t2_hopping_terms,
                 interaction_terms=term_setup.interaction_terms,
+                onsite_interaction_terms=term_setup.onsite_interaction_terms,
+                nearest_neighbor_interaction_terms=term_setup.nearest_neighbor_interaction_terms,
                 onsite_u=onsite_u,
                 strong_coupling_bonds=hopping_bonds,
                 tx=tx,
@@ -2192,24 +2284,7 @@ function main_twist()::Nothing
                 t2=t2,
             ),
             meas_params;
-            history_observables=[
-                :E,
-                :E_hop,
-                :E_hop_tx,
-                :E_hop_ty,
-                :E_hop_t2,
-                :E_int,
-                :E_int_charge,
-                :E_int_spin,
-                :E_pert_t_local_proj,
-                :E_pert_t_local_proj_x,
-                :E_pert_t_local_proj_y,
-                :E_pert_t_local_proj_t2,
-                :E_pert_J_local_proj,
-                :E_pert_J_local_proj_x,
-                :E_pert_J_local_proj_y,
-                :E_pert_J_local_proj_t2,
-            ],
+            history_observables=build_twist_measure_history_observables(nearest_neighbor_v),
         )
         if is_root && results !== nothing
             means = results[:means]

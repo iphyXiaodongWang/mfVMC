@@ -1,5 +1,6 @@
 using Test
 using LinearAlgebra
+using Random
 
 include(joinpath(@__DIR__, "..", "twist_Hubbard_PH.jl"))
 
@@ -25,6 +26,163 @@ end
     @test ph_default_args["enable_timing"] == "false"
     @test parse_twist_bool_flag(nonph_enabled_args["enable_timing"], "--enable_timing")
     @test parse_twist_bool_flag(ph_enabled_args["enable_timing"], "--enable_timing")
+end
+
+"""
+用途: 构造最近邻 `V` observable 测试使用的小尺寸 non-PH determinant 波函数。
+
+参数:
+- `lx, ly::Int`: 二维晶格尺寸。
+
+返回:
+- `vwf_det`: 已初始化 mean-field 轨道和 identity projector 的测试波函数。
+"""
+function build_twist_v_test_wavefunction(lx::Int, ly::Int)
+    n_sites = lx * ly
+    nelec = n_sites
+    nup = nelec ÷ 2
+    ndn = nelec - nup
+    Random.seed!(20260716)
+    sampler = config_Hubbard(n_sites, nup, ndn; ifPH=false)
+    init_config_Hubbard!(sampler)
+    projector = build_twist_projector(lx, ly, 0.0; jastrow_dx_max=0, jastrow_dy_max=0)
+    projector_names = projector_param_names(projector)
+    vwf = vwf_det(zeros(Float64, 2 * n_sites, nelec), sampler)
+    set_projector!(vwf, projector)
+    update_twist_ansatz!(
+        vwf,
+        vcat([:chi1y, :chi2, :Delta_AF], projector_names),
+        vcat([0.8, -0.2, 0.0], projector_param_values(projector)),
+        lx,
+        ly,
+        1.0,
+        1.0,
+        1.0,
+        0.8,
+        nelec;
+        nparams_proj=length(projector_names),
+    )
+    return vwf
+end
+
+@testset "twist Hubbard nearest-neighbor V command-line parameter" begin
+    default_args = parse_with_temporary_args(parse_twist_commandline, String[])
+    explicit_args = parse_with_temporary_args(parse_twist_commandline, ["--V", "1.5"])
+
+    @test default_args["V"] == 0.0
+    @test explicit_args["V"] == 1.5
+end
+
+@testset "twist Hubbard nearest-neighbor V Hamiltonian terms" begin
+    lx = 4
+    ly = 3
+    onsite_u = 8.0
+    nearest_neighbor_v = 1.25
+    n_sites = lx * ly
+
+    zero_v_setup = build_twist_hamiltonian_terms(lx, ly, 1.0, 0.8, -0.2, onsite_u)
+    finite_v_setup = build_twist_hamiltonian_terms(
+        lx,
+        ly,
+        1.0,
+        0.8,
+        -0.2,
+        onsite_u;
+        nearest_neighbor_v=nearest_neighbor_v,
+    )
+    bonds = build_twist_nearest_neighbor_bonds(lx, ly)
+    expected_nearest_neighbor_bonds = Set(vcat(bonds.x_bonds, bonds.y_bonds))
+    diagonal_bonds = Set(bonds.diagonal_bonds)
+    actual_v_bonds = Set(Tuple(term.sites) for term in finite_v_setup.nearest_neighbor_interaction_terms)
+
+    @test isempty(zero_v_setup.nearest_neighbor_interaction_terms)
+    @test zero_v_setup.interaction_terms == zero_v_setup.onsite_interaction_terms
+    @test length(finite_v_setup.onsite_interaction_terms) == n_sites
+    @test length(finite_v_setup.nearest_neighbor_interaction_terms) == 2 * n_sites
+    @test length(finite_v_setup.interaction_terms) == 3 * n_sites
+    @test all(term.ops == [:n, :n] for term in finite_v_setup.nearest_neighbor_interaction_terms)
+    @test all(term.coef == nearest_neighbor_v for term in finite_v_setup.nearest_neighbor_interaction_terms)
+    @test actual_v_bonds == expected_nearest_neighbor_bonds
+    @test isempty(intersect(actual_v_bonds, diagonal_bonds))
+end
+
+@testset "twist Hubbard nearest-neighbor V interaction observables" begin
+    lx = 4
+    ly = 3
+    onsite_u = 8.0
+    nearest_neighbor_v = 1.25
+    zero_v_setup = build_twist_hamiltonian_terms(lx, ly, 1.0, 0.8, -0.2, onsite_u)
+    finite_v_setup = build_twist_hamiltonian_terms(
+        lx,
+        ly,
+        1.0,
+        0.8,
+        -0.2,
+        onsite_u;
+        nearest_neighbor_v=nearest_neighbor_v,
+    )
+    zero_v_observables = definition_twist_observables(
+        lx,
+        ly;
+        interaction_terms=zero_v_setup.interaction_terms,
+        onsite_interaction_terms=zero_v_setup.onsite_interaction_terms,
+        nearest_neighbor_interaction_terms=zero_v_setup.nearest_neighbor_interaction_terms,
+        onsite_u=onsite_u,
+    )
+    finite_v_observables = definition_twist_observables(
+        lx,
+        ly;
+        interaction_terms=finite_v_setup.interaction_terms,
+        onsite_interaction_terms=finite_v_setup.onsite_interaction_terms,
+        nearest_neighbor_interaction_terms=finite_v_setup.nearest_neighbor_interaction_terms,
+        onsite_u=onsite_u,
+    )
+
+    @test !haskey(zero_v_observables, :E_int_U)
+    @test !haskey(zero_v_observables, :E_int_V)
+    @test haskey(finite_v_observables, :E_int_U)
+    @test haskey(finite_v_observables, :E_int_V)
+
+    vwf = build_twist_v_test_wavefunction(lx, ly)
+    ham = GeneralModel(lx * ly, finite_v_setup.all_terms)
+    site_occupations = [
+        Float64((site_state & UP) != 0) + Float64((site_state & DN) != 0)
+        for site_state in vwf.sampler.state
+    ]
+    bonds = build_twist_nearest_neighbor_bonds(lx, ly)
+    expected_v_energy = nearest_neighbor_v * sum(
+        site_occupations[site_i] * site_occupations[site_j]
+        for (site_i, site_j) in vcat(bonds.x_bonds, bonds.y_bonds)
+    )
+
+    @test finite_v_observables[:E_int_V](ham, vwf) ≈ expected_v_energy
+    @test finite_v_observables[:E_int_U](ham, vwf) ≈
+          finite_v_observables[:E_int_charge](ham, vwf) +
+          finite_v_observables[:E_int_spin](ham, vwf)
+    @test finite_v_observables[:E_int](ham, vwf) ≈
+          finite_v_observables[:E_int_U](ham, vwf) +
+          finite_v_observables[:E_int_V](ham, vwf)
+end
+
+@testset "twist Hubbard V-dependent measurement history and main wiring" begin
+    zero_v_history = build_twist_measure_history_observables(0.0)
+    finite_v_history = build_twist_measure_history_observables(1.25)
+
+    @test :E_int_U ∉ zero_v_history
+    @test :E_int_V ∉ zero_v_history
+    @test :E_int_U ∈ finite_v_history
+    @test :E_int_V ∈ finite_v_history
+    @test length(finite_v_history) == length(zero_v_history) + 2
+
+    nonph_source = read(joinpath(@__DIR__, "..", "twist_Hubbard.jl"), String)
+    @test occursin("nearest_neighbor_v = args[\"V\"]", nonph_source)
+    @test occursin("nearest_neighbor_v=nearest_neighbor_v", nonph_source)
+    @test occursin("onsite_interaction_terms=term_setup.onsite_interaction_terms", nonph_source)
+    @test occursin(
+        "nearest_neighbor_interaction_terms=term_setup.nearest_neighbor_interaction_terms",
+        nonph_source,
+    )
+    @test occursin("history_observables=build_twist_measure_history_observables(nearest_neighbor_v)", nonph_source)
 end
 
 @testset "twist Hubbard PH no-backflow setup" begin
