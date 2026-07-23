@@ -220,3 +220,299 @@ function build_twist_emery_dd_bond_groups(
     end
     return (; x_bonds=x_bonds, y_bonds=y_bonds)
 end
+
+"""
+用途: 构造方向和作用项分组的 PBC Emery physical Hamiltonian terms.
+
+参数:
+- `lx, ly::Int`: Cu unit cell 在 x/y 方向的数量.
+- `tpd_x, tpd_y::Real`: 水平 Cu-p_x 和垂直 Cu-p_y hopping.
+- `tpp::Real`: 各向同性 O-O hopping.
+- `ep_x, ep_y::Real`: p_x/p_y orbital onsite energy.
+- `Udd, Up::Real`: Cu d 和 oxygen p orbital onsite Hubbard interaction.
+- `Vpd_x, Vpd_y::Real`: 水平/垂直 Cu-O density interaction.
+- `Vpp::Real`: O-O density interaction.
+
+返回:
+- `NamedTuple`: 包含十个物理 term groups 和按固定顺序合并的 `all_terms`.
+
+公式:
+- `H_ep = ep_x * sum_{i in px} n_i + ep_y * sum_{i in py} n_i`.
+- `H_U = Udd * sum_{i in d} n_{i,up}n_{i,dn}
+  + Up * sum_{i in p} n_{i,up}n_{i,dn}`.
+- `H_V = Vpd_x * sum_{<d,px>} n_d n_px
+  + Vpd_y * sum_{<d,py>} n_d n_py
+  + Vpp * sum_{<p,p>} n_p n_p`.
+"""
+function build_twist_emery_physical_term_groups(
+    lx::Int,
+    ly::Int;
+    tpd_x::Real,
+    tpd_y::Real,
+    tpp::Real,
+    ep_x::Real,
+    ep_y::Real,
+    Udd::Real,
+    Up::Real,
+    Vpd_x::Real,
+    Vpd_y::Real,
+    Vpp::Real,
+)
+    twist_emery_n_sites(lx, ly)
+    tpd_x_terms = OperatorTerm[]
+    tpd_y_terms = OperatorTerm[]
+    tpp_terms = OperatorTerm[]
+    ep_x_terms = OperatorTerm[]
+    ep_y_terms = OperatorTerm[]
+    udd_terms = OperatorTerm[]
+    up_terms = OperatorTerm[]
+    vpd_x_terms = OperatorTerm[]
+    vpd_y_terms = OperatorTerm[]
+    vpp_terms = OperatorTerm[]
+
+    pd_groups = build_twist_emery_pd_bond_groups(
+        lx,
+        ly;
+        amplitude_x=tpd_x,
+        amplitude_y=tpd_y,
+    )
+    pp_bonds = build_twist_emery_pp_bonds(lx, ly; amplitude=tpp)
+    for bond in pd_groups.x_bonds
+        add_emery_general_model_hopping_terms!(
+            tpd_x_terms,
+            bond.i,
+            bond.j,
+            bond.coef,
+        )
+        push!(
+            vpd_x_terms,
+            OperatorTerm([:n, :n], [bond.i, bond.j], Float64(Vpd_x)),
+        )
+    end
+    for bond in pd_groups.y_bonds
+        add_emery_general_model_hopping_terms!(
+            tpd_y_terms,
+            bond.i,
+            bond.j,
+            bond.coef,
+        )
+        push!(
+            vpd_y_terms,
+            OperatorTerm([:n, :n], [bond.i, bond.j], Float64(Vpd_y)),
+        )
+    end
+    for bond in pp_bonds
+        add_emery_general_model_hopping_terms!(
+            tpp_terms,
+            bond.i,
+            bond.j,
+            bond.coef,
+        )
+        push!(
+            vpp_terms,
+            OperatorTerm([:n, :n], [bond.i, bond.j], Float64(Vpp)),
+        )
+    end
+
+    for x in 1:lx, y in 1:ly
+        d_site = twist_emery_xyo_to_site_index(x, y, EMERY_ORB_D, lx, ly)
+        py_site = twist_emery_xyo_to_site_index(x, y, EMERY_ORB_PY, lx, ly)
+        px_site = twist_emery_xyo_to_site_index(x, y, EMERY_ORB_PX, lx, ly)
+        push!(ep_x_terms, OperatorTerm([:n], [px_site], Float64(ep_x)))
+        push!(ep_y_terms, OperatorTerm([:n], [py_site], Float64(ep_y)))
+        push!(
+            udd_terms,
+            OperatorTerm([:n_up, :n_dn], [d_site, d_site], Float64(Udd)),
+        )
+        push!(
+            up_terms,
+            OperatorTerm([:n_up, :n_dn], [px_site, px_site], Float64(Up)),
+        )
+        push!(
+            up_terms,
+            OperatorTerm([:n_up, :n_dn], [py_site, py_site], Float64(Up)),
+        )
+    end
+
+    all_terms = vcat(
+        tpd_x_terms,
+        tpd_y_terms,
+        tpp_terms,
+        ep_x_terms,
+        ep_y_terms,
+        udd_terms,
+        up_terms,
+        vpd_x_terms,
+        vpd_y_terms,
+        vpp_terms,
+    )
+    return (;
+        tpd_x_terms=tpd_x_terms,
+        tpd_y_terms=tpd_y_terms,
+        tpp_terms=tpp_terms,
+        ep_x_terms=ep_x_terms,
+        ep_y_terms=ep_y_terms,
+        udd_terms=udd_terms,
+        up_terms=up_terms,
+        vpd_x_terms=vpd_x_terms,
+        vpd_y_terms=vpd_y_terms,
+        vpp_terms=vpp_terms,
+        all_terms=all_terms,
+    )
+end
+
+"""
+用途: 用已分组的 physical terms 构造 PBC Emery `GeneralModel`.
+
+参数:
+- `lx, ly::Int`: Cu unit cell 在 x/y 方向的数量.
+- `term_groups`: `build_twist_emery_physical_term_groups` 返回的 NamedTuple.
+
+返回:
+- `GeneralModel`: site 数为 `3 * lx * ly`, terms 为 `term_groups.all_terms`.
+"""
+function build_twist_emery_general_model(
+    lx::Int,
+    ly::Int,
+    term_groups,
+)::GeneralModel
+    return GeneralModel(twist_emery_n_sites(lx, ly), term_groups.all_terms)
+end
+
+"""
+用途: 计算一组 PBC Emery physical terms 在当前 VMC 构型上的 local energy 之和.
+
+参数:
+- `terms::Vector{OperatorTerm}`: 同一 physical 分量的 operator terms.
+- `model`: 当前 `GeneralModel`.
+- `vwf`: 当前 determinant 波函数.
+
+返回:
+- `Float64`: `sum_a Re[E_local(term_a)]`.
+"""
+function measure_twist_emery_term_energy_sum(
+    terms::Vector{OperatorTerm},
+    model,
+    vwf,
+)::Float64
+    energy = 0.0
+    for term in terms
+        energy += real(mfVMC.Model.compute_term_energy(term, vwf))
+    end
+    return energy
+end
+
+"""
+用途: 返回 PBC Emery 中所有 Cu d sites 及其整数 unit-cell 坐标.
+
+参数:
+- `lx, ly::Int`: Cu unit cell 在 x/y 方向的数量.
+
+返回:
+- `Vector{Tuple{Int, Int, Int}}`: 每项为 `(site, x, y)`.
+"""
+function build_twist_emery_cu_site_coordinates(
+    lx::Int,
+    ly::Int,
+)::Vector{Tuple{Int,Int,Int}}
+    coordinates = Tuple{Int,Int,Int}[]
+    sizehint!(coordinates, lx * ly)
+    for x in 1:lx, y in 1:ly
+        push!(
+            coordinates,
+            (
+                twist_emery_xyo_to_site_index(x, y, EMERY_ORB_D, lx, ly),
+                x,
+                y,
+            ),
+        )
+    end
+    return coordinates
+end
+
+"""
+用途: 构造 PBC Emery measure 使用的能量、局域密度/自旋和 Cu `Szz(q)` observables.
+
+参数:
+- `lx, ly::Int`: Cu unit cell 在 x/y 方向的数量.
+- `term_groups`: `build_twist_emery_physical_term_groups` 返回的 physical term groups.
+
+返回:
+- `Dict{Symbol, Function}`: 固定包含总能量、十个能量分项、所有 orbital 的
+  `n/Sz` 和全部 Cu momentum index 的 `Szzq`.
+"""
+function build_twist_emery_observables(
+    lx::Int,
+    ly::Int,
+    term_groups,
+)::Dict{Symbol,Function}
+    observables = Dict{Symbol,Function}(:E => local_energy)
+    energy_group_specs = (
+        (:E_tpd_x, term_groups.tpd_x_terms),
+        (:E_tpd_y, term_groups.tpd_y_terms),
+        (:E_tpp, term_groups.tpp_terms),
+        (:E_ep_x, term_groups.ep_x_terms),
+        (:E_ep_y, term_groups.ep_y_terms),
+        (:E_Udd, term_groups.udd_terms),
+        (:E_Up, term_groups.up_terms),
+        (:E_Vpd_x, term_groups.vpd_x_terms),
+        (:E_Vpd_y, term_groups.vpd_y_terms),
+        (:E_Vpp, term_groups.vpp_terms),
+    )
+    for (observable_name, terms) in energy_group_specs
+        terms_local = copy(terms)
+        observables[observable_name] = (model, vwf) ->
+            measure_twist_emery_term_energy_sum(terms_local, model, vwf)
+    end
+
+    cu_site_coordinates = build_twist_emery_cu_site_coordinates(lx, ly)
+    for momentum_x in 0:(lx - 1), momentum_y in 0:(ly - 1)
+        momentum_x_local = momentum_x
+        momentum_y_local = momentum_y
+        observable_name = Symbol("Szzq_$(momentum_x_local)_$(momentum_y_local)")
+        observables[observable_name] = (model, vwf) ->
+            measure_emery_cu_szz_structure_factor(
+                vwf,
+                cu_site_coordinates,
+                lx,
+                ly,
+                momentum_x_local,
+                momentum_y_local,
+            )
+    end
+
+    for x in 1:lx, y in 1:ly
+        d_site = twist_emery_xyo_to_site_index(x, y, EMERY_ORB_D, lx, ly)
+        py_site = twist_emery_xyo_to_site_index(x, y, EMERY_ORB_PY, lx, ly)
+        px_site = twist_emery_xyo_to_site_index(x, y, EMERY_ORB_PX, lx, ly)
+        add_emery_site_observables!(observables, "d_$(x)_$(y)", d_site)
+        add_emery_site_observables!(observables, "py_$(x)_$(y)", py_site)
+        add_emery_site_observables!(observables, "px_$(x)_$(y)", px_site)
+    end
+    return observables
+end
+
+"""
+用途: 返回 PBC Emery blocking-binning 使用的固定能量 observable 顺序.
+
+参数:
+- 无.
+
+返回:
+- `Vector{Symbol}`: 总能量后依次为十个方向/作用项分辨的能量字段.
+"""
+function build_twist_emery_history_observables()::Vector{Symbol}
+    return [
+        :E,
+        :E_tpd_x,
+        :E_tpd_y,
+        :E_tpp,
+        :E_ep_x,
+        :E_ep_y,
+        :E_Udd,
+        :E_Up,
+        :E_Vpd_x,
+        :E_Vpd_y,
+        :E_Vpp,
+    ]
+end
