@@ -1435,3 +1435,439 @@ function build_twist_emery_history_observables()::Vector{Symbol}
         :E_Vpp,
     ]
 end
+
+"""
+用途: 解析 PBC twist Emery 无 backflow 计算的命令行参数.
+
+参数:
+- 无, 直接读取全局 `ARGS`.
+
+返回:
+- `Dict{String, Any}`: 包含 lattice、各向异性 physical 参数、AFM/Stripe ansatz、
+  projector、SR/measure、fixed/active 与输出目录设置.
+"""
+function parse_twist_emery_commandline()
+    settings = ArgParseSettings()
+    @add_arg_table settings begin
+        "--Lx"
+        arg_type = Int
+        default = 8
+        "--Ly"
+        arg_type = Int
+        default = 4
+        "--tpd_x"
+        arg_type = Float64
+        default = 1.0
+        "--tpd_y"
+        arg_type = Float64
+        default = 1.0
+        "--tpp"
+        arg_type = Float64
+        default = 0.0
+        "--ep_x"
+        arg_type = Float64
+        default = 3.0
+        "--ep_y"
+        arg_type = Float64
+        default = 3.0
+        "--Udd"
+        arg_type = Float64
+        default = 8.0
+        "--Up"
+        arg_type = Float64
+        default = 0.0
+        "--Vpd_x"
+        arg_type = Float64
+        default = 0.0
+        "--Vpd_y"
+        arg_type = Float64
+        default = 0.0
+        "--Vpp"
+        arg_type = Float64
+        default = 0.0
+        "--bcx"
+        arg_type = Float64
+        default = 1.0
+        "--bcy"
+        arg_type = Float64
+        default = 1.0
+        "--ansatz"
+        arg_type = String
+        default = "Stripe"
+        "--lambda"
+        arg_type = Int
+        default = 4
+        "--stripe_center"
+        arg_type = String
+        default = "site"
+        "--chi1_dp_y"
+        arg_type = Float64
+        default = NaN
+        "--chi1_pp"
+        arg_type = Float64
+        default = NaN
+        "--chi1_dd"
+        arg_type = Float64
+        default = 0.0
+        "--mu_px"
+        arg_type = Float64
+        default = NaN
+        "--mu_py"
+        arg_type = Float64
+        default = NaN
+        "--Delta_AF_d"
+        arg_type = Float64
+        default = 3.0
+        "--Delta_c_d"
+        arg_type = Float64
+        default = 0.0
+        "--Delta_c_px"
+        arg_type = Float64
+        default = 0.0
+        "--Delta_c_py"
+        arg_type = Float64
+        default = 0.0
+        "--Delta_s_d"
+        arg_type = Float64
+        default = 3.0
+        "--g_d"
+        arg_type = Float64
+        default = 1.0
+        "--g_p"
+        arg_type = Float64
+        default = 1.0
+        "--vj_oo"
+        arg_type = Float64
+        default = 0.0
+        "--vj_cuo"
+        arg_type = Float64
+        default = 0.0
+        "--vj_cucu"
+        arg_type = Float64
+        default = 0.0
+        "--target_sz"
+        arg_type = Int
+        default = 0
+        "--doping"
+        arg_type = String
+        default = "0.125"
+        "--nMC"
+        arg_type = Int
+        default = 10000
+        "--wMC"
+        arg_type = Int
+        default = 100
+        "--rMC"
+        arg_type = Int
+        default = 100
+        "--dMC"
+        arg_type = Int
+        default = 1
+        "--seed"
+        arg_type = Int
+        default = 5423
+        "--nSR"
+        arg_type = Int
+        default = 50
+        "--lr"
+        arg_type = Float64
+        default = 0.04
+        "--lr_end"
+        arg_type = Float64
+        default = NaN
+        "--eigen_cutoff"
+        arg_type = Float64
+        default = 0.0
+        "--init_params_json"
+        arg_type = String
+        default = ""
+        "--fixed_params"
+        arg_type = String
+        default = ""
+        "--active_params"
+        arg_type = String
+        default = ""
+        "--job"
+        arg_type = String
+        default = "SR"
+        "--enable_timing"
+        arg_type = String
+        default = "false"
+        "--output_dir"
+        arg_type = String
+        default = "logs"
+    end
+    return parse_args(settings)
+end
+
+"""
+用途: 运行 PBC twist Emery 无 backflow 的 AFM/Stripe SR 或 measure 主流程.
+
+实现约定:
+- physical Hamiltonian 在 x/y 方向均为严格 PBC, 不乘 `bcx/bcy`.
+- mean-field 跨边界 hopping 分别乘实数 `bcx/bcy`.
+- mean-field gauge 固定 `chi1_dp_x=1`, projector 固定包含
+  `g_d,g_p,vj_oo,vj_cuo,vj_cucu`.
+- `active_params` 只控制 SR 导数和更新维度, `fixed_params` 的值始终保留在完整 ansatz.
+
+参数:
+- 无, 所有配置由 `parse_twist_emery_commandline()` 从 `ARGS` 读取.
+
+返回:
+- `nothing`: 输出写入 `output_dir`; SR 生成 history/min_params, measure 生成
+  分项能量与局域 observable 的 JSON/blocking 文件.
+"""
+function main_twist_emery()::Nothing
+    args = parse_twist_emery_commandline()
+    enable_timing = parse_column_bool_flag(
+        args["enable_timing"],
+        "--enable_timing",
+    )
+    ENABLE_TIMING[] = enable_timing
+    enable_timing && timing_reset!()
+
+    session = init_mpi_session()
+    rank = session.rank
+    is_root = rank == session.root
+    lx = args["Lx"]
+    ly = args["Ly"]
+    n_sites = twist_emery_n_sites(lx, ly)
+    doping = parse_column_doping_value(args["doping"], "--doping")
+    electron_count = compute_emery_electron_count(lx, ly, doping)
+    target_sz = args["target_sz"]
+    (target_sz + electron_count) % 2 == 0 ||
+        error("target_sz and electron count must have the same parity.")
+    nup = (electron_count + target_sz) ÷ 2
+    ndn = electron_count - nup
+    if nup < 0 || ndn < 0 || nup > n_sites || ndn > n_sites
+        error(
+            "Invalid particle numbers: N_up=$(nup), N_down=$(ndn), N_sites=$(n_sites).",
+        )
+    end
+
+    mean_field_setup = build_twist_emery_mean_field_parameter_setup(args)
+    wf_param_names = mean_field_setup.param_names
+    wf_init_params = mean_field_setup.param_values
+    projector = build_twist_emery_density_jastrow_projector(
+        lx,
+        ly;
+        g_d=args["g_d"],
+        g_p=args["g_p"],
+        vj_oo=args["vj_oo"],
+        vj_cuo=args["vj_cuo"],
+        vj_cucu=args["vj_cucu"],
+    )
+    projector_param_name_list = projector_param_names(projector)
+    projector_init_params = projector_param_values(projector)
+    nparams_wf = length(wf_param_names)
+    nparams_proj = length(projector_param_name_list)
+    param_names = vcat(wf_param_names, projector_param_name_list)
+    init_params = vcat(wf_init_params, projector_init_params)
+
+    if !isempty(args["init_params_json"])
+        init_params = build_twist_emery_init_params_from_json_with_defaults(
+            args["init_params_json"],
+            param_names,
+            init_params,
+        )
+    end
+    fixed_param_values = parse_twist_emery_fixed_param_string(
+        args["fixed_params"],
+    )
+    requested_active_param_names = parse_twist_emery_param_name_list(
+        args["active_params"],
+    )
+    init_params = apply_twist_emery_fixed_params_to_values(
+        param_names,
+        init_params,
+        fixed_param_values,
+    )
+    active_param_indices = build_twist_emery_active_param_indices(
+        param_names,
+        fixed_param_values,
+        requested_active_param_names,
+    )
+    uses_param_subset = active_param_indices != collect(eachindex(param_names))
+    active_param_names = param_names[active_param_indices]
+    active_init_params = init_params[active_param_indices]
+    active_wf_param_names = [
+        param_names[index]
+        for index in active_param_indices
+        if index <= nparams_wf
+    ]
+    active_projector_param_names = [
+        param_names[index]
+        for index in active_param_indices
+        if index > nparams_wf
+    ]
+    set_active_twist_emery_projector_derivative_param_names!(
+        projector_param_name_list;
+        active_projector_param_names=uses_param_subset ?
+            active_projector_param_names :
+            nothing,
+    )
+
+    physical_term_groups = build_twist_emery_physical_term_groups(
+        lx,
+        ly;
+        tpd_x=args["tpd_x"],
+        tpd_y=args["tpd_y"],
+        tpp=args["tpp"],
+        ep_x=args["ep_x"],
+        ep_y=args["ep_y"],
+        Udd=args["Udd"],
+        Up=args["Up"],
+        Vpd_x=args["Vpd_x"],
+        Vpd_y=args["Vpd_y"],
+        Vpp=args["Vpp"],
+    )
+    hamiltonian = build_twist_emery_general_model(
+        lx,
+        ly,
+        physical_term_groups,
+    )
+    sampler = config_Hubbard(n_sites, nup, ndn; ifPH=false)
+    init_config_Hubbard!(sampler)
+    vwf = vwf_det(
+        zeros(Float64, 2 * n_sites, electron_count),
+        sampler,
+    )
+    set_projector!(vwf, projector)
+    kernel = HubbardKernel(conserve_sz=true)
+
+    derivative_wf_param_names = uses_param_subset ?
+                                active_wf_param_names :
+                                wf_param_names
+    dense_derivative_workspace = isempty(derivative_wf_param_names) ?
+                                 nothing :
+                                 setup_emery_dense_derivative_workspace(
+        session,
+        electron_count,
+        2 * n_sites,
+        length(derivative_wf_param_names),
+    )
+    update_twist_emery_ansatz!(
+        vwf,
+        param_names,
+        init_params,
+        lx,
+        ly,
+        args["bcx"],
+        args["bcy"],
+        electron_count;
+        nparams_proj=nparams_proj,
+        stripe_wavevector=mean_field_setup.stripe_wavevector,
+        stripe_center_offset=mean_field_setup.stripe_center_offset,
+        active_wf_param_names=derivative_wf_param_names,
+        dense_derivative_workspace=dense_derivative_workspace,
+    )
+
+    output_dir = args["output_dir"]
+    mkpath(output_dir)
+    measurement_params = VMCParams(
+        total_samples=args["nMC"],
+        warmup_steps=args["wMC"],
+        rebuild_every=args["rMC"],
+        decorr_steps=args["dMC"],
+        seed=args["seed"] + rank,
+    )
+    job = lowercase(args["job"])
+    if is_root
+        println(
+            "twist Emery: ansatz=$(args["ansatz"]), Lx=$(lx), Ly=$(ly), " *
+            "N_up=$(nup), N_down=$(ndn), output_dir=$(output_dir)",
+        )
+        println("Full initial parameters: $(Dict(zip(param_names, init_params)))")
+        println("Active parameters: $(active_param_names)")
+    end
+
+    if job == "sr"
+        isempty(active_param_indices) &&
+            error("SR requires at least one active parameter.")
+        learning_rate = args["lr"]
+        final_learning_rate = isnan(args["lr_end"]) ?
+                              learning_rate :
+                              args["lr_end"]
+        sr_params = SRParams(
+            vmc_params=measurement_params,
+            n_steps=args["nSR"],
+            lr=learning_rate,
+            eigen_cutoff=args["eigen_cutoff"],
+        )
+        learning_rate_function = build_exponential_lr_func(
+            learning_rate,
+            final_learning_rate,
+            args["nSR"],
+        )
+        update_vwf_function! = (wavefunction, active_values) -> begin
+            full_values = uses_param_subset ?
+                          merge_twist_emery_active_params_into_full(
+                init_params,
+                active_param_indices,
+                active_values,
+            ) :
+                          active_values
+            update_twist_emery_ansatz!(
+                wavefunction,
+                param_names,
+                full_values,
+                lx,
+                ly,
+                args["bcx"],
+                args["bcy"],
+                electron_count;
+                nparams_proj=nparams_proj,
+                stripe_wavevector=mean_field_setup.stripe_wavevector,
+                stripe_center_offset=mean_field_setup.stripe_center_offset,
+                active_wf_param_names=derivative_wf_param_names,
+                dense_derivative_workspace=dense_derivative_workspace,
+            )
+        end
+        run_sr_optimization(
+            hamiltonian,
+            vwf,
+            kernel,
+            active_init_params,
+            update_vwf_function!,
+            sr_params;
+            log_file=joinpath(output_dir, "sr_history.txt"),
+            param_names=active_param_names,
+            lr_func=learning_rate_function,
+        )
+        if is_root
+            extract_min_energy(joinpath(output_dir, "sr_history.txt"))
+            append_twist_emery_inactive_params_to_json!(
+                joinpath(output_dir, "min_params.json"),
+                param_names,
+                init_params,
+                active_param_indices,
+            )
+        end
+    elseif job == "measure"
+        results = run_simulation(
+            hamiltonian,
+            vwf,
+            kernel,
+            build_twist_emery_observables(lx, ly, physical_term_groups),
+            measurement_params;
+            history_observables=build_twist_emery_history_observables(),
+        )
+        if is_root && results !== nothing
+            write_column_measure_outputs(output_dir, results)
+        end
+    else
+        error("job must be SR or measure, got $(args["job"]).")
+    end
+
+    if enable_timing && is_root
+        timing_report()
+        open(joinpath(output_dir, "timing_report.txt"), "w") do io
+            timing_report(io)
+        end
+    end
+    return nothing
+end
+
+if abspath(PROGRAM_FILE) == @__FILE__
+    main_twist_emery()
+end

@@ -4,6 +4,67 @@ using Random
 
 include(joinpath(@__DIR__, "..", "twist_Emery.jl"))
 
+"""
+用途: 在测试中临时替换全局 `ARGS` 并调用命令行解析函数.
+
+参数:
+- `parse_function::Function`: 无参数的命令行解析函数.
+- `temporary_args::Vector{String}`: 临时 CLI 参数.
+
+返回:
+- `Any`: 解析函数返回值; 无论成功或异常都会恢复原始 `ARGS`.
+"""
+function parse_twist_emery_with_temporary_args(
+    parse_function::Function,
+    temporary_args::Vector{String},
+)
+    saved_args = copy(ARGS)
+    empty!(ARGS)
+    append!(ARGS, temporary_args)
+    try
+        return parse_function()
+    finally
+        empty!(ARGS)
+        append!(ARGS, saved_args)
+    end
+end
+
+@testset "twist Emery command-line defaults and anisotropy" begin
+    default_args = parse_twist_emery_with_temporary_args(
+        parse_twist_emery_commandline,
+        String[],
+    )
+    explicit_args = parse_twist_emery_with_temporary_args(
+        parse_twist_emery_commandline,
+        [
+            "--tpd_x",
+            "1.2",
+            "--tpd_y",
+            "0.7",
+            "--ep_x",
+            "3.4",
+            "--ep_y",
+            "2.8",
+            "--Vpd_x",
+            "1.1",
+            "--Vpd_y",
+            "0.6",
+            "--output_dir",
+            "custom_output",
+        ],
+    )
+    @test default_args["ansatz"] == "Stripe"
+    @test default_args["lambda"] isa Int
+    @test default_args["output_dir"] == "logs"
+    @test explicit_args["tpd_x"] == 1.2
+    @test explicit_args["tpd_y"] == 0.7
+    @test explicit_args["ep_x"] == 3.4
+    @test explicit_args["ep_y"] == 2.8
+    @test explicit_args["Vpd_x"] == 1.1
+    @test explicit_args["Vpd_y"] == 0.6
+    @test explicit_args["output_dir"] == "custom_output"
+end
+
 @testset "twist Emery PBC site mapping and coordinates" begin
     lx = 3
     ly = 2
