@@ -2,6 +2,9 @@
 
 include(joinpath(@__DIR__, "Emery.jl"))
 
+const ACTIVE_TWIST_EMERY_PROJECTOR_DERIVATIVE_PARAM_NAMES =
+    Ref{Union{Nothing,Vector{Symbol}}}(nothing)
+
 """
 用途: 返回 x/y 双向 PBC Emery 三带模型的总 site 数.
 
@@ -453,6 +456,181 @@ function build_twist_emery_nonph_dh_dparam(
 end
 
 """
+用途: 将完整 mean-field 参数名和值转换为 `TwistEmeryNonPHParams`.
+
+参数:
+- `wf_param_names::Vector{Symbol}`: AFM 或 Stripe mean-field 参数名.
+- `wf_param_values::Vector{Float64}`: 与名称对齐的参数值.
+- `lx, ly::Int`: Cu unit cell 尺寸.
+- `bcx, bcy::Float64`: mean-field 边界条件.
+- `stripe_wavevector, stripe_center_offset::Float64`: stripe 波矢和中心.
+
+返回:
+- `TwistEmeryNonPHParams`: 固定 `chi1_dp_x=1` 的参数对象.
+"""
+function build_twist_emery_nonph_params_from_wf_params(
+    wf_param_names::Vector{Symbol},
+    wf_param_values::Vector{Float64},
+    lx::Int,
+    ly::Int,
+    bcx::Float64,
+    bcy::Float64;
+    stripe_wavevector::Real=0.0,
+    stripe_center_offset::Real=0.0,
+)::TwistEmeryNonPHParams
+    length(wf_param_names) == length(wf_param_values) ||
+        error("wf_param_names and wf_param_values length mismatch.")
+    supported_names = Set([
+        :chi1_dp_y,
+        :chi1_pp,
+        :chi1_dd,
+        :mu_px,
+        :mu_py,
+        :Delta_AF_d,
+        :Delta_c_d,
+        :Delta_c_px,
+        :Delta_c_py,
+        :Delta_s_d,
+    ])
+    for param_name in wf_param_names
+        param_name in supported_names ||
+            error("Unsupported twist Emery mean-field parameter $(param_name).")
+    end
+    length(unique(wf_param_names)) == length(wf_param_names) ||
+        error("Duplicate twist Emery mean-field parameter names.")
+    param_map = Dict{Symbol,Float64}(zip(wf_param_names, wf_param_values))
+    return TwistEmeryNonPHParams(
+        lx=lx,
+        ly=ly,
+        bcx=bcx,
+        bcy=bcy,
+        chi1_dp_x=1.0,
+        chi1_dp_y=get(param_map, :chi1_dp_y, 0.0),
+        chi1_pp=get(param_map, :chi1_pp, 0.0),
+        chi1_dd=get(param_map, :chi1_dd, 0.0),
+        mu_px=get(param_map, :mu_px, 0.0),
+        mu_py=get(param_map, :mu_py, 0.0),
+        delta_af_d=get(param_map, :Delta_AF_d, 0.0),
+        delta_c_d=get(param_map, :Delta_c_d, 0.0),
+        delta_c_px=get(param_map, :Delta_c_px, 0.0),
+        delta_c_py=get(param_map, :Delta_c_py, 0.0),
+        delta_s_d=get(param_map, :Delta_s_d, 0.0),
+        stripe_wavevector=Float64(stripe_wavevector),
+        stripe_center_offset=Float64(stripe_center_offset),
+    )
+end
+
+"""
+用途: 用完整参数更新 twist Emery determinant、mean-field 导数和 projector.
+
+参数:
+- `vwf`: 无 backflow determinant 波函数.
+- `param_names::Vector{Symbol}`, `params::Vector{Float64}`: 完整 mean-field 后接 projector 参数.
+- `lx, ly::Int`: Cu unit cell 尺寸.
+- `bcx, bcy::Float64`: mean-field 边界条件.
+- `n_occupied_orbitals::Int`: determinant 占据轨道数.
+- `nparams_proj::Int`: 完整向量末尾的 projector 参数数量.
+- `stripe_wavevector, stripe_center_offset::Float64`: Stripe 几何.
+- `active_wf_param_names`: 需要构造导数的 mean-field 子集, `nothing` 表示全部.
+- `dense_derivative_workspace`: MPI dense derivative 共享 workspace 或 `nothing`.
+
+返回:
+- `nothing`: 原地更新 `vwf` 并重新初始化 determinant.
+"""
+function update_twist_emery_ansatz!(
+    vwf,
+    param_names::Vector{Symbol},
+    params::Vector{Float64},
+    lx::Int,
+    ly::Int,
+    bcx::Float64,
+    bcy::Float64,
+    n_occupied_orbitals::Int;
+    nparams_proj::Int=0,
+    stripe_wavevector::Real=0.0,
+    stripe_center_offset::Real=0.0,
+    active_wf_param_names::Union{Nothing,Vector{Symbol}}=nothing,
+    dense_derivative_workspace=nothing,
+)::Nothing
+    length(param_names) == length(params) ||
+        error("param_names and params length mismatch.")
+    0 <= nparams_proj <= length(param_names) ||
+        error("nparams_proj is outside valid range.")
+    mfVMC.Backflow.uses_backflow(vwf.backflow) &&
+        error("twist_Emery.jl first version does not support backflow.")
+
+    nparams_wf = length(param_names) - nparams_proj
+    wf_param_names = param_names[1:nparams_wf]
+    wf_param_values = params[1:nparams_wf]
+    projector_param_names =
+        nparams_proj == 0 ? Symbol[] : param_names[(nparams_wf+1):end]
+    projector_param_values =
+        nparams_proj == 0 ? Float64[] : params[(nparams_wf+1):end]
+    derivative_wf_param_names =
+        active_wf_param_names === nothing ? wf_param_names : active_wf_param_names
+    wf_param_name_set = Set(wf_param_names)
+    for param_name in derivative_wf_param_names
+        param_name in wf_param_name_set ||
+            error("Active mean-field parameter $(param_name) is not in the full list.")
+    end
+
+    nonph_params = build_twist_emery_nonph_params_from_wf_params(
+        wf_param_names,
+        wf_param_values,
+        lx,
+        ly,
+        bcx,
+        bcy;
+        stripe_wavevector=stripe_wavevector,
+        stripe_center_offset=stripe_center_offset,
+    )
+    n_spinful = 2 * twist_emery_n_sites(lx, ly)
+    n_occupied_orbitals <= n_spinful ||
+        error("n_occupied_orbitals exceeds the spinful one-body dimension.")
+
+    dense_ansatz = if isempty(derivative_wf_param_names)
+        dense_derivative_workspace === nothing ||
+            error("Empty active mean-field list requires dense_derivative_workspace=nothing.")
+        eigenvectors = real.(eigen(build_twist_emery_nonph_hamiltonian(nonph_params)).vectors)
+        (
+            U_occ=copy(eigenvectors[:, 1:n_occupied_orbitals]),
+            dUt_tensor=zeros(
+                Float64,
+                n_occupied_orbitals,
+                n_spinful,
+                0,
+            ),
+        )
+    else
+        make_column_emery_dense_tensor_shared(
+            nonph_params;
+            param_names=derivative_wf_param_names,
+            n_occupied_orbitals=n_occupied_orbitals,
+            workspace=dense_derivative_workspace,
+            nspin=n_spinful,
+            build_hamiltonian=params_ref ->
+                Matrix(build_twist_emery_nonph_hamiltonian(params_ref)),
+            build_dh_dparam=(params_ref, param_name) ->
+                Matrix(build_twist_emery_nonph_dh_dparam(params_ref, param_name)),
+        )
+    end
+
+    copyto!(vwf.base_gs_U, dense_ansatz.U_occ)
+    copyto!(vwf.gs_U, dense_ansatz.U_occ)
+    copyto!(vwf.gs_U_t, permutedims(dense_ansatz.U_occ))
+    update_vwf_params!(vwf, derivative_wf_param_names, dense_ansatz.dUt_tensor)
+    if nparams_proj > 0
+        update_vwf_projector_params!(
+            vwf,
+            projector_param_names,
+            projector_param_values,
+        )
+    end
+    init_gswf!(vwf)
+    return nothing
+end
+
+"""
 用途: 从 ArgParse 风格字典中读取参数, 同时兼容 String 和 Symbol key.
 
 参数:
@@ -568,6 +746,287 @@ function build_twist_emery_mean_field_parameter_setup(args::AbstractDict)
         )
     end
     error("ansatz must be AFM or Stripe, got $(get_twist_emery_argument(args, "ansatz")).")
+end
+
+"""
+用途: 解析 twist Emery 固定参数字符串.
+
+参数:
+- `fixed_params_string::AbstractString`: 形如 `"mu_px=2.5,g_d=0.7"` 的逗号分隔字符串.
+
+返回:
+- `Dict{Symbol, Float64}`: 参数名到固定值的映射.
+"""
+function parse_twist_emery_fixed_param_string(
+    fixed_params_string::AbstractString,
+)::Dict{Symbol,Float64}
+    fixed_param_values = Dict{Symbol,Float64}()
+    isempty(strip(fixed_params_string)) && return fixed_param_values
+    for raw_assignment in split(fixed_params_string, ",")
+        assignment = strip(raw_assignment)
+        parts = split(assignment, "=")
+        length(parts) == 2 ||
+            error("Invalid fixed parameter assignment: $(assignment). Expected name=value.")
+        param_name = Symbol(strip(parts[1]))
+        isempty(String(param_name)) && error("Fixed parameter name cannot be empty.")
+        haskey(fixed_param_values, param_name) &&
+            error("Duplicate fixed parameter: $(param_name).")
+        fixed_param_values[param_name] = parse(Float64, strip(parts[2]))
+    end
+    return fixed_param_values
+end
+
+"""
+用途: 解析 twist Emery active 参数名字符串.
+
+参数:
+- `param_names_string::AbstractString`: 形如 `"Delta_c_d,vj_oo"` 的逗号分隔字符串.
+
+返回:
+- `Vector{Symbol}`: active 参数名列表, 空字符串返回空列表.
+"""
+function parse_twist_emery_param_name_list(
+    param_names_string::AbstractString,
+)::Vector{Symbol}
+    isempty(strip(param_names_string)) && return Symbol[]
+    param_names = [Symbol(strip(raw_name)) for raw_name in split(param_names_string, ",")]
+    any(name -> isempty(String(name)), param_names) &&
+        error("Active parameter list contains an empty parameter name.")
+    length(unique(param_names)) == length(param_names) ||
+        error("Active parameter list contains duplicate names: $(param_names).")
+    return param_names
+end
+
+"""
+用途: 从 JSON 文件读取 twist Emery 初始参数, 缺失字段保留当前默认值.
+
+参数:
+- `json_path::AbstractString`: JSON 文件路径.
+- `param_names::Vector{Symbol}`: 完整参数顺序.
+- `default_params::Vector{Float64}`: 对应默认参数值.
+
+返回:
+- `Vector{Float64}`: 按 `param_names` 排列的初始值.
+"""
+function build_twist_emery_init_params_from_json_with_defaults(
+    json_path::AbstractString,
+    param_names::Vector{Symbol},
+    default_params::Vector{Float64},
+)::Vector{Float64}
+    isfile(json_path) || error("JSON file not found: $(json_path)")
+    length(param_names) == length(default_params) ||
+        error("param_names and default_params length mismatch.")
+    raw_dict = JSON.parsefile(json_path)
+    return [
+        haskey(raw_dict, String(param_name)) ?
+        Float64(raw_dict[String(param_name)]) :
+        default_params[index]
+        for (index, param_name) in enumerate(param_names)
+    ]
+end
+
+"""
+用途: 将 fixed 参数值应用到完整初始参数向量.
+
+参数:
+- `param_names::Vector{Symbol}`: 完整参数名列表.
+- `init_params::Vector{Float64}`: 当前初值.
+- `fixed_param_values::Dict{Symbol, Float64}`: fixed 参数映射.
+
+返回:
+- `Vector{Float64}`: 写入 fixed 值后的副本.
+"""
+function apply_twist_emery_fixed_params_to_values(
+    param_names::Vector{Symbol},
+    init_params::Vector{Float64},
+    fixed_param_values::Dict{Symbol,Float64},
+)::Vector{Float64}
+    length(param_names) == length(init_params) ||
+        error("param_names and init_params length mismatch.")
+    param_index_map = Dict(name => index for (index, name) in enumerate(param_names))
+    updated_params = copy(init_params)
+    for (param_name, param_value) in fixed_param_values
+        haskey(param_index_map, param_name) ||
+            error("Unknown fixed parameter $(param_name).")
+        updated_params[param_index_map[param_name]] = param_value
+    end
+    return updated_params
+end
+
+"""
+用途: 根据 fixed/active 设置确定 SR 实际优化参数下标.
+
+参数:
+- `param_names::Vector{Symbol}`: 完整参数名列表.
+- `fixed_param_values::Dict{Symbol, Float64}`: fixed 参数映射.
+- `requested_active_param_names::Vector{Symbol}`: 显式 active 列表; 空列表表示除 fixed 外全部.
+
+返回:
+- `Vector{Int}`: active 参数在完整向量中的 1-based 下标.
+"""
+function build_twist_emery_active_param_indices(
+    param_names::Vector{Symbol},
+    fixed_param_values::Dict{Symbol,Float64},
+    requested_active_param_names::Vector{Symbol}=Symbol[],
+)::Vector{Int}
+    param_index_map = Dict(name => index for (index, name) in enumerate(param_names))
+    for param_name in keys(fixed_param_values)
+        haskey(param_index_map, param_name) ||
+            error("Unknown fixed parameter $(param_name).")
+    end
+    if isempty(requested_active_param_names)
+        return [
+            index
+            for (index, param_name) in enumerate(param_names)
+            if !haskey(fixed_param_values, param_name)
+        ]
+    end
+
+    active_indices = Int[]
+    for param_name in requested_active_param_names
+        haskey(param_index_map, param_name) ||
+            error("Unknown active parameter $(param_name).")
+        haskey(fixed_param_values, param_name) &&
+            error("Parameter $(param_name) cannot be both fixed and active.")
+        push!(active_indices, param_index_map[param_name])
+    end
+    return active_indices
+end
+
+"""
+用途: 将 SR active 参数值合并回完整参数模板.
+
+参数:
+- `full_param_template::Vector{Float64}`: 完整参数模板.
+- `active_param_indices::Vector{Int}`: active 下标.
+- `active_param_values::Vector{Float64}`: 当前 active 值.
+
+返回:
+- `Vector{Float64}`: 合并后的完整参数向量.
+"""
+function merge_twist_emery_active_params_into_full(
+    full_param_template::Vector{Float64},
+    active_param_indices::Vector{Int},
+    active_param_values::Vector{Float64},
+)::Vector{Float64}
+    length(active_param_indices) == length(active_param_values) ||
+        error("active_param_indices and active_param_values length mismatch.")
+    full_param_values = copy(full_param_template)
+    for (active_offset, param_index) in enumerate(active_param_indices)
+        full_param_values[param_index] = active_param_values[active_offset]
+    end
+    return full_param_values
+end
+
+"""
+用途: 将未参与 SR 的 fixed/inactive 参数补写到最优参数 JSON.
+
+参数:
+- `json_path::AbstractString`: `extract_min_energy` 生成的 JSON 文件路径.
+- `full_param_names::Vector{Symbol}`: 完整参数名.
+- `full_param_values::Vector{Float64}`: 完整参数模板值.
+- `active_param_indices::Vector{Int}`: active 参数下标.
+
+返回:
+- `nothing`: 文件不存在时不执行写入.
+"""
+function append_twist_emery_inactive_params_to_json!(
+    json_path::AbstractString,
+    full_param_names::Vector{Symbol},
+    full_param_values::Vector{Float64},
+    active_param_indices::Vector{Int},
+)::Nothing
+    isfile(json_path) || return nothing
+    param_dict = JSON.parsefile(json_path)
+    active_index_set = Set(active_param_indices)
+    for (param_index, param_name) in enumerate(full_param_names)
+        if !(param_index in active_index_set)
+            param_dict[String(param_name)] = full_param_values[param_index]
+        end
+    end
+    open(json_path, "w") do io
+        JSON.print(io, param_dict)
+        println(io)
+    end
+    return nothing
+end
+
+"""
+用途: 设置 SR 中参与导数计算的 twist Emery projector 参数.
+
+参数:
+- `projector_param_names::Vector{Symbol}`: projector 完整参数名.
+- `active_projector_param_names::Union{Nothing, Vector{Symbol}}`: active 子集,
+  `nothing` 表示全部.
+
+返回:
+- `nothing`: 名称重复或不存在时抛出错误.
+"""
+function set_active_twist_emery_projector_derivative_param_names!(
+    projector_param_names::Vector{Symbol};
+    active_projector_param_names::Union{Nothing,Vector{Symbol}}=nothing,
+)::Nothing
+    if active_projector_param_names !== nothing
+        length(unique(active_projector_param_names)) == length(active_projector_param_names) ||
+            error("Duplicate active projector derivative parameters.")
+        available_names = Set(projector_param_names)
+        for param_name in active_projector_param_names
+            param_name in available_names ||
+                error("Unknown active projector derivative parameter $(param_name).")
+        end
+    end
+    ACTIVE_TWIST_EMERY_PROJECTOR_DERIVATIVE_PARAM_NAMES[] =
+        active_projector_param_names === nothing ? nothing : copy(active_projector_param_names)
+    return nothing
+end
+
+"""
+用途: 覆盖 twist Emery 无 backflow SR 的 log-derivative, 只保留 active projector 参数.
+
+数学公式:
+- determinant 参数使用 `O_p=Tr(A^{-1}*dA/dp)`.
+- projector 参数使用 `O_p=d log(P)/dp`.
+
+参数:
+- `vwf::mfVMC.VMC.vwf_det{T}`: determinant 波函数.
+
+返回:
+- `Vector{T}`: mean-field active 参数后接 projector active 参数的导数向量.
+"""
+function mfVMC.VMC.compute_grad_log_psi!(vwf::mfVMC.VMC.vwf_det{T}) where T
+    mfVMC.Backflow.uses_backflow(vwf.backflow) &&
+        error("twist_Emery.jl first version does not support backflow.")
+    ws = mfVMC.VMC.ensure_ws!(vwf)
+    sampler = vwf.sampler
+    wf_param_count = length(vwf.param_keys)
+    projector_param_names_all = mfVMC.Projector.projector_param_names(vwf.projector)
+    active_projector_param_names =
+        ACTIVE_TWIST_EMERY_PROJECTOR_DERIVATIVE_PARAM_NAMES[] === nothing ?
+        projector_param_names_all :
+        ACTIVE_TWIST_EMERY_PROJECTOR_DERIVATIVE_PARAM_NAMES[]
+
+    resize!(ws.grad_buffer, wf_param_count + length(active_projector_param_names))
+    derivative_vector = ws.grad_buffer
+    fill!(derivative_vector, zero(T))
+    if wf_param_count > 0
+        mfVMC.VMC._compute_dense_tensor_gradient!(
+            @view(derivative_vector[1:wf_param_count]),
+            vwf,
+        )
+    end
+
+    if !isempty(active_projector_param_names)
+        full_derivatives = mfVMC.Projector.projector_log_derivative(vwf.projector, sampler)
+        derivative_map = Dict(
+            param_name => T(derivative_value)
+            for (param_name, derivative_value) in
+                zip(projector_param_names_all, full_derivatives)
+        )
+        for (active_offset, param_name) in enumerate(active_projector_param_names)
+            derivative_vector[wf_param_count+active_offset] = derivative_map[param_name]
+        end
+    end
+    return derivative_vector
 end
 
 """
@@ -749,6 +1208,117 @@ function measure_twist_emery_term_energy_sum(
         energy += real(mfVMC.Model.compute_term_energy(term, vwf))
     end
     return energy
+end
+
+"""
+用途: 构造 PBC Emery orbital-resolved Gutzwiller 的 site group 向量.
+
+参数:
+- `lx, ly::Int`: Cu unit cell 尺寸.
+
+返回:
+- `Vector{Int}`: Cu d orbital 属于 group 1, `p_x/p_y` orbital 属于 group 2.
+"""
+function twist_emery_orbital_gutzwiller_group_vector(
+    lx::Int,
+    ly::Int,
+)::Vector{Int}
+    n_sites = twist_emery_n_sites(lx, ly)
+    site_groups = Vector{Int}(undef, n_sites)
+    for x in 1:lx, y in 1:ly
+        site_groups[twist_emery_xyo_to_site_index(x, y, EMERY_ORB_D, lx, ly)] = 1
+        site_groups[twist_emery_xyo_to_site_index(x, y, EMERY_ORB_PX, lx, ly)] = 2
+        site_groups[twist_emery_xyo_to_site_index(x, y, EMERY_ORB_PY, lx, ly)] = 2
+    end
+    return site_groups
+end
+
+"""
+用途: 将 PBC hopping 代表 bonds 转换为去重后的无向 density pairs.
+
+参数:
+- `bonds::Vector{EmeryBond}`: 允许包含相反方向或重复 periodic image 的 bonds.
+
+返回:
+- `Vector{Tuple{Int, Int}}`: 按 `(min(i,j),max(i,j))` 规范化、去重且移除 self-loop 的 pairs.
+"""
+function twist_emery_unique_density_pairs(
+    bonds::Vector{EmeryBond},
+)::Vector{Tuple{Int,Int}}
+    pair_set = Set{Tuple{Int,Int}}()
+    for bond in bonds
+        bond.i == bond.j && continue
+        push!(pair_set, minmax(bond.i, bond.j))
+    end
+    return sort!(collect(pair_set))
+end
+
+"""
+用途: 构造 PBC Emery onsite Gutzwiller 与三类最近邻 density Jastrow projector.
+
+数学公式:
+- `P_G=exp[-g_d*D_d-g_p*D_p]`.
+- `P_J=exp[-vj_oo*sum_<p,p>n_i*n_j-vj_cuo*sum_<d,p>n_i*n_j
+  -vj_cucu*sum_<d,d>n_i*n_j]`.
+
+参数:
+- `lx, ly::Int`: Cu unit cell 尺寸.
+- `g_d, g_p::Real`: Cu d 与共享 oxygen p onsite Gutzwiller 参数.
+- `vj_oo, vj_cuo, vj_cucu::Real`: O-O、Cu-O、Cu-Cu 最近邻 Jastrow 参数.
+
+返回:
+- `CompositeProjector`: 参数固定顺序为
+  `g_d, g_p, vj_oo, vj_cuo, vj_cucu`.
+"""
+function build_twist_emery_density_jastrow_projector(
+    lx::Int,
+    ly::Int;
+    g_d::Real,
+    g_p::Real,
+    vj_oo::Real,
+    vj_cuo::Real,
+    vj_cucu::Real,
+)::CompositeProjector
+    n_sites = twist_emery_n_sites(lx, ly)
+    pd_groups = build_twist_emery_pd_bond_groups(
+        lx,
+        ly;
+        amplitude_x=1.0,
+        amplitude_y=1.0,
+    )
+    dd_groups = build_twist_emery_dd_bond_groups(lx, ly; amplitude=1.0)
+    pp_bonds = build_twist_emery_pp_bonds(lx, ly; amplitude=1.0)
+
+    pd_pairs = twist_emery_unique_density_pairs(
+        vcat(pd_groups.x_bonds, pd_groups.y_bonds),
+    )
+    dd_pairs = twist_emery_unique_density_pairs(
+        vcat(dd_groups.x_bonds, dd_groups.y_bonds),
+    )
+    pp_pairs = twist_emery_unique_density_pairs(pp_bonds)
+
+    return CompositeProjector(AbstractProjectorTerm[
+        SiteGroupGutzwillerProjectorTerm(
+            param_names=[:g_d, :g_p],
+            g_values=[Float64(g_d), Float64(g_p)],
+            site_groups=twist_emery_orbital_gutzwiller_group_vector(lx, ly),
+        ),
+        JastrowProjectorTerm(
+            param_name=:vj_oo,
+            v=Float64(vj_oo),
+            site_to_neighbor_sites=build_emery_jastrow_neighbor_table(n_sites, pp_pairs),
+        ),
+        JastrowProjectorTerm(
+            param_name=:vj_cuo,
+            v=Float64(vj_cuo),
+            site_to_neighbor_sites=build_emery_jastrow_neighbor_table(n_sites, pd_pairs),
+        ),
+        JastrowProjectorTerm(
+            param_name=:vj_cucu,
+            v=Float64(vj_cucu),
+            site_to_neighbor_sites=build_emery_jastrow_neighbor_table(n_sites, dd_pairs),
+        ),
+    ])
 end
 
 """

@@ -473,3 +473,193 @@ end
     @test build_twist_emery_history_observables() ==
           [:E, energy_component_names...]
 end
+
+@testset "twist Emery PBC projector geometry" begin
+    lx = 4
+    ly = 3
+    projector = build_twist_emery_density_jastrow_projector(
+        lx,
+        ly;
+        g_d=0.1,
+        g_p=0.2,
+        vj_oo=0.3,
+        vj_cuo=0.4,
+        vj_cucu=0.5,
+    )
+    @test projector_param_names(projector) ==
+          [:g_d, :g_p, :vj_oo, :vj_cuo, :vj_cucu]
+    @test projector_param_values(projector) ≈ [0.1, 0.2, 0.3, 0.4, 0.5]
+
+    site_groups = twist_emery_orbital_gutzwiller_group_vector(lx, ly)
+    d_site = twist_emery_xyo_to_site_index(1, 1, EMERY_ORB_D, lx, ly)
+    px_site = twist_emery_xyo_to_site_index(1, 1, EMERY_ORB_PX, lx, ly)
+    py_site = twist_emery_xyo_to_site_index(1, 1, EMERY_ORB_PY, lx, ly)
+    @test site_groups[d_site] == 1
+    @test site_groups[px_site] == 2
+    @test site_groups[py_site] == 2
+
+    oo_term = projector.terms[2]
+    cuo_term = projector.terms[3]
+    cucu_term = projector.terms[4]
+    @test length(oo_term.site_to_neighbor_sites[px_site]) == 4
+    @test length(cuo_term.site_to_neighbor_sites[d_site]) == 4
+    @test length(cuo_term.site_to_neighbor_sites[px_site]) == 2
+    @test length(cucu_term.site_to_neighbor_sites[d_site]) == 4
+end
+
+@testset "twist Emery fixed and active parameter pipeline" begin
+    param_names = [
+        :chi1_dp_y,
+        :chi1_pp,
+        :mu_px,
+        :Delta_c_d,
+        :g_d,
+        :vj_oo,
+    ]
+    default_values = [0.8, 0.3, 2.0, 0.2, 0.1, 0.4]
+    fixed_values = parse_twist_emery_fixed_param_string("mu_px=2.5, g_d=0.7")
+    updated_values = apply_twist_emery_fixed_params_to_values(
+        param_names,
+        default_values,
+        fixed_values,
+    )
+    @test updated_values == [0.8, 0.3, 2.5, 0.2, 0.7, 0.4]
+
+    requested_active = parse_twist_emery_param_name_list("Delta_c_d, vj_oo")
+    active_indices = build_twist_emery_active_param_indices(
+        param_names,
+        fixed_values,
+        requested_active,
+    )
+    @test active_indices == [4, 6]
+    @test merge_twist_emery_active_params_into_full(
+        updated_values,
+        active_indices,
+        [0.9, 1.1],
+    ) == [0.8, 0.3, 2.5, 0.9, 0.7, 1.1]
+    @test_throws ErrorException build_twist_emery_active_param_indices(
+        param_names,
+        fixed_values,
+        [:g_d],
+    )
+
+    temporary_path, temporary_io = mktemp()
+    JSON.print(temporary_io, Dict("chi1_pp" => 0.9, "vj_oo" => 1.2))
+    close(temporary_io)
+    json_values = build_twist_emery_init_params_from_json_with_defaults(
+        temporary_path,
+        param_names,
+        default_values,
+    )
+    @test json_values == [0.8, 0.9, 2.0, 0.2, 0.1, 1.2]
+    append_twist_emery_inactive_params_to_json!(
+        temporary_path,
+        param_names,
+        updated_values,
+        [4, 6],
+    )
+    json_output = JSON.parsefile(temporary_path)
+    @test json_output["mu_px"] == 2.5
+    @test json_output["g_d"] == 0.7
+    rm(temporary_path)
+end
+
+@testset "twist Emery active projector derivatives" begin
+    projector_names = [:g_d, :g_p, :vj_oo, :vj_cuo, :vj_cucu]
+    set_active_twist_emery_projector_derivative_param_names!(
+        projector_names;
+        active_projector_param_names=[:g_p, :vj_cucu],
+    )
+    @test ACTIVE_TWIST_EMERY_PROJECTOR_DERIVATIVE_PARAM_NAMES[] ==
+          [:g_p, :vj_cucu]
+    @test_throws ErrorException set_active_twist_emery_projector_derivative_param_names!(
+        projector_names;
+        active_projector_param_names=[:unknown],
+    )
+    set_active_twist_emery_projector_derivative_param_names!(
+        projector_names;
+        active_projector_param_names=nothing,
+    )
+    @test ACTIVE_TWIST_EMERY_PROJECTOR_DERIVATIVE_PARAM_NAMES[] === nothing
+end
+
+@testset "twist Emery ansatz update with active subsets" begin
+    lx = 2
+    ly = 2
+    number_of_sites = twist_emery_n_sites(lx, ly)
+    number_of_electrons = 4
+    sampler = config_Hubbard(number_of_sites, 2, 2; ifPH=false)
+    Random.seed!(20260724)
+    init_config_Hubbard!(sampler)
+    projector = build_twist_emery_density_jastrow_projector(
+        lx,
+        ly;
+        g_d=0.1,
+        g_p=0.2,
+        vj_oo=0.3,
+        vj_cuo=0.4,
+        vj_cucu=0.5,
+    )
+    vwf = vwf_det(zeros(Float64, 2 * number_of_sites, number_of_electrons), sampler)
+    set_projector!(vwf, projector)
+
+    mean_field_names = [
+        :chi1_dp_y,
+        :chi1_pp,
+        :chi1_dd,
+        :mu_px,
+        :mu_py,
+        :Delta_c_d,
+        :Delta_c_px,
+        :Delta_c_py,
+        :Delta_s_d,
+    ]
+    mean_field_values = [0.8, 0.3, 0.0, 2.0, 2.2, 0.1, 0.2, 0.3, 0.4]
+    projector_names = projector_param_names(projector)
+    all_names = vcat(mean_field_names, projector_names)
+    all_values = vcat(mean_field_values, projector_param_values(projector))
+
+    update_twist_emery_ansatz!(
+        vwf,
+        all_names,
+        all_values,
+        lx,
+        ly,
+        -1.0,
+        1.0,
+        number_of_electrons;
+        nparams_proj=length(projector_names),
+        stripe_wavevector=pi,
+        stripe_center_offset=0.5,
+        active_wf_param_names=[:Delta_c_d],
+    )
+    @test vwf.param_keys == [:Delta_c_d]
+    @test size(vwf.dUt_matrix) == (number_of_electrons, 2 * number_of_sites, 1)
+    @test projector_param_values(vwf.projector) ≈ all_values[(end-4):end]
+
+    set_active_twist_emery_projector_derivative_param_names!(
+        projector_names;
+        active_projector_param_names=[:g_d],
+    )
+    update_twist_emery_ansatz!(
+        vwf,
+        all_names,
+        all_values,
+        lx,
+        ly,
+        -1.0,
+        1.0,
+        number_of_electrons;
+        nparams_proj=length(projector_names),
+        stripe_wavevector=pi,
+        stripe_center_offset=0.5,
+        active_wf_param_names=Symbol[],
+    )
+    @test isempty(vwf.param_keys)
+    @test size(vwf.dUt_matrix, 3) == 0
+    @test length(mfVMC.VMC.compute_grad_log_psi!(vwf)) == 1
+    set_active_twist_emery_projector_derivative_param_names!(
+        projector_names;
+        active_projector_param_names=nothing,
+    )
+end
